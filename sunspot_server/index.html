@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Schatten-Visualisierung Debug</title>
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+<style>
+  body, html { margin: 0; padding: 0; height: 100%; }
+  #map { width: 100%; height: 100%; }
+  #info {
+    position: absolute; top: 10px; left: 10px;
+    background: rgba(255,255,255,0.9);
+    padding: 8px 12px; border-radius: 6px;
+    font-family: sans-serif; font-size: 14px;
+    box-shadow: 0 0 4px rgba(0,0,0,0.3);
+    z-index: 999;
+  }
+</style>
+</head>
+<body>
+<div id="info">🕒 Lade Schatten …</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map("map").setView([48.2082, 16.3738], 16);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19,
+  attribution: "&copy; OpenStreetMap"
+}).addTo(map);
+
+const shadowLayer = L.layerGroup().addTo(map);
+const infoBox = document.getElementById("info");
+
+async function loadShadows(hour = 15) {
+  try {
+    const res = await fetch(`/shadow?hour=${hour}`);
+    if (!res.ok) throw new Error(`Serverfehler ${res.status}`);
+    const data = await res.json();
+
+    console.log("Empfangene Schatten:", data);
+
+    shadowLayer.clearLayers();
+    if (!data.shadows || data.shadows.length === 0) {
+      infoBox.innerHTML = "⚠️ Keine Schatten-Daten erhalten";
+      return;
+    }
+
+    // Polygone zeichnen
+    data.shadows.forEach((poly, i) => {
+      if (!poly.coordinates || !poly.coordinates[0]) return;
+
+      const coords = poly.coordinates[0].map(c => [c[1], c[0]]);
+      const polygon = L.polygon(coords, {
+        color: "red",
+        fillColor: "orange",
+        fillOpacity: 0.5,
+        weight: 2
+      }).addTo(shadowLayer);
+
+      // Beim ersten Polygon auf Ausschnitt zoomen
+      if (i === 0) {
+        map.fitBounds(polygon.getBounds());
+      }
+    });
+
+    infoBox.innerHTML = `✅ ${data.shadows.length} Schatten geladen<br>
+      🌞 Azimut: ${data.azimuth.toFixed(1)}°<br>
+      ☀️ Elevation: ${data.elevation.toFixed(1)}°`;
+  } catch (err) {
+    console.error("Fehler beim Laden:", err);
+    infoBox.innerHTML = "❌ Fehler: " + err.message;
+  }
+}
+
+// Beim Start z. B. Stunde 16 laden
+loadShadows(16);
+</script>
+</body>
+</html>

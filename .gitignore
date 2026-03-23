@@ -1,0 +1,13 @@
+# Flutter SDK (local install, not part of the project)
+flutter/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# VS Code
+.vscode/
+
+# Build outputs
+build/
