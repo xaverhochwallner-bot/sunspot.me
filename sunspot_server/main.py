@@ -1,7 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from shapely.geometry import Polygon, MultiPolygon, LineString, mapping
-from shapely.affinity import translate, scale
+from shapely.geometry import Polygon, mapping
+from shapely.ops import unary_union
 from datetime import datetime
 import requests
 import pytz
@@ -11,51 +11,44 @@ import pysolar.solar as ps
 app = Flask(__name__)
 CORS(app)
 
-# 🌍 Standort Wien
-LAT = 48.2082
-LON = 16.3738
-
-# Overpass API (alternativ-Server für Stabilität)
+# Overpass API servers
 OVERPASS_URLS = [
     "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass-api.de/api/interpreter"
 ]
 
+# Cache: key = (lat_rounded, lon_rounded, radius) -> list of (Polygon, height)
+_buildings_cache = {}
+
 
 # ---------------------------------------------------------------------------
-# 🪐 Sonnenposition berechnen
+# Sun position
 # ---------------------------------------------------------------------------
 
-def get_sun_angles(at_time=None):
-    """Berechnet Sonnen-Elevation & Azimuth (lokale Zeit -> UTC)."""
-    tz = pytz.timezone("Europe/Vienna")
-    if at_time is None:
-        at_time = datetime.now(tz)
-    elif at_time.tzinfo is None:
-        at_time = tz.localize(at_time)
+def get_sun_angles(lat, lon, at_time):
     at_time_utc = at_time.astimezone(pytz.utc)
-
-    elevation = ps.get_altitude(LAT, LON, at_time_utc)
-    azimuth = ps.get_azimuth(LAT, LON, at_time_utc)
-
+    elevation = ps.get_altitude(lat, lon, at_time_utc)
+    azimuth = ps.get_azimuth(lat, lon, at_time_utc)
     if elevation < 0:
         elevation = 0
-
     return elevation, azimuth
-    print(f"🌞 Sonne: Elev={elevation:.2f}°, Azim={azimuth:.2f}° ({at_time_utc})")
 
 
 # ---------------------------------------------------------------------------
-# 🏢 Gebäude aus Overpass laden
+# Load buildings from OSM
 # ---------------------------------------------------------------------------
 
-def get_buildings_from_osm():
-    """Lädt Gebäudeumrisse (~100) um Wien Zentrum."""
+def get_buildings_from_osm(lat, lon, radius):
+    cache_key = (round(lat, 3), round(lon, 3), radius)
+    if cache_key in _buildings_cache:
+        print(f"Cache hit for {cache_key}")
+        return _buildings_cache[cache_key]
+
     query = f"""
     [out:json][timeout:60];
     (
-      way["building"](around:500,{LAT},{LON});
+      way["building"](around:{radius},{lat},{lon});
     );
     out body;
     >;
@@ -64,16 +57,12 @@ def get_buildings_from_osm():
 
     for url in OVERPASS_URLS:
         try:
-            print(f"📡 Lade Gebäude aus OpenStreetMap ({url})...")
-            response = requests.post(url, data=query, timeout=60)  # ✅ POST stabiler als GET
-            print("📝 Status:", response.status_code)
-
+            print(f"Fetching buildings from {url} (lat={lat}, lon={lon}, r={radius}m)...")
+            response = requests.post(url, data=query, timeout=60)
             if response.status_code != 200 or not response.text.strip().startswith("{"):
-                print("⚠️ Ungültige Antwort, versuche nächsten Server …")
                 continue
 
             data = response.json()
-
             nodes = {el["id"]: (el["lon"], el["lat"]) for el in data["elements"] if el["type"] == "node"}
             polygons = []
 
@@ -82,86 +71,89 @@ def get_buildings_from_osm():
                     coords = [nodes[nid] for nid in el["nodes"] if nid in nodes]
                     if len(coords) >= 3:
                         height = 10.0
-                        if "tags" in el and "height" in el["tags"]:
+                        if "tags" in el:
                             try:
-                                height = float(el["tags"]["height"].replace("m", ""))
+                                if "height" in el["tags"]:
+                                    height = float(el["tags"]["height"].replace("m", "").strip())
+                                elif "building:levels" in el["tags"]:
+                                    height = float(el["tags"]["building:levels"]) * 3.0
                             except ValueError:
                                 pass
                         polygons.append((Polygon(coords), height))
 
-            print(f"✅ {len(polygons)} Gebäude geladen.")
+            print(f"{len(polygons)} buildings loaded.")
+            _buildings_cache[cache_key] = polygons
             return polygons
 
         except Exception as e:
-            print(f"❌ Fehler bei {url}: {e}")
+            print(f"Error fetching from {url}: {e}")
 
-    print("⚠️ Keine Gebäude erhalten.")
     return []
 
 
-
 # ---------------------------------------------------------------------------
-# 🌤️ Schattenprojektion
+# Shadow projection
 # ---------------------------------------------------------------------------
 
-
-def project_shadow(polygon: Polygon, height: float, elevation_deg: float, azimuth_deg: float):
-    """
-    Erzeugt eine Bodenprojektion eines Gebäudes basierend auf Sonnenhöhe und Azimut.
-    - Kein convex_hull oder union (die erzeugen nur Umrisse)
-    - Stattdessen: geometrische Projektion der oberen Kante auf den Boden
-    """
+def project_shadow(polygon, height, elevation_deg, azimuth_deg):
     try:
         if elevation_deg <= 0 or height <= 0:
             return None
 
-        # Radiant-Umrechnung
-        azimuth = math.radians(azimuth_deg)
+        azimuth   = math.radians(azimuth_deg)
         elevation = math.radians(elevation_deg)
 
-        # Schattenlänge = Höhe / tan(Elevation)
         shadow_length = height / math.tan(elevation)
 
-        # Schattenrichtung (Sonne → gegenüberliegende Seite)
-        dx = -shadow_length * math.sin(azimuth)
-        dy = -shadow_length * math.cos(azimuth)
+        lat_center        = polygon.centroid.y
+        meters_per_deg_lat = 111320.0
+        meters_per_deg_lon = 111320.0 * math.cos(math.radians(lat_center))
+
+        dx = (-shadow_length * math.sin(azimuth)) / meters_per_deg_lon
+        dy = (-shadow_length * math.cos(azimuth)) / meters_per_deg_lat
 
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
 
-        # Das ursprüngliche Polygon repräsentiert das Gebäude-Fundament
-        # Wir verschieben es entlang der Schattenrichtung, um den projizierten Schattenpunkt auf dem Boden zu erhalten
-        shadow_poly = translate(polygon, xoff=dx, yoff=dy)
+        coords = list(polygon.exterior.coords[:-1])  # drop closing duplicate
+        n = len(coords)
+        shadow_coords = [(x + dx, y + dy) for x, y in coords]
 
-        # Verbinde Fundament + Schattenkante (kein ConvexHull, sondern nur Fläche dazwischen)
-        shadow_area = Polygon(list(polygon.exterior.coords) + list(shadow_poly.exterior.coords[::-1]))
+        # Build a quad for each edge of the footprint connecting it to its shadow
+        parts = [polygon, Polygon(shadow_coords)]
+        for i in range(n):
+            j = (i + 1) % n
+            quad = Polygon([coords[i], coords[j], shadow_coords[j], shadow_coords[i]])
+            if quad.is_valid and not quad.is_empty:
+                parts.append(quad)
 
-        return shadow_area.buffer(0)
+        result = unary_union(parts)
+        return result if result.is_valid else result.buffer(0)
 
     except Exception as e:
-        print(f"⚠️ Fehler in project_shadow: {e}")
+        print(f"Shadow projection error: {e}")
         return None
 
 
-
-
 # ---------------------------------------------------------------------------
-# 🌐 API Endpoint
+# API
 # ---------------------------------------------------------------------------
 
 @app.route("/shadow")
 def shadow():
-    """Berechnet Schatten für angegebene Uhrzeit (oder aktuelle)."""
     try:
-        hour_param = request.args.get("hour", type=int)
-        tz = pytz.timezone("Europe/Vienna")
+        lat    = request.args.get("lat",    default=48.2082, type=float)
+        lon    = request.args.get("lon",    default=16.3738, type=float)
+        radius = request.args.get("radius", default=400,     type=int)
+        hour   = request.args.get("hour",   default=None,    type=int)
+
+        tz  = pytz.timezone("Europe/Vienna")
         now = datetime.now(tz)
+        if hour is not None:
+            now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
 
-        if hour_param is not None:
-            now = now.replace(hour=hour_param, minute=0, second=0, microsecond=0)
-
-        elevation, azimuth = get_sun_angles(now)
-        buildings = get_buildings_from_osm()
+        elevation, azimuth = get_sun_angles(lat, lon, now)
+        buildings = get_buildings_from_osm(lat, lon, radius)
 
         shadows = []
         for poly, height in buildings:
@@ -169,24 +161,24 @@ def shadow():
             if sh:
                 shadows.append(mapping(sh))
 
-        print(f"☀️ {now.strftime('%H:%M')} | Elev={elevation:.1f}°, Azim={azimuth:.1f}°, Gebäude={len(buildings)}, Schatten={len(shadows)}")
+        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)} shadows={len(shadows)}")
 
         return jsonify({
-            "time": now.strftime("%H:%M"),
+            "time":      now.strftime("%H:%M"),
             "elevation": elevation,
-            "azimuth": azimuth,
-            "shadows": shadows
+            "azimuth":   azimuth,
+            "shadows":   shadows,
         })
 
     except Exception as e:
-        print(f"❌ Fehler im /shadow Endpoint: {e}")
+        print(f"Error in /shadow: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------
-# 🚀 Start
+# Start
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("🌞 Starte Flask-Server auf http://127.0.0.1:5000 ...")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    print("Starting Flask server on http://127.0.0.1:5000 ...")
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
