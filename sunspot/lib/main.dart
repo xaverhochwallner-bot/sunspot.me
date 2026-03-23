@@ -66,12 +66,17 @@ class _SunMapScreenState extends State<SunMapScreen> {
     setState(() => isLoading = true);
 
     try {
+      final bounds = await _mapController!.getVisibleRegion();
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow'
         '?lat=${_currentCenter.latitude}'
         '&lon=${_currentCenter.longitude}'
         '&radius=$radiusMeters'
-        '&hour=${currentHour.toInt()}',
+        '&hour=${currentHour.toInt()}'
+        '&minLat=${bounds.southwest.latitude}'
+        '&minLon=${bounds.southwest.longitude}'
+        '&maxLat=${bounds.northeast.latitude}'
+        '&maxLon=${bounds.northeast.longitude}',
       );
       debugPrint("Fetching: $uri");
 
@@ -106,18 +111,32 @@ class _SunMapScreenState extends State<SunMapScreen> {
     final ctrl = _mapController;
     if (ctrl == null) return;
 
-    try { await ctrl.removeLayer('dark-fill'); } catch (_) {}
+    try { await ctrl.removeLayer('shadow-fill'); } catch (_) {}
+    try { await ctrl.removeLayer('nodata-fill'); } catch (_) {}
     try { await ctrl.removeSource('dark-area'); } catch (_) {}
 
-    // One unified dark polygon — map shows through as sunlit spots
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: darkAreaGeoJson));
+
+    // Full shadow inside the query circle (sunlit spots show through as holes)
     await ctrl.addLayer(
       'dark-area',
-      'dark-fill',
+      'shadow-fill',
       FillLayerProperties(
         fillColor: '#1a1a1a',
         fillOpacity: 0.82,
       ),
+      filter: ['==', ['get', 'layer'], 'shadow'],
+    );
+
+    // Dim overlay outside the query circle = no data
+    await ctrl.addLayer(
+      'dark-area',
+      'nodata-fill',
+      FillLayerProperties(
+        fillColor: '#1a1a1a',
+        fillOpacity: 0.35,
+      ),
+      filter: ['==', ['get', 'layer'], 'nodata'],
     );
   }
 

@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from shapely.geometry import Polygon, mapping
+from shapely.geometry import Polygon, Point, box as shapely_box, mapping
+from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 from datetime import datetime
 import requests
@@ -171,6 +172,10 @@ def shadow():
         lon    = request.args.get("lon",    default=16.3738, type=float)
         radius = request.args.get("radius", default=400,     type=int)
         hour   = request.args.get("hour",   default=None,    type=int)
+        min_lat = request.args.get("minLat", default=None,   type=float)
+        min_lon = request.args.get("minLon", default=None,   type=float)
+        max_lat = request.args.get("maxLat", default=None,   type=float)
+        max_lon = request.args.get("maxLon", default=None,   type=float)
 
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime.now(tz)
@@ -191,22 +196,45 @@ def shadow():
         building_polys = [p.buffer(0) for p, _ in buildings]
         all_parts = building_polys + shadow_parts
 
+        # Approximate query circle in degrees (used to define "known" area)
+        r_deg = radius / 111320.0
+        query_circle = Point(lon, lat).buffer(r_deg, resolution=64)
+
         if all_parts:
             merged = unary_union(all_parts)
-            # Small buffer to fill gaps between adjacent buildings/shadows (~3m)
             gap_fill = 0.00003
             merged = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
-            # Simplify to reduce vertices and create clean sunspot shapes
             merged = merged.simplify(0.00005, preserve_topology=True)
-            dark_area = mapping(merged)
+            # Sunlit = known area minus shadow
+            sunlit = query_circle.difference(merged)
         else:
-            dark_area = {"type": "GeometryCollection", "geometries": []}
+            # No buildings: entire circle is sunlit
+            sunlit = query_circle
 
-        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)} shadow_parts={len(shadow_parts)}")
+        # Viewport bbox
+        if None not in (min_lat, min_lon, max_lat, max_lon):
+            pad = 0.01
+            dark_bbox = shapely_box(min_lon - pad, min_lat - pad, max_lon + pad, max_lat + pad)
+        else:
+            margin = 0.1
+            dark_bbox = shapely_box(lon - margin, lat - margin, lon + margin, lat + margin)
+
+        sunlit_simple = sunlit.simplify(0.00005, preserve_topology=True)
+
+        # Layer 1: full shadow inside the query circle (dark, no sunlit holes)
+        shadow_geom = orient(query_circle.difference(sunlit_simple), sign=1.0)
+
+        # Layer 2: dim "no data" ring = viewport bbox minus query circle
+        nodata_geom = orient(dark_bbox.difference(query_circle), sign=1.0)
+
+        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)}")
 
         dark_fc = {
             "type": "FeatureCollection",
-            "features": [{"type": "Feature", "geometry": dark_area, "properties": {}}]
+            "features": [
+                {"type": "Feature", "geometry": mapping(shadow_geom), "properties": {"layer": "shadow"}},
+                {"type": "Feature", "geometry": mapping(nodata_geom),  "properties": {"layer": "nodata"}},
+            ]
         }
 
         return jsonify({
