@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter_map/flutter_map.dart';
 import 'package:http/http.dart' as http;
-import 'package:latlong2/latlong.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 void main() {
   runApp(const MyApp());
@@ -33,49 +32,39 @@ class _SunMapScreenState extends State<SunMapScreen> {
   static const String flaskBaseUrl = "http://127.0.0.1:5000";
   static const int radiusMeters = 400;
 
-  final MapController _mapController = MapController();
+  // Clean light 2D style
+  static const String mapStyle =
+      'https://tiles.openfreemap.org/styles/positron';
 
-  List<List<LatLng>> shadowPolygons = [];
+  MaplibreMapController? _mapController;
+  LatLng _currentCenter = const LatLng(48.2082, 16.3738);
+  Timer? _debounceTimer;
+
   double currentHour = DateTime.now().hour.toDouble();
   double currentElevation = 0.0;
   double currentAzimuth = 0.0;
   bool isLoading = false;
+  bool _mapReady = false;
 
-  LatLng _currentCenter = const LatLng(48.2082, 16.3738);
-  Timer? _debounceTimer;
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    super.dispose();
+  }
 
-  // Parse GeoJSON Polygon / MultiPolygon into list of rings
-  List<List<LatLng>> parseGeometry(dynamic geom) {
-    final result = <List<LatLng>>[];
-    if (geom is! Map || geom['coordinates'] == null) return result;
+  void _onMapCreated(MaplibreMapController controller) {
+    _mapController = controller;
+  }
 
-    List<dynamic> rings = [];
-    if (geom['type'] == 'Polygon') {
-      rings = geom['coordinates'] as List;
-    } else if (geom['type'] == 'MultiPolygon') {
-      for (final poly in geom['coordinates'] as List) {
-        rings.addAll(poly as List);
-      }
-    }
-
-    for (final ring in rings) {
-      final points = <LatLng>[];
-      for (final pt in ring as List) {
-        if (pt is List && pt.length >= 2) {
-          final lon = (pt[0] as num).toDouble();
-          final lat = (pt[1] as num).toDouble();
-          if (lat.abs() <= 90 && lon.abs() <= 180) {
-            points.add(LatLng(lat, lon));
-          }
-        }
-      }
-      if (points.isNotEmpty) result.add(points);
-    }
-    return result;
+  Future<void> _onStyleLoaded() async {
+    _mapReady = true;
+    fetchShadows();
   }
 
   Future<void> fetchShadows() async {
+    if (!_mapReady || _mapController == null) return;
     setState(() => isLoading = true);
+
     try {
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow'
@@ -86,54 +75,59 @@ class _SunMapScreenState extends State<SunMapScreen> {
       );
       debugPrint("Fetching: $uri");
 
-      final response = await http.get(uri).timeout(const Duration(seconds: 60));
+      final response =
+          await http.get(uri).timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200 && response.body.isNotEmpty) {
         final data = jsonDecode(response.body);
         final elev = (data['elevation'] as num?)?.toDouble() ?? 0.0;
         final azim = (data['azimuth'] as num?)?.toDouble() ?? 0.0;
 
-        final polygons = <List<LatLng>>[];
-        if (data['shadows'] is List) {
-          for (final s in data['shadows'] as List) {
-            polygons.addAll(parseGeometry(s));
-          }
+        if (data['dark_area'] != null) {
+          await _updateMapLayers(data['dark_area'] as Map<String, dynamic>);
         }
 
         setState(() {
-          shadowPolygons = polygons;
           currentElevation = elev;
           currentAzimuth = azim;
           isLoading = false;
         });
-        debugPrint("${polygons.length} shadows loaded (elev=$elev, azim=$azim)");
+        debugPrint("Shadows updated (elev=$elev, azim=$azim)");
       } else {
-        setState(() { shadowPolygons = []; isLoading = false; });
+        setState(() => isLoading = false);
       }
     } catch (e) {
       debugPrint("Fetch error: $e");
-      setState(() { shadowPolygons = []; isLoading = false; });
+      setState(() => isLoading = false);
     }
   }
 
-  void _onMapPositionChanged(MapCamera camera, bool hasGesture) {
-    if (!hasGesture) return;
-    _currentCenter = camera.center;
+  Future<void> _updateMapLayers(Map<String, dynamic> darkAreaGeoJson) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+
+    try { await ctrl.removeLayer('dark-fill'); } catch (_) {}
+    try { await ctrl.removeSource('dark-area'); } catch (_) {}
+
+    // One unified dark polygon — map shows through as sunlit spots
+    await ctrl.addSource('dark-area', GeojsonSourceProperties(data: darkAreaGeoJson));
+    await ctrl.addLayer(
+      'dark-area',
+      'dark-fill',
+      FillLayerProperties(
+        fillColor: '#1a1a1a',
+        fillOpacity: 0.82,
+      ),
+    );
+  }
+
+  void _onCameraIdle() {
+    if (_mapController == null) return;
+    final center = _mapController!.cameraPosition?.target;
+    if (center == null) return;
+    _currentCenter = center;
     _debounceTimer?.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    fetchShadows();
-  }
-
-  @override
-  void dispose() {
-    _debounceTimer?.cancel();
-    _mapController.dispose();
-    super.dispose();
   }
 
   @override
@@ -148,30 +142,30 @@ class _SunMapScreenState extends State<SunMapScreen> {
           Expanded(
             child: Stack(
               children: [
-                FlutterMap(
-                  mapController: _mapController,
-                  options: MapOptions(
-                    initialCenter: _currentCenter,
-                    initialZoom: 17.0,
-                    onPositionChanged: _onMapPositionChanged,
+                MaplibreMap(
+                  styleString: mapStyle,
+                  initialCameraPosition: CameraPosition(
+                    target: _currentCenter,
+                    zoom: 16.5,
+                    tilt: 0,
                   ),
-                  children: [
-                    TileLayer(
-                      urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                      userAgentPackageName: 'com.example.sunshadow',
-                    ),
-                    PolygonLayer(
-                      polygons: shadowPolygons
-                          .map((pts) => Polygon(
-                                points: pts,
-                                color: Colors.black.withOpacity(0.35),
-                                borderStrokeWidth: 0.3,
-                                borderColor: Colors.black26,
-                              ))
-                          .toList(),
-                    ),
-                  ],
+                  onMapCreated: _onMapCreated,
+                  onStyleLoadedCallback: _onStyleLoaded,
+                  onCameraIdle: _onCameraIdle,
+                  trackCameraPosition: true,
                 ),
+                if (currentElevation <= 0 && !isLoading)
+                  IgnorePointer(
+                    child: Container(
+                      color: Colors.black.withOpacity(0.6),
+                      child: const Center(
+                        child: Text(
+                          '🌙 No sunlight',
+                          style: TextStyle(color: Colors.white70, fontSize: 18),
+                        ),
+                      ),
+                    ),
+                  ),
                 if (isLoading)
                   const Center(
                     child: CircularProgressIndicator(color: Colors.orangeAccent),

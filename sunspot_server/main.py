@@ -49,6 +49,9 @@ def get_buildings_from_osm(lat, lon, radius):
     [out:json][timeout:60];
     (
       way["building"](around:{radius},{lat},{lon});
+      way["building:part"](around:{radius},{lat},{lon});
+      relation["building"](around:{radius},{lat},{lon});
+      relation["building:part"](around:{radius},{lat},{lon});
     );
     out body;
     >;
@@ -64,22 +67,44 @@ def get_buildings_from_osm(lat, lon, radius):
 
             data = response.json()
             nodes = {el["id"]: (el["lon"], el["lat"]) for el in data["elements"] if el["type"] == "node"}
+            ways  = {el["id"]: el for el in data["elements"] if el["type"] == "way"}
             polygons = []
+
+            def parse_height(tags):
+                try:
+                    if "height" in tags:
+                        return float(tags["height"].replace("m", "").strip())
+                    if "building:levels" in tags:
+                        return float(tags["building:levels"]) * 3.0
+                    if "levels" in tags:
+                        return float(tags["levels"]) * 3.0
+                except (ValueError, KeyError):
+                    pass
+                return 10.0
 
             for el in data["elements"]:
                 if el["type"] == "way" and "nodes" in el:
                     coords = [nodes[nid] for nid in el["nodes"] if nid in nodes]
                     if len(coords) >= 3:
-                        height = 10.0
-                        if "tags" in el:
-                            try:
-                                if "height" in el["tags"]:
-                                    height = float(el["tags"]["height"].replace("m", "").strip())
-                                elif "building:levels" in el["tags"]:
-                                    height = float(el["tags"]["building:levels"]) * 3.0
-                            except ValueError:
-                                pass
+                        height = parse_height(el.get("tags", {}))
                         polygons.append((Polygon(coords), height))
+
+                elif el["type"] == "relation" and "members" in el:
+                    height = parse_height(el.get("tags", {}))
+                    outer_coords = []
+                    for member in el["members"]:
+                        if member.get("role") == "outer" and member["type"] == "way":
+                            way = ways.get(member["ref"])
+                            if way and "nodes" in way:
+                                coords = [nodes[nid] for nid in way["nodes"] if nid in nodes]
+                                outer_coords.extend(coords)
+                    if len(outer_coords) >= 3:
+                        try:
+                            poly = Polygon(outer_coords).buffer(0)
+                            if poly.is_valid and not poly.is_empty:
+                                polygons.append((poly, height))
+                        except Exception:
+                            pass
 
             print(f"{len(polygons)} buildings loaded.")
             _buildings_cache[cache_key] = polygons
@@ -155,19 +180,40 @@ def shadow():
         elevation, azimuth = get_sun_angles(lat, lon, now)
         buildings = get_buildings_from_osm(lat, lon, radius)
 
-        shadows = []
+        # --- Compute shadow polygons ---
+        shadow_parts = []
         for poly, height in buildings:
             sh = project_shadow(poly, height, elevation, azimuth)
-            if sh:
-                shadows.append(mapping(sh))
+            if sh and not sh.is_empty:
+                shadow_parts.append(sh)
 
-        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)} shadows={len(shadows)}")
+        # --- Merge buildings + shadows into one unified dark region ---
+        building_polys = [p.buffer(0) for p, _ in buildings]
+        all_parts = building_polys + shadow_parts
+
+        if all_parts:
+            merged = unary_union(all_parts)
+            # Small buffer to fill gaps between adjacent buildings/shadows (~3m)
+            gap_fill = 0.00003
+            merged = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
+            # Simplify to reduce vertices and create clean sunspot shapes
+            merged = merged.simplify(0.00005, preserve_topology=True)
+            dark_area = mapping(merged)
+        else:
+            dark_area = {"type": "GeometryCollection", "geometries": []}
+
+        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)} shadow_parts={len(shadow_parts)}")
+
+        dark_fc = {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "geometry": dark_area, "properties": {}}]
+        }
 
         return jsonify({
             "time":      now.strftime("%H:%M"),
             "elevation": elevation,
             "azimuth":   azimuth,
-            "shadows":   shadows,
+            "dark_area": dark_fc,
         })
 
     except Exception as e:
