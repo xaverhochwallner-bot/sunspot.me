@@ -14,3 +14,7 @@ __pycache__/
 
 # Build outputs
 build/
+
+# Large OSM data files
+*.osm.pbf
+*.osm.bz2
