@@ -62,17 +62,95 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 LOAD_BBOX = (48.05, 16.10, 48.40, 16.65)  # (min_lat, min_lon, max_lat, max_lon)
 
 
+
+# Typical heights by building type — used when no explicit height/levels tag exists
+_BUILDING_TYPE_HEIGHTS = {
+    # Low structures
+    "garage":             3.0,
+    "garages":            3.0,
+    "carport":            3.0,
+    "shed":               3.0,
+    "hut":                3.0,
+    "kiosk":              3.0,
+    "roof":               4.0,
+    "canopy":             4.0,
+    # Single-family residential
+    "house":              7.0,
+    "detached":           7.0,
+    "semidetached_house": 7.0,
+    "bungalow":           4.0,
+    "farm":               6.0,
+    "farm_auxiliary":     5.0,
+    "barn":               8.0,
+    "greenhouse":         4.0,
+    # Multi-family / dense urban (Vienna Gründerzeit default)
+    "apartments":        16.0,
+    "residential":       16.0,
+    "dormitory":         12.0,
+    # Commercial / office
+    "commercial":        10.0,
+    "retail":             6.0,
+    "shop":               6.0,
+    "office":            20.0,
+    "hotel":             20.0,
+    # Civic / public
+    "school":            10.0,
+    "university":        12.0,
+    "hospital":          18.0,
+    "public":            10.0,
+    "government":        12.0,
+    # Industrial
+    "industrial":         9.0,
+    "warehouse":          9.0,
+    "storage_tank":      10.0,
+    "service":            5.0,
+    # Religious
+    "church":            18.0,
+    "cathedral":         25.0,
+    "chapel":            10.0,
+    "mosque":            15.0,
+    "synagogue":         12.0,
+    "temple":            12.0,
+    # Misc
+    "stadium":           20.0,
+    "sports_hall":       10.0,
+    "train_station":     15.0,
+    "transportation":    10.0,
+    "parking":            8.0,
+}
+
+LEVELS_HEIGHT  = 3.5   # metres per above-ground level (Austrian/German standard)
+ROOF_HEIGHT    = 1.5   # metres per roof level
+DEFAULT_HEIGHT = 14.0  # Vienna dense urban default — ~4-storey equivalent
+
+
 def _parse_height(tags):
     try:
         if "height" in tags:
             return float(str(tags["height"]).replace("m", "").strip())
+
+        levels     = None
+        roof_extra = 0.0
+
         if "building:levels" in tags:
-            return float(tags["building:levels"]) * 3.0
-        if "levels" in tags:
-            return float(tags["levels"]) * 3.0
+            levels = float(tags["building:levels"])
+        elif "levels" in tags:
+            levels = float(tags["levels"])
+
+        if "roof:levels" in tags:
+            roof_extra = float(tags["roof:levels"]) * ROOF_HEIGHT
+
+        if levels is not None:
+            return max(levels * LEVELS_HEIGHT + roof_extra, 2.0)
+
+        # No numeric tags — fall back to building-type lookup
+        btype = str(tags.get("building", "")).lower()
+        if btype and btype != "yes":
+            return _BUILDING_TYPE_HEIGHTS.get(btype, DEFAULT_HEIGHT)
+
     except (ValueError, KeyError):
         pass
-    return 10.0
+    return DEFAULT_HEIGHT
 
 
 class BuildingHandler(osmium.SimpleHandler):
@@ -282,16 +360,13 @@ def shadow():
         ck  = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
         if ck in _shadow_cache:
-            sunlit_filtered, compute_bbox = _shadow_cache[ck]
+            sunlit_filtered = _shadow_cache[ck]
             print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
         else:
-            # Compute bbox: use full viewport up to MAX_DEG cap
-            MAX_DEG = 0.030  # ~3.3 km at 48°N
+            # Use the full viewport — no artificial cap
             if None not in (min_lat, min_lon, max_lat, max_lon):
-                half_lat = min((max_lat - min_lat) / 2, MAX_DEG)
-                half_lon = min((max_lon - min_lon) / 2, MAX_DEG)
-                q_min_lat, q_min_lon = lat - half_lat, lon - half_lon
-                q_max_lat, q_max_lon = lat + half_lat, lon + half_lon
+                q_min_lat, q_min_lon = min_lat, min_lon
+                q_max_lat, q_max_lon = max_lat, max_lon
             else:
                 q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
                 q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
@@ -322,28 +397,16 @@ def shadow():
             sunlit_simple   = sunlit.simplify(0.0001, preserve_topology=True)
             sunlit_filtered = filter_small_polygons(sunlit_simple, 1e-6)
 
-            _shadow_cache[ck] = (sunlit_filtered, compute_bbox)
+            _shadow_cache[ck] = sunlit_filtered
             if len(_shadow_cache) > MAX_CACHE:
                 _shadow_cache.pop(next(iter(_shadow_cache)))
 
             print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} "
                   f"| z={zoom} | buildings={len(buildings)} | {time.time()-t0:.2f}s")
 
-        # Build features — avoid donuts/complex polygons (MapLibre triangulation issues):
-        # 1. Four simple rectangles filling the space outside compute_bbox (no holes)
-        # 2. Shadow areas within compute_bbox (with sunlit holes)
-        vp_minx, vp_miny, vp_maxx, vp_maxy = viewport_bbox.bounds
-        cb_minx, cb_miny, cb_maxx, cb_maxy = compute_bbox.bounds
-        outer_rects = [
-            shapely_box(vp_minx, cb_maxy, vp_maxx, vp_maxy),  # top
-            shapely_box(vp_minx, vp_miny, vp_maxx, cb_miny),  # bottom
-            shapely_box(vp_minx, cb_miny, cb_minx, cb_maxy),  # left
-            shapely_box(cb_maxx, cb_miny, vp_maxx, cb_maxy),  # right
-        ]
-        inner_shadow = orient(compute_bbox.difference(sunlit_filtered), sign=1.0)
+        # Shadow fill covers the full viewport minus sunlit holes.
+        inner_shadow = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
         features = [
-            *({"type": "Feature", "geometry": round_coords(mapping(r)), "properties": {"layer": "shadow"}}
-              for r in outer_rects if not r.is_empty),
             {"type": "Feature", "geometry": round_coords(mapping(inner_shadow)), "properties": {"layer": "shadow"}},
         ]
 
