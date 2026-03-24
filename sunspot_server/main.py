@@ -156,12 +156,16 @@ def _parse_height(tags):
 class BuildingHandler(osmium.SimpleHandler):
     def __init__(self):
         super().__init__()
-        self.polys   = []
-        self.heights = []
-        self._bbox   = LOAD_BBOX  # (min_lat, min_lon, max_lat, max_lon)
+        self.main_polys    = []   # ways with building=* (full outlines)
+        self.main_heights  = []
+        self.part_polys    = []   # ways with building:part=* (individual sections)
+        self.part_heights  = []
+        self._bbox         = LOAD_BBOX
 
     def way(self, w):
-        if "building" not in w.tags and "building:part" not in w.tags:
+        has_building = "building" in w.tags
+        has_part     = "building:part" in w.tags
+        if not has_building and not has_part:
             return
         try:
             coords = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
@@ -182,13 +186,16 @@ class BuildingHandler(osmium.SimpleHandler):
                 poly = poly.buffer(0)
             if poly.is_empty or poly.area < MIN_BUILDING_AREA:
                 return
-            # Pre-simplify once at load — reduces vertices, speeds up per-request work
             poly = poly.simplify(0.00002, preserve_topology=False)
             if poly.is_empty:
                 return
 
-            self.polys.append(poly)
-            self.heights.append(_parse_height(w.tags))
+            if has_part:
+                self.part_polys.append(poly)
+                self.part_heights.append(_parse_height(w.tags))
+            else:
+                self.main_polys.append(poly)
+                self.main_heights.append(_parse_height(w.tags))
         except Exception:
             pass
 
@@ -211,8 +218,33 @@ def load_buildings(pbf_path):
     print(f"Parsing buildings from {pbf_path} (first run, will cache) ...")
     handler = BuildingHandler()
     handler.apply_file(pbf_path, locations=True)
-    _buildings_polys   = handler.polys
-    _buildings_heights = handler.heights
+
+    # Remove main building outlines that have building:part children inside them.
+    # Parts have specific per-section heights; the parent outline is redundant and
+    # causes double-counting of shadows.
+    print(f"Parsed {len(handler.main_polys):,} building outlines + "
+          f"{len(handler.part_polys):,} building parts — deduplicating ...")
+    if handler.part_polys:
+        part_tree = STRtree(handler.part_polys)
+        filtered_main_polys   = []
+        filtered_main_heights = []
+        for poly, height in zip(handler.main_polys, handler.main_heights):
+            candidates = part_tree.query(poly)
+            # If any part is contained within this outline, skip the outline
+            has_parts = any(
+                handler.part_polys[i].within(poly)
+                for i in candidates
+            )
+            if not has_parts:
+                filtered_main_polys.append(poly)
+                filtered_main_heights.append(height)
+    else:
+        filtered_main_polys   = handler.main_polys
+        filtered_main_heights = handler.main_heights
+
+    _buildings_polys   = filtered_main_polys + handler.part_polys
+    _buildings_heights = filtered_main_heights + handler.part_heights
+    print(f"After dedup: {len(_buildings_polys):,} buildings kept.")
 
     print(f"Saving cache to {CACHE_PATH} ...")
     with open(CACHE_PATH, "wb") as f:
@@ -300,6 +332,17 @@ def round_coords(obj, precision=5):
     return obj
 
 
+def _min_building_area(zoom):
+    """Minimum building footprint (deg²) to include at a given zoom level.
+    Only truly tiny structures (sheds, garages) are skipped at low zoom.
+    Typical Vienna apartment block (~300 m²) is always included.
+    """
+    if zoom >= 15: return 5e-9    # ~40 m²  — everything
+    if zoom == 14: return 1.5e-8  # ~125 m² — skip tiny sheds
+    if zoom == 13: return 3e-8    # ~250 m² — skip garages/sheds
+    return 6e-8                   # zoom ≤ 12 — ~500 m², skip small outbuildings
+
+
 def filter_small_polygons(geom, min_area):
     if geom is None or geom.is_empty:
         return geom
@@ -371,8 +414,11 @@ def shadow():
                 q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
                 q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
 
-            compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-            buildings    = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+            compute_bbox  = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+            min_bld_area  = _min_building_area(zoom)
+            buildings     = [(p, h) for p, h in
+                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+                             if p.area >= min_bld_area]
 
             def _project(args):
                 poly, height = args

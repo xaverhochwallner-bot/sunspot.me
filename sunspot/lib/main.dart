@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:html' as html;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -44,6 +45,8 @@ class _SunMapScreenState extends State<SunMapScreen> {
   bool     _mapReady      = false;
   bool     _hasData       = false;
   bool     _animating     = false;
+  bool     _draggingSlider = false;
+  String?  _errorMessage;
 
   // -------------------------------------------------------------------------
   // Helpers
@@ -108,6 +111,38 @@ class _SunMapScreenState extends State<SunMapScreen> {
   }
 
   // -------------------------------------------------------------------------
+  // Geolocation
+  // -------------------------------------------------------------------------
+
+  void _goToMyLocation() async {
+    try {
+      final pos = await html.window.navigator.geolocation.getCurrentPosition();
+      final lat = (pos.coords!.latitude  as num).toDouble();
+      final lon = (pos.coords!.longitude as num).toDouble();
+      final newPos = LatLng(lat, lon);
+      setState(() => _currentCenter = newPos);
+      final zoom = _mapController?.cameraPosition?.zoom ?? 16.5;
+      await _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: zoom)),
+      );
+      fetchShadows();
+    } catch (_) {
+      _showError('Location access denied or unavailable');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Error display
+  // -------------------------------------------------------------------------
+
+  void _showError(String msg) {
+    setState(() => _errorMessage = msg);
+    Future.delayed(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _errorMessage = null);
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Shadow fetch
   // -------------------------------------------------------------------------
 
@@ -140,7 +175,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
         final azim = (data['azimuth']  as num?)?.toDouble() ?? 0.0;
 
         if (data['dark_area'] != null) {
-          await _updateMapLayers(data['dark_area'] as Map<String, dynamic>);
+          await _updateMapLayers(data['dark_area'] as Map<String, dynamic>, elev);
         }
 
         setState(() {
@@ -154,11 +189,18 @@ class _SunMapScreenState extends State<SunMapScreen> {
       }
     } catch (e) {
       debugPrint('Fetch error: $e');
+      _showError('Could not load shadows — is the server running?');
       setState(() => _loading = false);
     }
   }
 
-  Future<void> _updateMapLayers(Map<String, dynamic> geoJson) async {
+  // Opacity fades at low sun elevation — harsh shadows only when sun is high
+  double _shadowOpacity(double elevation) {
+    if (elevation <= 0) return 0.85;
+    return 0.4 + (elevation.clamp(0.0, 60.0) / 60.0) * 0.45;
+  }
+
+  Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
 
@@ -169,7 +211,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
 
     await ctrl.addLayer(
       'dark-area', 'shadow-fill',
-      FillLayerProperties(fillColor: '#1a2535', fillOpacity: 0.75),
+      FillLayerProperties(fillColor: '#1a2535', fillOpacity: _shadowOpacity(elevation)),
       filter: ['==', ['get', 'layer'], 'shadow'],
     );
   }
@@ -241,10 +283,42 @@ class _SunMapScreenState extends State<SunMapScreen> {
           ),
 
 
-          // Loading spinner
+          // Loading bar — thin strip at top of map area only
           if (_loading)
-            const Center(
-              child: CircularProgressIndicator(color: Colors.orangeAccent),
+            Positioned(
+              top: 0, left: 0, right: 280,
+              child: LinearProgressIndicator(
+                minHeight: 3,
+                backgroundColor: Colors.transparent,
+                color: Colors.orangeAccent,
+              ),
+            ),
+
+          // Geolocation button
+          Positioned(
+            bottom: 24, left: 16,
+            child: FloatingActionButton.small(
+              onPressed: _goToMyLocation,
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.black87,
+              elevation: 2,
+              child: const Icon(Icons.my_location, size: 20),
+            ),
+          ),
+
+          // Error banner
+          if (_errorMessage != null)
+            Positioned(
+              bottom: 80, left: 16, right: 296,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade700,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(_errorMessage!,
+                    style: const TextStyle(color: Colors.white, fontSize: 13)),
+              ),
             ),
 
           // Right-side panel
@@ -308,8 +382,9 @@ class _SunMapScreenState extends State<SunMapScreen> {
                 color: Colors.grey, letterSpacing: 1.2)),
         const Spacer(),
         Text(_formattedTime,
-            style: const TextStyle(
-                fontSize: 18, fontWeight: FontWeight.bold)),
+            style: TextStyle(
+                fontSize: 18, fontWeight: FontWeight.bold,
+                color: _draggingSlider ? Colors.orange : Colors.black87)),
       ],
     );
   }
@@ -338,8 +413,8 @@ class _SunMapScreenState extends State<SunMapScreen> {
             min: 0,
             max: 23,
             divisions: 23,
-            onChanged: (v) => setState(() => _hour = v),
-            onChangeEnd: (_) => fetchShadows(),
+            onChanged:  (v) => setState(() { _hour = v; _draggingSlider = true; }),
+            onChangeEnd: (_) { setState(() => _draggingSlider = false); fetchShadows(); },
           ),
         ),
         Padding(
