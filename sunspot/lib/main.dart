@@ -30,11 +30,9 @@ class SunMapScreen extends StatefulWidget {
 
 class _SunMapScreenState extends State<SunMapScreen> {
   static const String flaskBaseUrl = "http://127.0.0.1:5000";
-  static const int radiusMeters = 400;
 
-  // Clean light 2D style
   static const String mapStyle =
-      'https://tiles.openfreemap.org/styles/positron';
+      'https://tiles.openfreemap.org/styles/bright';
 
   MaplibreMapController? _mapController;
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
@@ -45,6 +43,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
   double currentAzimuth = 0.0;
   bool isLoading = false;
   bool _mapReady = false;
+  bool _hasReceivedData = false;
 
   @override
   void dispose() {
@@ -71,7 +70,6 @@ class _SunMapScreenState extends State<SunMapScreen> {
         '$flaskBaseUrl/shadow'
         '?lat=${_currentCenter.latitude}'
         '&lon=${_currentCenter.longitude}'
-        '&radius=$radiusMeters'
         '&hour=${currentHour.toInt()}'
         '&minLat=${bounds.southwest.latitude}'
         '&minLon=${bounds.southwest.longitude}'
@@ -81,7 +79,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
       debugPrint("Fetching: $uri");
 
       final response =
-          await http.get(uri).timeout(const Duration(seconds: 60));
+          await http.get(uri).timeout(const Duration(seconds: 120));
 
       if (response.statusCode == 200 && response.body.isNotEmpty) {
         final data = jsonDecode(response.body);
@@ -96,6 +94,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
           currentElevation = elev;
           currentAzimuth = azim;
           isLoading = false;
+          _hasReceivedData = true;
         });
         debugPrint("Shadows updated (elev=$elev, azim=$azim)");
       } else {
@@ -112,31 +111,34 @@ class _SunMapScreenState extends State<SunMapScreen> {
     if (ctrl == null) return;
 
     try { await ctrl.removeLayer('shadow-fill'); } catch (_) {}
-    try { await ctrl.removeLayer('nodata-fill'); } catch (_) {}
+    try { await ctrl.removeLayer('sunlit-ground-fill'); } catch (_) {}
+    try { await ctrl.removeLayer('building-fill'); } catch (_) {}
     try { await ctrl.removeSource('dark-area'); } catch (_) {}
 
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: darkAreaGeoJson));
 
-    // Full shadow inside the query circle (sunlit spots show through as holes)
+    // Unified dark overlay covering full viewport
     await ctrl.addLayer(
       'dark-area',
       'shadow-fill',
-      FillLayerProperties(
-        fillColor: '#1a1a1a',
-        fillOpacity: 0.82,
-      ),
+      FillLayerProperties(fillColor: '#1a2535', fillOpacity: 0.75),
       filter: ['==', ['get', 'layer'], 'shadow'],
     );
 
-    // Dim overlay outside the query circle = no data
+    // Sunlit ground (light blue)
     await ctrl.addLayer(
       'dark-area',
-      'nodata-fill',
-      FillLayerProperties(
-        fillColor: '#1a1a1a',
-        fillOpacity: 0.35,
-      ),
-      filter: ['==', ['get', 'layer'], 'nodata'],
+      'sunlit-ground-fill',
+      FillLayerProperties(fillColor: '#d4eaf7', fillOpacity: 0.55),
+      filter: ['==', ['get', 'layer'], 'sunlit_ground'],
+    );
+
+    // Building rooftops (white)
+    await ctrl.addLayer(
+      'dark-area',
+      'building-fill',
+      FillLayerProperties(fillColor: '#ffffff', fillOpacity: 0.70),
+      filter: ['==', ['get', 'layer'], 'building'],
     );
   }
 
@@ -173,7 +175,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
                   onCameraIdle: _onCameraIdle,
                   trackCameraPosition: true,
                 ),
-                if (currentElevation <= 0 && !isLoading)
+                if (_hasReceivedData && currentElevation <= 0 && !isLoading)
                   IgnorePointer(
                     child: Container(
                       color: Colors.black.withOpacity(0.6),

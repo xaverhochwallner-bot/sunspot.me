@@ -1,6 +1,6 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from shapely.geometry import Polygon, Point, box as shapely_box, mapping
+from shapely.geometry import Polygon, box as shapely_box, mapping
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 from datetime import datetime
@@ -19,8 +19,10 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-# Cache: key = (lat_rounded, lon_rounded, radius) -> list of (Polygon, height)
-_buildings_cache = {}
+# Tile-based building cache
+# Grid cells of ~0.008° (~900m) — each cell cached independently
+GRID_DEG = 0.008
+_tile_cache = {}  # (tile_lat, tile_lon) -> list of (Polygon, height)
 
 
 # ---------------------------------------------------------------------------
@@ -37,84 +39,120 @@ def get_sun_angles(lat, lon, at_time):
 
 
 # ---------------------------------------------------------------------------
-# Load buildings from OSM
+# Tile-based building loading
 # ---------------------------------------------------------------------------
 
-def get_buildings_from_osm(lat, lon, radius):
-    cache_key = (round(lat, 3), round(lon, 3), radius)
-    if cache_key in _buildings_cache:
-        print(f"Cache hit for {cache_key}")
-        return _buildings_cache[cache_key]
+def _tile_key(lat, lon):
+    return (round(math.floor(lat / GRID_DEG) * GRID_DEG, 6),
+            round(math.floor(lon / GRID_DEG) * GRID_DEG, 6))
 
-    query = f"""
-    [out:json][timeout:60];
-    (
-      way["building"](around:{radius},{lat},{lon});
-      way["building:part"](around:{radius},{lat},{lon});
-      relation["building"](around:{radius},{lat},{lon});
-      relation["building:part"](around:{radius},{lat},{lon});
-    );
-    out body;
-    >;
-    out skel qt;
-    """
+def _tiles_for_bbox(min_lat, min_lon, max_lat, max_lon):
+    tiles = set()
+    lat = math.floor(min_lat / GRID_DEG) * GRID_DEG
+    while lat <= max_lat:
+        lon = math.floor(min_lon / GRID_DEG) * GRID_DEG
+        while lon <= max_lon:
+            tiles.add((round(lat, 6), round(lon, 6)))
+            lon = round(lon + GRID_DEG, 6)
+        lat = round(lat + GRID_DEG, 6)
+    return tiles
 
-    for url in OVERPASS_URLS:
+def _parse_buildings(data):
+    nodes = {el["id"]: (el["lon"], el["lat"]) for el in data["elements"] if el["type"] == "node"}
+    ways  = {el["id"]: el for el in data["elements"] if el["type"] == "way"}
+    polygons = []
+
+    def parse_height(tags):
         try:
-            print(f"Fetching buildings from {url} (lat={lat}, lon={lon}, r={radius}m)...")
-            response = requests.post(url, data=query, timeout=60)
-            if response.status_code != 200 or not response.text.strip().startswith("{"):
-                continue
+            if "height" in tags:
+                return float(tags["height"].replace("m", "").strip())
+            if "building:levels" in tags:
+                return float(tags["building:levels"]) * 3.0
+            if "levels" in tags:
+                return float(tags["levels"]) * 3.0
+        except (ValueError, KeyError):
+            pass
+        return 10.0
 
-            data = response.json()
-            nodes = {el["id"]: (el["lon"], el["lat"]) for el in data["elements"] if el["type"] == "node"}
-            ways  = {el["id"]: el for el in data["elements"] if el["type"] == "way"}
-            polygons = []
+    for el in data["elements"]:
+        if el["type"] == "way" and "nodes" in el:
+            coords = [nodes[nid] for nid in el["nodes"] if nid in nodes]
+            if len(coords) >= 3:
+                height = parse_height(el.get("tags", {}))
+                polygons.append((Polygon(coords), height))
 
-            def parse_height(tags):
+        elif el["type"] == "relation" and "members" in el:
+            height = parse_height(el.get("tags", {}))
+            outer_coords = []
+            for member in el["members"]:
+                if member.get("role") == "outer" and member["type"] == "way":
+                    way = ways.get(member["ref"])
+                    if way and "nodes" in way:
+                        coords = [nodes[nid] for nid in way["nodes"] if nid in nodes]
+                        outer_coords.extend(coords)
+            if len(outer_coords) >= 3:
                 try:
-                    if "height" in tags:
-                        return float(tags["height"].replace("m", "").strip())
-                    if "building:levels" in tags:
-                        return float(tags["building:levels"]) * 3.0
-                    if "levels" in tags:
-                        return float(tags["levels"]) * 3.0
-                except (ValueError, KeyError):
+                    poly = Polygon(outer_coords).buffer(0)
+                    if poly.is_valid and not poly.is_empty:
+                        polygons.append((poly, height))
+                except Exception:
                     pass
-                return 10.0
 
-            for el in data["elements"]:
-                if el["type"] == "way" and "nodes" in el:
-                    coords = [nodes[nid] for nid in el["nodes"] if nid in nodes]
-                    if len(coords) >= 3:
-                        height = parse_height(el.get("tags", {}))
-                        polygons.append((Polygon(coords), height))
+    # Filter tiny objects (< ~25m²)
+    MIN_BUILDING_AREA = 5e-9
+    return [(p, h) for p, h in polygons if p.area >= MIN_BUILDING_AREA]
 
-                elif el["type"] == "relation" and "members" in el:
-                    height = parse_height(el.get("tags", {}))
-                    outer_coords = []
-                    for member in el["members"]:
-                        if member.get("role") == "outer" and member["type"] == "way":
-                            way = ways.get(member["ref"])
-                            if way and "nodes" in way:
-                                coords = [nodes[nid] for nid in way["nodes"] if nid in nodes]
-                                outer_coords.extend(coords)
-                    if len(outer_coords) >= 3:
-                        try:
-                            poly = Polygon(outer_coords).buffer(0)
-                            if poly.is_valid and not poly.is_empty:
-                                polygons.append((poly, height))
-                        except Exception:
-                            pass
+def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon):
+    needed = _tiles_for_bbox(min_lat, min_lon, max_lat, max_lon)
+    missing = needed - set(_tile_cache.keys())
 
-            print(f"{len(polygons)} buildings loaded.")
-            _buildings_cache[cache_key] = polygons
-            return polygons
+    if missing:
+        # Fetch one bbox covering all missing tiles at once
+        fetch_min_lat = min(t[0] for t in missing)
+        fetch_min_lon = min(t[1] for t in missing)
+        fetch_max_lat = max(t[0] for t in missing) + GRID_DEG
+        fetch_max_lon = max(t[1] for t in missing) + GRID_DEG
 
-        except Exception as e:
-            print(f"Error fetching from {url}: {e}")
+        query = f"""
+        [out:json][timeout:60];
+        (
+          way["building"]({fetch_min_lat},{fetch_min_lon},{fetch_max_lat},{fetch_max_lon});
+          way["building:part"]({fetch_min_lat},{fetch_min_lon},{fetch_max_lat},{fetch_max_lon});
+          relation["building"]({fetch_min_lat},{fetch_min_lon},{fetch_max_lat},{fetch_max_lon});
+        );
+        out body;
+        >;
+        out skel qt;
+        """
 
-    return []
+        fetched = []
+        for url in OVERPASS_URLS:
+            try:
+                print(f"Fetching buildings bbox ({fetch_min_lat:.4f},{fetch_min_lon:.4f} → {fetch_max_lat:.4f},{fetch_max_lon:.4f}) from {url}...")
+                resp = requests.post(url, data=query, timeout=60)
+                if resp.status_code == 200 and resp.text.strip().startswith("{"):
+                    fetched = _parse_buildings(resp.json())
+                    print(f"{len(fetched)} buildings fetched.")
+                    break
+            except Exception as e:
+                print(f"Error fetching from {url}: {e}")
+
+        # Assign fetched buildings to their tiles
+        for tile in missing:
+            tlat, tlon = tile
+            cell_box = shapely_box(tlon, tlat, tlon + GRID_DEG, tlat + GRID_DEG)
+            _tile_cache[tile] = [(p, h) for p, h in fetched if p.intersects(cell_box)]
+
+    # Collect unique buildings across all needed tiles (deduplicate by object id)
+    seen = set()
+    result = []
+    for tile in needed:
+        for p, h in _tile_cache.get(tile, []):
+            pid = id(p)
+            if pid not in seen:
+                seen.add(pid)
+                result.append((p, h))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +169,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
 
         shadow_length = height / math.tan(elevation)
 
-        lat_center        = polygon.centroid.y
+        lat_center         = polygon.centroid.y
         meters_per_deg_lat = 111320.0
         meters_per_deg_lon = 111320.0 * math.cos(math.radians(lat_center))
 
@@ -141,11 +179,10 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
 
-        coords = list(polygon.exterior.coords[:-1])  # drop closing duplicate
+        coords = list(polygon.exterior.coords[:-1])
         n = len(coords)
         shadow_coords = [(x + dx, y + dy) for x, y in coords]
 
-        # Build a quad for each edge of the footprint connecting it to its shadow
         parts = [polygon, Polygon(shadow_coords)]
         for i in range(n):
             j = (i + 1) % n
@@ -162,20 +199,34 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def filter_small_polygons(geom, min_area):
+    if geom is None or geom.is_empty:
+        return geom
+    if geom.geom_type == 'Polygon':
+        return geom if geom.area >= min_area else geom.__class__()
+    elif geom.geom_type == 'MultiPolygon':
+        parts = [p for p in geom.geoms if p.area >= min_area]
+        return unary_union(parts) if parts else geom.__class__()
+    return geom
+
+
+# ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
 
 @app.route("/shadow")
 def shadow():
     try:
-        lat    = request.args.get("lat",    default=48.2082, type=float)
-        lon    = request.args.get("lon",    default=16.3738, type=float)
-        radius = request.args.get("radius", default=400,     type=int)
-        hour   = request.args.get("hour",   default=None,    type=int)
-        min_lat = request.args.get("minLat", default=None,   type=float)
-        min_lon = request.args.get("minLon", default=None,   type=float)
-        max_lat = request.args.get("maxLat", default=None,   type=float)
-        max_lon = request.args.get("maxLon", default=None,   type=float)
+        lat     = request.args.get("lat",    default=48.2082, type=float)
+        lon     = request.args.get("lon",    default=16.3738, type=float)
+        hour    = request.args.get("hour",   default=None,    type=int)
+        min_lat = request.args.get("minLat", default=None,    type=float)
+        min_lon = request.args.get("minLon", default=None,    type=float)
+        max_lat = request.args.get("maxLat", default=None,    type=float)
+        max_lon = request.args.get("maxLon", default=None,    type=float)
 
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime.now(tz)
@@ -183,69 +234,78 @@ def shadow():
             now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
 
         elevation, azimuth = get_sun_angles(lat, lon, now)
-        buildings = get_buildings_from_osm(lat, lon, radius)
 
-        # --- Compute shadow polygons ---
+        # Use viewport bounds, capped to max ~800m x 800m to prevent Overpass timeout
+        MAX_DEG = 0.007  # ~800m at 48°N
+        if None not in (min_lat, min_lon, max_lat, max_lon):
+            half_lat = min((max_lat - min_lat) / 2, MAX_DEG)
+            half_lon = min((max_lon - min_lon) / 2, MAX_DEG)
+            q_min_lat, q_min_lon = lat - half_lat, lon - half_lon
+            q_max_lat, q_max_lon = lat + half_lat, lon + half_lon
+        else:
+            d = 0.005
+            q_min_lat, q_min_lon = lat - d, lon - d
+            q_max_lat, q_max_lon = lat + d, lon + d
+
+        viewport_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+        buildings = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+
+        # Compute shadow polygons
         shadow_parts = []
         for poly, height in buildings:
             sh = project_shadow(poly, height, elevation, azimuth)
             if sh and not sh.is_empty:
                 shadow_parts.append(sh)
 
-        # --- Merge buildings + shadows into one unified dark region ---
+        # Merge buildings + shadows
         building_polys = [p.buffer(0) for p, _ in buildings]
         all_parts = building_polys + shadow_parts
-
-        # Approximate query circle in degrees (used to define "known" area)
-        r_deg = radius / 111320.0
-        query_circle = Point(lon, lat).buffer(r_deg, resolution=64)
 
         if all_parts:
             merged = unary_union(all_parts)
             gap_fill = 0.00003
             merged = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
             merged = merged.simplify(0.00005, preserve_topology=True)
-            # Sunlit = known area minus shadow
-            sunlit = query_circle.difference(merged)
+            sunlit = viewport_bbox.difference(merged)
         else:
-            # No buildings: entire circle is sunlit
-            sunlit = query_circle
-
-        # Viewport bbox
-        if None not in (min_lat, min_lon, max_lat, max_lon):
-            pad = 0.01
-            dark_bbox = shapely_box(min_lon - pad, min_lat - pad, max_lon + pad, max_lat + pad)
-        else:
-            margin = 0.1
-            dark_bbox = shapely_box(lon - margin, lat - margin, lon + margin, lat + margin)
+            sunlit = viewport_bbox
 
         sunlit_simple = sunlit.simplify(0.00005, preserve_topology=True)
 
-        # Layer 1: full shadow inside the query circle (dark, no sunlit holes)
-        shadow_geom = orient(query_circle.difference(sunlit_simple), sign=1.0)
+        # Unified dark overlay: full viewport minus sunlit ground
+        dark_area = orient(viewport_bbox.difference(sunlit_simple), sign=1.0)
 
-        # Layer 2: dim "no data" ring = viewport bbox minus query circle
-        nodata_geom = orient(dark_bbox.difference(query_circle), sign=1.0)
+        # Sunlit ground (filter tiny fragments)
+        MIN_AREA = 2e-7
+        building_union = unary_union(building_polys) if building_polys else None
+        if building_union and not building_union.is_empty:
+            sunlit_ground = orient(filter_small_polygons(
+                sunlit_simple.difference(building_union), MIN_AREA), sign=1.0)
+            buildings_geom = orient(
+                building_union.intersection(viewport_bbox).simplify(0.00005, preserve_topology=True), sign=1.0)
+        else:
+            sunlit_ground = orient(filter_small_polygons(sunlit_simple, MIN_AREA), sign=1.0)
+            buildings_geom = None
 
         print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)}")
 
-        dark_fc = {
-            "type": "FeatureCollection",
-            "features": [
-                {"type": "Feature", "geometry": mapping(shadow_geom), "properties": {"layer": "shadow"}},
-                {"type": "Feature", "geometry": mapping(nodata_geom),  "properties": {"layer": "nodata"}},
-            ]
-        }
+        features = [
+            {"type": "Feature", "geometry": mapping(dark_area),    "properties": {"layer": "shadow"}},
+            {"type": "Feature", "geometry": mapping(sunlit_ground), "properties": {"layer": "sunlit_ground"}},
+        ]
+        if buildings_geom and not buildings_geom.is_empty:
+            features.append({"type": "Feature", "geometry": mapping(buildings_geom), "properties": {"layer": "building"}})
 
         return jsonify({
             "time":      now.strftime("%H:%M"),
             "elevation": elevation,
             "azimuth":   azimuth,
-            "dark_area": dark_fc,
+            "dark_area": {"type": "FeatureCollection", "features": features},
         })
 
     except Exception as e:
-        print(f"Error in /shadow: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
