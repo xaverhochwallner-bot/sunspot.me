@@ -117,6 +117,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
 
     try {
       final bounds = await _mapController!.getVisibleRegion();
+      final zoom   = (_mapController!.cameraPosition?.zoom ?? 15.0).toInt();
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow'
         '?lat=${_currentCenter.latitude}'
@@ -124,6 +125,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
         '&hour=${_hour.toInt()}'
         '&month=${_selectedDate.month}'
         '&day=${_selectedDate.day}'
+        '&zoom=$zoom'
         '&minLat=${bounds.southwest.latitude}'
         '&minLon=${bounds.southwest.longitude}'
         '&maxLat=${bounds.northeast.latitude}'

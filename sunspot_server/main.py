@@ -10,6 +10,8 @@ import pickle
 import pytz
 import math
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 import pysolar.solar as ps
 
 app = Flask(__name__)
@@ -17,6 +19,20 @@ CORS(app)
 
 # Path to the local OSM PBF file — place it next to main.py
 PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
+
+# ---------------------------------------------------------------------------
+# Shadow cache — keyed by (hour, month, day, lat_grid, lon_grid)
+# Stores sunlit_filtered geometry; viewport overlay is recomputed cheaply on hit
+# ---------------------------------------------------------------------------
+_shadow_cache = {}
+MAX_CACHE     = 500
+CACHE_GRID    = 0.005  # ~500m grid
+
+def _cache_key(hour, month, day, lat, lon, zoom):
+    return (hour, month, day, zoom,
+            round(round(lat / CACHE_GRID) * CACHE_GRID, 6),
+            round(round(lon / CACHE_GRID) * CACHE_GRID, 6))
+
 
 # ---------------------------------------------------------------------------
 # Sun position
@@ -87,6 +103,10 @@ class BuildingHandler(osmium.SimpleHandler):
             if not poly.is_valid:
                 poly = poly.buffer(0)
             if poly.is_empty or poly.area < MIN_BUILDING_AREA:
+                return
+            # Pre-simplify once at load — reduces vertices, speeds up per-request work
+            poly = poly.simplify(0.00002, preserve_topology=False)
+            if poly.is_empty:
                 return
 
             self.polys.append(poly)
@@ -178,6 +198,30 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _union_chunk(chunk):
+    return unary_union(chunk)
+
+def parallel_union(geoms, chunk_size=150, max_workers=4):
+    """Union a large list of geometries in parallel chunks, then merge results."""
+    if not geoms:
+        return None
+    if len(geoms) <= chunk_size:
+        return unary_union(geoms)
+    chunks = [geoms[i:i + chunk_size] for i in range(0, len(geoms), chunk_size)]
+    with ThreadPoolExecutor(max_workers=min(len(chunks), max_workers)) as ex:
+        partial = list(ex.map(_union_chunk, chunks))
+    return unary_union(partial)
+
+
+def round_coords(obj, precision=5):
+    """Recursively round all floats in a GeoJSON geometry dict."""
+    if isinstance(obj, list):
+        return [round_coords(v, precision) for v in obj]
+    if isinstance(obj, float):
+        return round(obj, precision)
+    return obj
+
+
 def filter_small_polygons(geom, min_area):
     if geom is None or geom.is_empty:
         return geom
@@ -201,6 +245,7 @@ def shadow():
         hour    = request.args.get("hour",   default=None,    type=int)
         month   = request.args.get("month",  default=None,    type=int)
         day     = request.args.get("day",    default=None,    type=int)
+        zoom    = request.args.get("zoom",   default=15,      type=int)
         min_lat = request.args.get("minLat", default=None,    type=float)
         min_lon = request.args.get("minLon", default=None,    type=float)
         max_lat = request.args.get("maxLat", default=None,    type=float)
@@ -229,67 +274,77 @@ def shadow():
                 "elevation": elevation,
                 "azimuth":   azimuth,
                 "dark_area": {"type": "FeatureCollection", "features": [
-                    {"type": "Feature", "geometry": mapping(dark_area),
+                    {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
                      "properties": {"layer": "shadow"}},
                 ]},
             })
 
-        # Compute bbox — capped to avoid slow shadow merging on huge areas
-        MAX_DEG = 0.020  # ~2.2 km at 48°N
-        if None not in (min_lat, min_lon, max_lat, max_lon):
-            half_lat = min((max_lat - min_lat) / 2, MAX_DEG)
-            half_lon = min((max_lon - min_lon) / 2, MAX_DEG)
-            q_min_lat, q_min_lon = lat - half_lat, lon - half_lon
-            q_max_lat, q_max_lon = lat + half_lat, lon + half_lon
+        ck  = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
+
+        if ck in _shadow_cache:
+            sunlit_filtered, compute_bbox = _shadow_cache[ck]
+            print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
         else:
-            q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
-            q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
+            # Compute bbox: use full viewport up to MAX_DEG cap
+            MAX_DEG = 0.030  # ~3.3 km at 48°N
+            if None not in (min_lat, min_lon, max_lat, max_lon):
+                half_lat = min((max_lat - min_lat) / 2, MAX_DEG)
+                half_lon = min((max_lon - min_lon) / 2, MAX_DEG)
+                q_min_lat, q_min_lon = lat - half_lat, lon - half_lon
+                q_max_lat, q_max_lon = lat + half_lat, lon + half_lon
+            else:
+                q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
+                q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
 
-        compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-        buildings    = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+            compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+            buildings    = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
 
-        # Compute shadow polygons
-        shadow_parts = []
-        for poly, height in buildings:
-            sh = project_shadow(poly, height, elevation, azimuth)
-            if sh and not sh.is_empty:
-                shadow_parts.append(sh)
+            def _project(args):
+                poly, height = args
+                return project_shadow(poly, height, elevation, azimuth)
 
-        # Merge buildings + shadows
-        building_polys = [p.buffer(0) for p, _ in buildings]
-        all_parts      = building_polys + shadow_parts
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                results = ex.map(_project, buildings)
+            shadow_parts = [sh for sh in results if sh and not sh.is_empty]
 
-        if all_parts:
-            merged   = unary_union(all_parts)
-            gap_fill = 0.00003
-            merged   = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
-            merged   = merged.simplify(0.00005, preserve_topology=True)
-            sunlit   = compute_bbox.difference(merged)
-        else:
-            sunlit = compute_bbox
+            t0 = time.time()
+            building_polys = [p for p, _ in buildings]
+            all_parts      = building_polys + shadow_parts
+            if all_parts:
+                merged   = parallel_union(all_parts)
+                gap_fill = 0.00003
+                merged   = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
+                merged   = merged.simplify(0.0001, preserve_topology=True)
+                sunlit   = compute_bbox.difference(merged)
+            else:
+                sunlit = compute_bbox
 
-        sunlit_simple = sunlit.simplify(0.00005, preserve_topology=True)
+            sunlit_simple   = sunlit.simplify(0.0001, preserve_topology=True)
+            sunlit_filtered = filter_small_polygons(sunlit_simple, 1e-6)
 
-        # Filter tiny fragments before computing any layers
-        MIN_AREA       = 1e-6
-        sunlit_filtered = filter_small_polygons(sunlit_simple, MIN_AREA)
+            _shadow_cache[ck] = (sunlit_filtered, compute_bbox)
+            if len(_shadow_cache) > MAX_CACHE:
+                _shadow_cache.pop(next(iter(_shadow_cache)))
 
-        # Dark overlay covers full viewport; sunlit punches holes in it
-        dark_area = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+            print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} "
+                  f"| z={zoom} | buildings={len(buildings)} | {time.time()-t0:.2f}s")
 
-        # Sunlit ground = filtered sunlit minus building footprints
-        building_union = unary_union(building_polys) if building_polys else None
-        if building_union and not building_union.is_empty:
-            sunlit_ground = orient(filter_small_polygons(
-                sunlit_filtered.difference(building_union), MIN_AREA), sign=1.0)
-        else:
-            sunlit_ground = orient(sunlit_filtered, sign=1.0)
-
-        print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} | buildings={len(buildings)}")
-
+        # Build features — avoid donuts/complex polygons (MapLibre triangulation issues):
+        # 1. Four simple rectangles filling the space outside compute_bbox (no holes)
+        # 2. Shadow areas within compute_bbox (with sunlit holes)
+        vp_minx, vp_miny, vp_maxx, vp_maxy = viewport_bbox.bounds
+        cb_minx, cb_miny, cb_maxx, cb_maxy = compute_bbox.bounds
+        outer_rects = [
+            shapely_box(vp_minx, cb_maxy, vp_maxx, vp_maxy),  # top
+            shapely_box(vp_minx, vp_miny, vp_maxx, cb_miny),  # bottom
+            shapely_box(vp_minx, cb_miny, cb_minx, cb_maxy),  # left
+            shapely_box(cb_maxx, cb_miny, vp_maxx, cb_maxy),  # right
+        ]
+        inner_shadow = orient(compute_bbox.difference(sunlit_filtered), sign=1.0)
         features = [
-            {"type": "Feature", "geometry": mapping(dark_area),    "properties": {"layer": "shadow"}},
-            {"type": "Feature", "geometry": mapping(sunlit_ground), "properties": {"layer": "sunlit_ground"}},
+            *({"type": "Feature", "geometry": round_coords(mapping(r)), "properties": {"layer": "shadow"}}
+              for r in outer_rects if not r.is_empty),
+            {"type": "Feature", "geometry": round_coords(mapping(inner_shadow)), "properties": {"layer": "shadow"}},
         ]
 
         return jsonify({
