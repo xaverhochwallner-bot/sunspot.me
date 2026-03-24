@@ -18,3 +18,4 @@ build/
 # Large OSM data files
 *.osm.pbf
 *.osm.bz2
+buildings_cache.pkl

@@ -6,6 +6,7 @@ from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from datetime import datetime
 import osmium
+import pickle
 import pytz
 import math
 import os
@@ -94,14 +95,32 @@ class BuildingHandler(osmium.SimpleHandler):
             pass
 
 
+CACHE_PATH = os.path.join(os.path.dirname(__file__), "buildings_cache.pkl")
+
 def load_buildings(pbf_path):
     global _buildings_polys, _buildings_heights, _buildings_tree
-    print(f"Loading buildings from {pbf_path} ...")
+
+    # Use cache if it exists and is newer than the PBF
+    if os.path.exists(CACHE_PATH):
+        if os.path.getmtime(CACHE_PATH) > os.path.getmtime(pbf_path):
+            print("Loading buildings from cache ...")
+            with open(CACHE_PATH, "rb") as f:
+                _buildings_polys, _buildings_heights = pickle.load(f)
+            _buildings_tree = STRtree(_buildings_polys)
+            print(f"Loaded {len(_buildings_polys):,} buildings from cache — ready.")
+            return
+
+    print(f"Parsing buildings from {pbf_path} (first run, will cache) ...")
     handler = BuildingHandler()
     handler.apply_file(pbf_path, locations=True)
     _buildings_polys   = handler.polys
     _buildings_heights = handler.heights
-    _buildings_tree    = STRtree(_buildings_polys)
+
+    print(f"Saving cache to {CACHE_PATH} ...")
+    with open(CACHE_PATH, "wb") as f:
+        pickle.dump((_buildings_polys, _buildings_heights), f)
+
+    _buildings_tree = STRtree(_buildings_polys)
     print(f"Loaded {len(_buildings_polys):,} buildings — spatial index ready.")
 
 
@@ -180,6 +199,8 @@ def shadow():
         lat     = request.args.get("lat",    default=48.2082, type=float)
         lon     = request.args.get("lon",    default=16.3738, type=float)
         hour    = request.args.get("hour",   default=None,    type=int)
+        month   = request.args.get("month",  default=None,    type=int)
+        day     = request.args.get("day",    default=None,    type=int)
         min_lat = request.args.get("minLat", default=None,    type=float)
         min_lon = request.args.get("minLon", default=None,    type=float)
         max_lat = request.args.get("maxLat", default=None,    type=float)
@@ -187,6 +208,8 @@ def shadow():
 
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime.now(tz)
+        if month is not None and day is not None:
+            now = now.replace(month=month, day=day)
         if hour is not None:
             now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
 
@@ -197,6 +220,19 @@ def shadow():
             viewport_bbox = shapely_box(min_lon, min_lat, max_lon, max_lat)
         else:
             viewport_bbox = shapely_box(lon - 0.01, lat - 0.01, lon + 0.01, lat + 0.01)
+
+        # Night: cover the entire viewport with a single dark polygon, no holes
+        if elevation <= 0:
+            dark_area = orient(viewport_bbox, sign=1.0)
+            return jsonify({
+                "time":      now.strftime("%H:%M"),
+                "elevation": elevation,
+                "azimuth":   azimuth,
+                "dark_area": {"type": "FeatureCollection", "features": [
+                    {"type": "Feature", "geometry": mapping(dark_area),
+                     "properties": {"layer": "shadow"}},
+                ]},
+            })
 
         # Compute bbox — capped to avoid slow shadow merging on huge areas
         MAX_DEG = 0.020  # ~2.2 km at 48°N
