@@ -112,7 +112,6 @@ class _SunMapScreenState extends State<SunMapScreen> {
 
     try { await ctrl.removeLayer('shadow-fill'); } catch (_) {}
     try { await ctrl.removeLayer('sunlit-ground-fill'); } catch (_) {}
-    try { await ctrl.removeLayer('building-fill'); } catch (_) {}
     try { await ctrl.removeSource('dark-area'); } catch (_) {}
 
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: darkAreaGeoJson));
@@ -133,13 +132,6 @@ class _SunMapScreenState extends State<SunMapScreen> {
       filter: ['==', ['get', 'layer'], 'sunlit_ground'],
     );
 
-    // Building rooftops (white)
-    await ctrl.addLayer(
-      'dark-area',
-      'building-fill',
-      FillLayerProperties(fillColor: '#ffffff', fillOpacity: 0.70),
-      filter: ['==', ['get', 'layer'], 'building'],
-    );
   }
 
   void _onCameraIdle() {
