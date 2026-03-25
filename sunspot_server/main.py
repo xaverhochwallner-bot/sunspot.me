@@ -123,6 +123,11 @@ LEVELS_HEIGHT  = 3.5   # metres per above-ground level (Austrian/German standard
 ROOF_HEIGHT    = 1.5   # metres per roof level
 DEFAULT_HEIGHT = 14.0  # Vienna dense urban default — ~4-storey equivalent
 
+# Self-occlusion: buildings above this height act as shadow occluders.
+# Shorter buildings whose centroid falls within an occluder's shadow are skipped —
+# they receive no direct sunlight and would otherwise extend the dark zone.
+OCCLUDER_HEIGHT = 18.0  # m (~5 storeys)
+
 
 def _parse_height(tags):
     try:
@@ -343,6 +348,65 @@ def _min_building_area(zoom):
     return 6e-8                   # zoom ≤ 12 — ~500 m², skip small outbuildings
 
 
+def _min_sunlit_area(zoom):
+    """Minimum sunlit patch area (deg²) to keep at a given zoom level.
+    Small sunlit spots vanish when zoomed out and reappear when zoomed in.
+    Interpolated in log-space so the scaling feels proportional.
+      zoom 16+ → ~10 m²     — every courtyard / alley visible
+      zoom 12  → ~20,000 m² — only large open sunny areas survive
+    """
+    z_low, z_high = 12, 16
+    a_low, a_high = 2e-6, 1e-9   # deg²  (low zoom → large threshold)
+    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
+    log_a = math.log10(a_low) + t * (math.log10(a_high) - math.log10(a_low))
+    return 10 ** log_a
+
+
+def _simplify_tolerance(zoom):
+    """Geometry simplification tolerance (deg) for a given zoom level.
+    More simplification at low zoom merges tiny sunlit gaps into shadow;
+    less at high zoom preserves every narrow street or courtyard.
+      zoom 16+ → 0.00003 (~3 m)
+      zoom 12  → 0.0008  (~90 m)
+    """
+    z_low, z_high = 12, 16
+    t_low, t_high = 0.0008, 0.00003
+    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
+    return t_low + t * (t_high - t_low)
+
+
+def _gap_fill(zoom):
+    """Morphological close distance (deg) for shadow merging and edge rounding.
+    At low zoom: large value — rounds sharp edges and bridges nearby shadow patches
+                 into smooth connected blobs.
+    At high zoom: small value — only fills hairline gaps between adjacent buildings.
+      zoom 11  → ~0.0020 deg (~200 m) — very round, heavily merged
+      zoom 16+ → ~0.00003 deg (~3 m)  — tight, preserves fine shadow edges
+    Interpolated in log-space.
+    """
+    z_low, z_high = 11, 16
+    g_low, g_high = 0.0020, 0.00003
+    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
+    log_g = math.log10(g_low) + t * (math.log10(g_high) - math.log10(g_low))
+    return 10 ** log_g
+
+
+def _shadow_erosion_steps(zoom):
+    """Two erosion distances (deg) that define the 3-ring contour shadow effect.
+    Eroding the sunlit area outward by e1/e2 shrinks the sunlit zone → only
+    deep shadow survives at l1/l2.  Wider rings at low zoom = topo-map blobs;
+    narrow rings at high zoom = fine street-level contours.
+      zoom ≤ 12 : [0.0010, 0.0030]  ~90 m / ~270 m rings
+      zoom 13   : [0.0005, 0.0015]  ~45 m / ~135 m
+      zoom 14   : [0.0002, 0.0006]  ~18 m / ~54 m
+      zoom 15+  : [0.00008, 0.0002] ~6 m  / ~18 m
+    """
+    if zoom >= 15: return (0.00008, 0.0002)
+    if zoom == 14: return (0.0002,  0.0006)
+    if zoom == 13: return (0.0005,  0.0015)
+    return                (0.0010,  0.0030)
+
+
 def filter_small_polygons(geom, min_area):
     if geom is None or geom.is_empty:
         return geom
@@ -396,7 +460,7 @@ def shadow():
                 "azimuth":   azimuth,
                 "dark_area": {"type": "FeatureCollection", "features": [
                     {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
-                     "properties": {"layer": "shadow"}},
+                     "properties": {"layer": "shadow-l0"}},
                 ]},
             })
 
@@ -425,23 +489,42 @@ def shadow():
                 return project_shadow(poly, height, elevation, azimuth)
 
             with ThreadPoolExecutor(max_workers=4) as ex:
-                results = ex.map(_project, buildings)
-            shadow_parts = [sh for sh in results if sh and not sh.is_empty]
+                all_shadows = list(ex.map(_project, buildings))
+
+            # Self-occlusion: build union of shadows from tall buildings (occluders),
+            # then skip shorter buildings whose centroid is already in that shadow.
+            tall_shadow_geoms = [
+                sh for (_, h), sh in zip(buildings, all_shadows)
+                if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
+            ]
+            occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
+
+            shadow_parts = []
+            for (poly, h), sh in zip(buildings, all_shadows):
+                if sh is None or sh.is_empty:
+                    continue
+                if (h < OCCLUDER_HEIGHT
+                        and occluder_union is not None
+                        and occluder_union.covers(poly.centroid)):
+                    continue  # building is in shadow — skip its projection
+                shadow_parts.append(sh)
 
             t0 = time.time()
             building_polys = [p for p, _ in buildings]
             all_parts      = building_polys + shadow_parts
             if all_parts:
-                merged   = parallel_union(all_parts)
-                gap_fill = 0.00003
-                merged   = merged.buffer(gap_fill).buffer(-gap_fill * 0.5)
-                merged   = merged.simplify(0.0001, preserve_topology=True)
-                sunlit   = compute_bbox.difference(merged)
+                merged = parallel_union(all_parts)
+                gfill  = _gap_fill(zoom)
+                stol   = _simplify_tolerance(zoom)
+                merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                merged = merged.simplify(stol, preserve_topology=True)
+                sunlit = compute_bbox.difference(merged)
             else:
                 sunlit = compute_bbox
 
-            sunlit_simple   = sunlit.simplify(0.0001, preserve_topology=True)
-            sunlit_filtered = filter_small_polygons(sunlit_simple, 1e-6)
+            stol            = _simplify_tolerance(zoom)
+            sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+            sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
             _shadow_cache[ck] = sunlit_filtered
             if len(_shadow_cache) > MAX_CACHE:
@@ -450,10 +533,31 @@ def shadow():
             print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} "
                   f"| z={zoom} | buildings={len(buildings)} | {time.time()-t0:.2f}s")
 
-        # Shadow fill covers the full viewport minus sunlit holes.
-        inner_shadow = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+        # Three-ring contour shadow (topo-map style):
+        #   l0 — full shadow (widest ring, lightest)
+        #   l1 — shadow eroded inward by e1 (medium ring)
+        #   l2 — shadow eroded inward by e2 (core, darkest)
+        # Stacked in Flutter, edge zones get only l0 (light), deep shadow
+        # zones get all three (dark) → topographic density effect.
+        e1, e2 = _shadow_erosion_steps(zoom)
+
+        shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+        try:
+            shadow_l1 = orient(viewport_bbox.difference(sunlit_filtered.buffer(e1)), sign=1.0)
+        except Exception:
+            shadow_l1 = shadow_l0
+        try:
+            shadow_l2 = orient(viewport_bbox.difference(sunlit_filtered.buffer(e2)), sign=1.0)
+        except Exception:
+            shadow_l2 = shadow_l1
+
         features = [
-            {"type": "Feature", "geometry": round_coords(mapping(inner_shadow)), "properties": {"layer": "shadow"}},
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l0)),
+             "properties": {"layer": "shadow-l0"}},
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l1)),
+             "properties": {"layer": "shadow-l1"}},
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l2)),
+             "properties": {"layer": "shadow-l2"}},
         ]
 
         return jsonify({

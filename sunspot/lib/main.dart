@@ -194,25 +194,47 @@ class _SunMapScreenState extends State<SunMapScreen> {
     }
   }
 
-  // Opacity fades at low sun elevation — harsh shadows only when sun is high
-  double _shadowOpacity(double elevation) {
-    if (elevation <= 0) return 0.85;
-    return 0.4 + (elevation.clamp(0.0, 60.0) / 60.0) * 0.45;
-  }
-
   Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
 
-    try { await ctrl.removeLayer('shadow-fill'); } catch (_) {}
-    try { await ctrl.removeSource('dark-area');  } catch (_) {}
+    for (final id in ['shadow-l2-fill', 'shadow-l1-fill', 'shadow-l0-fill']) {
+      try { await ctrl.removeLayer(id); } catch (_) {}
+    }
+    try { await ctrl.removeSource('dark-area'); } catch (_) {}
 
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: geoJson));
 
+    final t = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
+
+    // Three concentric rings — topo-map style shadow density:
+    //   l0 (widest)  → light tint, shadow edges
+    //   l1 (middle)  → medium, stacks on l0
+    //   l2 (core)    → darkest, stacks on l0+l1
+    // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
-      'dark-area', 'shadow-fill',
-      FillLayerProperties(fillColor: '#1a2535', fillOpacity: _shadowOpacity(elevation)),
-      filter: ['==', ['get', 'layer'], 'shadow'],
+      'dark-area', 'shadow-l0-fill',
+      FillLayerProperties(
+        fillColor: '#4a6d8a',
+        fillOpacity: elevation <= 0 ? 0.82 : 0.20 + t * 0.10,
+      ),
+      filter: ['==', ['get', 'layer'], 'shadow-l0'],
+    );
+    await ctrl.addLayer(
+      'dark-area', 'shadow-l1-fill',
+      FillLayerProperties(
+        fillColor: '#3d5f7d',
+        fillOpacity: elevation <= 0 ? 0.0 : 0.22 + t * 0.13,
+      ),
+      filter: ['==', ['get', 'layer'], 'shadow-l1'],
+    );
+    await ctrl.addLayer(
+      'dark-area', 'shadow-l2-fill',
+      FillLayerProperties(
+        fillColor: '#2d4862',
+        fillOpacity: elevation <= 0 ? 0.0 : 0.24 + t * 0.16,
+      ),
+      filter: ['==', ['get', 'layer'], 'shadow-l2'],
     );
   }
 
@@ -551,7 +573,7 @@ class _SunMapScreenState extends State<SunMapScreen> {
         const SizedBox(height: 10),
         _legendItem(color: const Color(0x00000000), border: true,  label: 'Sunlit area (map colors)'),
         const SizedBox(height: 6),
-        _legendItem(color: const Color(0xBF1a2535),               label: 'Shadow zone'),
+        _legendItem(color: const Color(0xAA3d5f7d),               label: 'Shadow zone'),
       ],
     );
   }
