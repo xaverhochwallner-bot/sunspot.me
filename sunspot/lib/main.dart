@@ -531,7 +531,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildTimeHeader(),
-              const SizedBox(height: 4),
+              const SizedBox(height: 2),
+              _buildSunSummary(),
+              const SizedBox(height: 2),
               _buildTimeSlider(),
               const SizedBox(height: 12),
               _buildAnimateButton(),
@@ -572,6 +574,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             );
           },
         ),
+      ],
+    );
+  }
+
+  // ---- Compact sun summary (always visible under time header) ----
+  Widget _buildSunSummary() {
+    if (_elevation == 0.0 && _azimuth == 0.0) return const SizedBox.shrink();
+    final label = _elevation <= 0
+        ? 'Below horizon'
+        : '${_elevation.toStringAsFixed(1)}°  ·  ${_azimuth.toStringAsFixed(0)}° ${_azimuthDirection(_azimuth)}';
+    return Row(
+      children: [
+        Icon(
+          _elevation <= 0 ? Icons.nightlight_round : Icons.wb_sunny_outlined,
+          size: 12, color: Colors.grey,
+        ),
+        const SizedBox(width: 4),
+        Text(label,
+            style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
     );
   }
