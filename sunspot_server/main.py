@@ -411,48 +411,46 @@ def _min_sunlit_area(zoom):
 
 
 def _simplify_tolerance(zoom):
-    """Geometry simplification tolerance (deg) for a given zoom level.
-    More simplification at low zoom merges tiny sunlit gaps into shadow;
-    less at high zoom preserves every narrow street or courtyard.
-      zoom 16+ → 0.00003 (~3 m)
-      zoom 12  → 0.0008  (~90 m)
+    """Geometry simplification tolerance (deg).
+    Scaled so fine shadow edges are preserved at high zoom.
+      zoom 16+ → ~2 m    zoom 14 → ~8 m    zoom 12 → ~30 m
     """
-    z_low, z_high = 12, 16
-    t_low, t_high = 0.0008, 0.00003
-    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
-    return t_low + t * (t_high - t_low)
+    if zoom >= 16: return 0.000020   # ~2 m
+    if zoom == 15: return 0.000040   # ~4 m
+    if zoom == 14: return 0.000080   # ~8 m
+    if zoom == 13: return 0.00015    # ~15 m
+    return               0.00030    # zoom ≤ 12 — ~30 m
 
 
 def _gap_fill(zoom):
-    """Morphological close distance (deg) for shadow merging and edge rounding.
-    At low zoom: large value — rounds sharp edges and bridges nearby shadow patches
-                 into smooth connected blobs.
-    At high zoom: small value — only fills hairline gaps between adjacent buildings.
-      zoom 11  → ~0.0020 deg (~200 m) — very round, heavily merged
-      zoom 16+ → ~0.00003 deg (~3 m)  — tight, preserves fine shadow edges
-    Interpolated in log-space.
+    """Morphological close distance (deg) — bridges hairline gaps between
+    adjacent shadow patches.  Kept proportional to screen pixel size so the
+    effect is consistent across zoom levels (~2-3 m at z16, ~35 m at z11).
     """
     z_low, z_high = 11, 16
-    g_low, g_high = 0.0020, 0.00003
+    g_low, g_high = 0.00060, 0.000025  # ~60 m at z11, ~2.5 m at z16
     t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
     log_g = math.log10(g_low) + t * (math.log10(g_high) - math.log10(g_low))
     return 10 ** log_g
 
 
 def _shadow_erosion_steps(zoom):
-    """Two erosion distances (deg) that define the 3-ring contour shadow effect.
-    Eroding the sunlit area outward by e1/e2 shrinks the sunlit zone → only
-    deep shadow survives at l1/l2.  Wider rings at low zoom = topo-map blobs;
-    narrow rings at high zoom = fine street-level contours.
-      zoom ≤ 12 : [0.0010, 0.0030]  ~90 m / ~270 m rings
-      zoom 13   : [0.0005, 0.0015]  ~45 m / ~135 m
-      zoom 14   : [0.0002, 0.0006]  ~18 m / ~54 m
-      zoom 15+  : [0.00008, 0.0002] ~6 m  / ~18 m
+    """Two erosion distances (deg) for the 3-ring depth effect.
+    Sized to produce ~2-3 screen pixels of ring width at every zoom level,
+    so depth is always subtle and never looks like a topo-map contour.
+      zoom 17+  : ~1.2 m / ~3 m   — essentially invisible rings
+      zoom 16   : ~2.5 m / ~6 m   — very subtle
+      zoom 15   : ~5 m  / ~12 m   — slight depth hint
+      zoom 14   : ~10 m / ~24 m   — noticeable depth
+      zoom 13   : ~19 m / ~48 m   — block-level depth
+      zoom ≤ 12 : ~38 m / ~95 m   — neighbourhood-scale gradient
     """
-    if zoom >= 15: return (0.00008, 0.0002)
-    if zoom == 14: return (0.0002,  0.0006)
-    if zoom == 13: return (0.0005,  0.0015)
-    return                (0.0010,  0.0030)
+    if zoom >= 17: return (0.000012, 0.000030)
+    if zoom >= 16: return (0.000022, 0.000055)
+    if zoom == 15: return (0.000045, 0.000110)
+    if zoom == 14: return (0.000090, 0.000220)
+    if zoom == 13: return (0.00017,  0.00043)
+    return               (0.00034,  0.00085)
 
 
 def filter_small_polygons(geom, min_area):
