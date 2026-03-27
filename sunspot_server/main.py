@@ -583,11 +583,16 @@ def shadow():
 
         elevation, azimuth = get_sun_angles(lat, lon, now)
 
-        # Full viewport bbox — dark overlay covers this
+        # Large outer boundary — shadow extends well beyond visible screen so
+        # the rectangular edge is never visible regardless of zoom level.
+        SHADOW_BBOX_PAD = 1.5  # degrees (~150 km) — always beyond any viewport
         if None not in (min_lat, min_lon, max_lat, max_lon):
-            viewport_bbox = shapely_box(min_lon, min_lat, max_lon, max_lat)
+            viewport_bbox = shapely_box(
+                min_lon - SHADOW_BBOX_PAD, min_lat - SHADOW_BBOX_PAD,
+                max_lon + SHADOW_BBOX_PAD, max_lat + SHADOW_BBOX_PAD,
+            )
         else:
-            viewport_bbox = shapely_box(lon - 0.01, lat - 0.01, lon + 0.01, lat + 0.01)
+            viewport_bbox = shapely_box(lon - 1.5, lat - 1.5, lon + 1.5, lat + 1.5)
 
         # Night: cover the entire viewport with a single dark polygon, no holes
         if elevation <= 0:
@@ -753,20 +758,23 @@ def shadow_stream():
 
             elevation, azimuth = get_sun_angles(lat, lon, now)
 
-            VIEWPORT_PAD = 0.15
+            VIEWPORT_PAD  = 0.15   # building query area — 15% beyond viewport
+            SHADOW_BBOX_PAD = 1.5  # shadow outer boundary — always off-screen
             if None not in (min_lat, min_lon, max_lat, max_lon):
                 _vw = max_lon - min_lon
                 _vh = max_lat - min_lat
+                # Shadow bbox is huge so its edge is never visible on any zoom
                 viewport_bbox = shapely_box(
-                    min_lon - _vw * VIEWPORT_PAD, min_lat - _vh * VIEWPORT_PAD,
-                    max_lon + _vw * VIEWPORT_PAD, max_lat + _vh * VIEWPORT_PAD,
+                    min_lon - SHADOW_BBOX_PAD, min_lat - SHADOW_BBOX_PAD,
+                    max_lon + SHADOW_BBOX_PAD, max_lat + SHADOW_BBOX_PAD,
                 )
+                # Building query uses the smaller 15% pad (performance)
                 q_min_lat = min_lat - _vh * VIEWPORT_PAD
                 q_min_lon = min_lon - _vw * VIEWPORT_PAD
                 q_max_lat = max_lat + _vh * VIEWPORT_PAD
                 q_max_lon = max_lon + _vw * VIEWPORT_PAD
             else:
-                viewport_bbox = shapely_box(lon - 0.012, lat - 0.012, lon + 0.012, lat + 0.012)
+                viewport_bbox = shapely_box(lon - 1.5, lat - 1.5, lon + 1.5, lat + 1.5)
                 q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
                 q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
 
