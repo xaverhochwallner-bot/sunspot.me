@@ -56,6 +56,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   html.EventSource?   _activeEventSource;
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
+  bool                _shadowLayersReady = false;
 
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
@@ -122,6 +123,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
+    _shadowLayersReady = false;  // style reload clears all layers
     fetchShadows();
   }
 
@@ -282,14 +284,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null) return;
 
-    for (final id in ['shadow-l2-fill', 'shadow-l1-fill', 'shadow-l0-fill']) {
-      try { await ctrl.removeLayer(id); } catch (_) {}
+    final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
+    final opL0 = elevation <= 0 ? 0.82 : 0.20 + t * 0.10;
+    final opL1 = elevation <= 0 ? 0.0  : 0.22 + t * 0.13;
+    final opL2 = elevation <= 0 ? 0.0  : 0.24 + t * 0.16;
+
+    if (_shadowLayersReady) {
+      // Update source data + opacity in-place — no remove/re-add, no flicker
+      await ctrl.setGeoJsonSource('dark-area', geoJson);
+      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: opL0));
+      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: opL1));
+      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: opL2));
+      return;
     }
-    try { await ctrl.removeSource('dark-area'); } catch (_) {}
 
+    // First time (or after style reload): create source and layers
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: geoJson));
-
-    final t = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
 
     // Three concentric rings — topo-map style shadow density:
     //   l0 (widest)  → light tint, shadow edges
@@ -298,28 +308,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(
-        fillColor: '#4a6d8a',
-        fillOpacity: elevation <= 0 ? 0.82 : 0.20 + t * 0.10,
-      ),
+      FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(
-        fillColor: '#3d5f7d',
-        fillOpacity: elevation <= 0 ? 0.0 : 0.22 + t * 0.13,
-      ),
+      FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(
-        fillColor: '#2d4862',
-        fillOpacity: elevation <= 0 ? 0.0 : 0.24 + t * 0.16,
-      ),
+      FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
     );
+    _shadowLayersReady = true;
   }
 
   // -------------------------------------------------------------------------
@@ -578,7 +580,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 color: Colors.grey, letterSpacing: 1.2)),
         const Spacer(),
         TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0.0, end: _hour),
+          tween: Tween(begin: _hour, end: _hour),  // begin=_hour: no sweep-from-midnight on load; subsequent changes animate from current value
           duration: const Duration(milliseconds: 350),
           builder: (context, value, _) {
             return Text(
