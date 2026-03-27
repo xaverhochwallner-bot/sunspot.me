@@ -29,7 +29,7 @@ class SunMapScreen extends StatefulWidget {
   State<SunMapScreen> createState() => _SunMapScreenState();
 }
 
-class _SunMapScreenState extends State<SunMapScreen> {
+class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderStateMixin {
   static const String flaskBaseUrl = 'http://127.0.0.1:5000';
   static const String mapStyle     = 'https://tiles.openfreemap.org/styles/bright';
 
@@ -44,9 +44,20 @@ class _SunMapScreenState extends State<SunMapScreen> {
   bool     _loading       = false;
   bool     _mapReady      = false;
   bool     _hasData       = false;
-  bool     _animating     = false;
+  bool     _animating      = false;
+  int      _animSpeed      = 1;   // 1, 2, or 4
   bool     _draggingSlider = false;
   String?  _errorMessage;
+
+  double              _loadingProgress = 0.0;
+  String              _loadingStage    = '';
+  html.EventSource?   _activeEventSource;
+  int                 _fetchGen        = 0;
+
+  late final AnimationController _sunSpinCtrl = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 3),
+  )..repeat();
 
   // -------------------------------------------------------------------------
   // Helpers
@@ -58,6 +69,16 @@ class _SunMapScreenState extends State<SunMapScreen> {
     if (h < 12)  return '$h:00 AM';
     if (h == 12) return '12:00 PM';
     return '${h - 12}:00 PM';
+  }
+
+  // Used by TweenAnimationBuilder — accepts fractional hours during animation
+  String _formatDisplayHour(double h) {
+    final totalMinutes = (h * 60).round() % (24 * 60);
+    final hour   = totalMinutes ~/ 60;
+    final minute = totalMinutes % 60;
+    final period = hour < 12 ? 'AM' : 'PM';
+    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
+    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
   }
 
   String get _timePeriod {
@@ -148,13 +169,22 @@ class _SunMapScreenState extends State<SunMapScreen> {
 
   Future<void> fetchShadows() async {
     if (!_mapReady || _mapController == null) return;
-    setState(() => _loading = true);
+
+    _activeEventSource?.close();
+    _activeEventSource = null;
+    final gen = ++_fetchGen;
+
+    setState(() {
+      _loading         = true;
+      _loadingProgress = 0.0;
+      _loadingStage    = 'Starting…';
+    });
 
     try {
       final bounds = await _mapController!.getVisibleRegion();
       final zoom   = (_mapController!.cameraPosition?.zoom ?? 15.0).toInt();
       final uri = Uri.parse(
-        '$flaskBaseUrl/shadow'
+        '$flaskBaseUrl/shadow/stream'
         '?lat=${_currentCenter.latitude}'
         '&lon=${_currentCenter.longitude}'
         '&hour=${_hour.toInt()}'
@@ -167,30 +197,58 @@ class _SunMapScreenState extends State<SunMapScreen> {
         '&maxLon=${bounds.northeast.longitude}',
       );
 
-      final response = await http.get(uri).timeout(const Duration(seconds: 120));
+      final es = html.EventSource(uri.toString());
+      _activeEventSource = es;
 
-      if (response.statusCode == 200 && response.body.isNotEmpty) {
-        final data = jsonDecode(response.body);
-        final elev = (data['elevation'] as num?)?.toDouble() ?? 0.0;
-        final azim = (data['azimuth']  as num?)?.toDouble() ?? 0.0;
+      es.onMessage.listen((event) async {
+        if (gen != _fetchGen) { es.close(); return; }
 
-        if (data['dark_area'] != null) {
-          await _updateMapLayers(data['dark_area'] as Map<String, dynamic>, elev);
+        final data  = jsonDecode(event.data as String) as Map<String, dynamic>;
+        final pct   = (data['progress'] as num?)?.toDouble() ?? 0.0;
+        final stage = data['stage'] as String? ?? '';
+
+        if (mounted) setState(() {
+          _loadingProgress = pct / 100.0;
+          _loadingStage    = stage;
+        });
+
+        if (data.containsKey('result')) {
+          es.close();
+          _activeEventSource = null;
+          final result = data['result'] as Map<String, dynamic>;
+          final elev   = (result['elevation'] as num?)?.toDouble() ?? 0.0;
+          final azim   = (result['azimuth']   as num?)?.toDouble() ?? 0.0;
+          if (result['dark_area'] != null) {
+            await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
+          }
+          if (mounted) setState(() {
+            _elevation = elev;
+            _azimuth   = azim;
+            _loading   = false;
+            _hasData   = true;
+          });
         }
 
-        setState(() {
-          _elevation = elev;
-          _azimuth   = azim;
-          _loading   = false;
-          _hasData   = true;
-        });
-      } else {
-        setState(() => _loading = false);
-      }
+        if (data.containsKey('error')) {
+          es.close();
+          _activeEventSource = null;
+          _showError(data['error'] as String? ?? 'Server error');
+          if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+        }
+      });
+
+      es.onError.listen((_) {
+        if (gen != _fetchGen) return;
+        es.close();
+        _activeEventSource = null;
+        _showError('Could not load shadows — is the server running?');
+        if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+      });
+
     } catch (e) {
       debugPrint('Fetch error: $e');
       _showError('Could not load shadows — is the server running?');
-      setState(() => _loading = false);
+      if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
     }
   }
 
@@ -255,7 +313,8 @@ class _SunMapScreenState extends State<SunMapScreen> {
     if (!_animating) return;
     setState(() => _hour = (_hour + 1) % 24);
     await fetchShadows();
-    await Future.delayed(const Duration(milliseconds: 500));
+    final ms = _animSpeed == 4 ? 0 : (_animSpeed == 2 ? 200 : 500);
+    if (ms > 0) await Future.delayed(Duration(milliseconds: ms));
     if (_animating) _runAnimationStep();
   }
 
@@ -283,6 +342,8 @@ class _SunMapScreenState extends State<SunMapScreen> {
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _sunSpinCtrl.dispose();
+    _activeEventSource?.close();
     super.dispose();
   }
 
@@ -305,16 +366,23 @@ class _SunMapScreenState extends State<SunMapScreen> {
           ),
 
 
-          // Loading bar — thin strip at top of map area only
+          // Loading bar — determinate when progress is known
           if (_loading)
             Positioned(
               top: 0, left: 0, right: 280,
               child: LinearProgressIndicator(
+                value: _loadingProgress > 0 ? _loadingProgress : null,
                 minHeight: 3,
                 backgroundColor: Colors.transparent,
                 color: Colors.orangeAccent,
               ),
             ),
+
+          // Loading pill — bottom-center of map area
+          Positioned(
+            bottom: 24, left: 0, right: 280,
+            child: Center(child: _buildLoadingPill()),
+          ),
 
           // Geolocation button
           Positioned(
@@ -352,6 +420,71 @@ class _SunMapScreenState extends State<SunMapScreen> {
             child: _buildPanel(),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildLoadingPill() {
+    return AnimatedOpacity(
+      opacity: _loading ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 250),
+      child: IgnorePointer(
+        ignoring: !_loading,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.94),
+            borderRadius: BorderRadius.circular(28),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.16),
+                blurRadius: 18,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  RotationTransition(
+                    turns: _sunSpinCtrl,
+                    child: const Icon(Icons.wb_sunny, color: Colors.orange, size: 16),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _loadingStage.isEmpty ? 'Loading…' : _loadingStage,
+                    style: const TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w500, color: Colors.black87,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${(_loadingProgress * 100).toInt()}%',
+                    style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.bold, color: Colors.orange,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 7),
+              SizedBox(
+                width: 210,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: _loadingProgress > 0 ? _loadingProgress : null,
+                    minHeight: 5,
+                    backgroundColor: Colors.orange.shade100,
+                    color: Colors.orange,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -403,10 +536,19 @@ class _SunMapScreenState extends State<SunMapScreen> {
                 fontSize: 11, fontWeight: FontWeight.w700,
                 color: Colors.grey, letterSpacing: 1.2)),
         const Spacer(),
-        Text(_formattedTime,
-            style: TextStyle(
+        TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.0, end: _hour),
+          duration: const Duration(milliseconds: 350),
+          builder: (context, value, _) {
+            return Text(
+              _formatDisplayHour(value),
+              style: TextStyle(
                 fontSize: 18, fontWeight: FontWeight.bold,
-                color: _draggingSlider ? Colors.orange : Colors.black87)),
+                color: _draggingSlider ? Colors.orange : Colors.black87,
+              ),
+            );
+          },
+        ),
       ],
     );
   }
@@ -458,19 +600,51 @@ class _SunMapScreenState extends State<SunMapScreen> {
 
   // ---- Animate button ----
   Widget _buildAnimateButton() {
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        onPressed: _toggleAnimation,
-        icon: Icon(_animating ? Icons.stop : Icons.play_arrow, size: 18),
-        label: Text(_animating ? 'Stop animation' : 'Animate shadows'),
-        style: OutlinedButton.styleFrom(
-          foregroundColor: Colors.black87,
-          side: const BorderSide(color: Colors.black26),
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          textStyle: const TextStyle(fontSize: 13),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _toggleAnimation,
+            icon: Icon(_animating ? Icons.stop : Icons.play_arrow, size: 18),
+            label: Text(_animating ? 'Stop animation' : 'Animate shadows'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.black87,
+              side: const BorderSide(color: Colors.black26),
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              textStyle: const TextStyle(fontSize: 13),
+            ),
+          ),
         ),
-      ),
+        const SizedBox(height: 6),
+        Row(
+          children: [1, 2, 4].map((speed) {
+            final selected = _animSpeed == speed;
+            return Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: GestureDetector(
+                onTap: () => setState(() => _animSpeed = speed),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: selected ? Colors.orange : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${speed}x',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: selected ? Colors.white : Colors.black54,
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 

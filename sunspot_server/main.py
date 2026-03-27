@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
 from shapely.geometry import Polygon, box as shapely_box, mapping
 from shapely.geometry.polygon import orient
@@ -10,8 +10,9 @@ import pickle
 import pytz
 import math
 import os
+import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pysolar.solar as ps
 
 app = Flask(__name__)
@@ -316,7 +317,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
 def _union_chunk(chunk):
     return unary_union(chunk)
 
-def parallel_union(geoms, chunk_size=150, max_workers=4):
+def parallel_union(geoms, chunk_size=150, max_workers=8):
     """Union a large list of geometries in parallel chunks, then merge results."""
     if not geoms:
         return None
@@ -488,16 +489,20 @@ def shadow():
                 poly, height = args
                 return project_shadow(poly, height, elevation, azimuth)
 
-            with ThreadPoolExecutor(max_workers=4) as ex:
+            with ThreadPoolExecutor(max_workers=8) as ex:
                 all_shadows = list(ex.map(_project, buildings))
 
             # Self-occlusion: build union of shadows from tall buildings (occluders),
             # then skip shorter buildings whose centroid is already in that shadow.
-            tall_shadow_geoms = [
-                sh for (_, h), sh in zip(buildings, all_shadows)
-                if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
-            ]
-            occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
+            # Skip at zoom < 14 — not perceptible and saves significant time.
+            if zoom >= 14:
+                tall_shadow_geoms = [
+                    sh for (_, h), sh in zip(buildings, all_shadows)
+                    if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
+                ]
+                occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
+            else:
+                occluder_union = None
 
             shadow_parts = []
             for (poly, h), sh in zip(buildings, all_shadows):
@@ -574,10 +579,191 @@ def shadow():
 
 
 # ---------------------------------------------------------------------------
+# Shadow — SSE streaming endpoint (progress events, same shadow logic)
+# ---------------------------------------------------------------------------
+
+@app.route("/shadow/stream")
+def shadow_stream():
+    lat     = request.args.get("lat",    default=48.2082, type=float)
+    lon     = request.args.get("lon",    default=16.3738, type=float)
+    hour    = request.args.get("hour",   default=None,    type=int)
+    month   = request.args.get("month",  default=None,    type=int)
+    day     = request.args.get("day",    default=None,    type=int)
+    zoom    = request.args.get("zoom",   default=15.0,    type=float)
+    min_lat = request.args.get("minLat", default=None,    type=float)
+    min_lon = request.args.get("minLon", default=None,    type=float)
+    max_lat = request.args.get("maxLat", default=None,    type=float)
+    max_lon = request.args.get("maxLon", default=None,    type=float)
+
+    def _evt(progress, stage="", result=None, error=None):
+        payload = {"progress": progress, "stage": stage}
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        return f"data: {json.dumps(payload)}\n\n"
+
+    def generate():
+        try:
+            yield _evt(5, "Sun position")
+
+            tz  = pytz.timezone("Europe/Vienna")
+            now = datetime.now(tz)
+            if month is not None and day is not None:
+                now = now.replace(month=month, day=day)
+            if hour is not None:
+                now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+
+            elevation, azimuth = get_sun_angles(lat, lon, now)
+
+            VIEWPORT_PAD = 0.15
+            if None not in (min_lat, min_lon, max_lat, max_lon):
+                _vw = max_lon - min_lon
+                _vh = max_lat - min_lat
+                viewport_bbox = shapely_box(
+                    min_lon - _vw * VIEWPORT_PAD, min_lat - _vh * VIEWPORT_PAD,
+                    max_lon + _vw * VIEWPORT_PAD, max_lat + _vh * VIEWPORT_PAD,
+                )
+                q_min_lat = min_lat - _vh * VIEWPORT_PAD
+                q_min_lon = min_lon - _vw * VIEWPORT_PAD
+                q_max_lat = max_lat + _vh * VIEWPORT_PAD
+                q_max_lon = max_lon + _vw * VIEWPORT_PAD
+            else:
+                viewport_bbox = shapely_box(lon - 0.012, lat - 0.012, lon + 0.012, lat + 0.012)
+                q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
+                q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
+
+            # Night — instant response
+            if elevation <= 0:
+                dark_area = orient(viewport_bbox, sign=1.0)
+                yield _evt(100, "Night", result={
+                    "time":      now.strftime("%H:%M"),
+                    "elevation": elevation,
+                    "azimuth":   azimuth,
+                    "dark_area": {"type": "FeatureCollection", "features": [
+                        {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
+                         "properties": {"layer": "shadow-l0"}},
+                    ]},
+                })
+                return
+
+            ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
+
+            if ck not in _shadow_cache:
+                compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+                min_bld_area = _min_building_area(zoom)
+                buildings = [(p, h) for p, h in
+                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+                             if p.area >= min_bld_area]
+                n = len(buildings)
+
+                yield _evt(15, f"Projecting {n} buildings")
+
+                all_shadows = [None] * n
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    future_to_idx = {
+                        ex.submit(project_shadow, poly, height, elevation, azimuth): i
+                        for i, (poly, height) in enumerate(buildings)
+                    }
+                    done, last_pct = 0, 15
+                    for fut in as_completed(future_to_idx):
+                        idx = future_to_idx[fut]
+                        try:    all_shadows[idx] = fut.result()
+                        except: all_shadows[idx] = None
+                        done += 1
+                        pct = 15 + int(45 * done / max(n, 1))
+                        if pct >= last_pct + 5:
+                            last_pct = pct
+                            yield _evt(pct, f"Shadows {done}/{n}")
+
+                yield _evt(60, "Merging geometry")
+
+                if zoom >= 14:
+                    tall_shadow_geoms = [
+                        sh for (_, h), sh in zip(buildings, all_shadows)
+                        if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
+                    ]
+                    occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
+                else:
+                    occluder_union = None
+
+                shadow_parts = []
+                for (poly, h), sh in zip(buildings, all_shadows):
+                    if sh is None or sh.is_empty:
+                        continue
+                    if (h < OCCLUDER_HEIGHT
+                            and occluder_union is not None
+                            and occluder_union.covers(poly.centroid)):
+                        continue
+                    shadow_parts.append(sh)
+
+                yield _evt(70, "Unioning shadows")
+
+                building_polys = [p for p, _ in buildings]
+                all_parts = building_polys + shadow_parts
+                if all_parts:
+                    merged = parallel_union(all_parts)
+                    gfill  = _gap_fill(zoom)
+                    stol   = _simplify_tolerance(zoom)
+                    merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                    merged = merged.simplify(stol, preserve_topology=True)
+                    sunlit = compute_bbox.difference(merged)
+                else:
+                    sunlit = compute_bbox
+
+                yield _evt(85, "Simplifying")
+
+                stol            = _simplify_tolerance(zoom)
+                sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+                sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+
+                _shadow_cache[ck] = sunlit_filtered
+                if len(_shadow_cache) > MAX_CACHE:
+                    _shadow_cache.pop(next(iter(_shadow_cache)))
+            else:
+                yield _evt(90, "Cached")
+
+            yield _evt(90, "Building response")
+
+            sunlit_filtered = _shadow_cache[ck]
+            e1, e2 = _shadow_erosion_steps(zoom)
+
+            shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+            try:    shadow_l1 = orient(viewport_bbox.difference(sunlit_filtered.buffer(e1)), sign=1.0)
+            except: shadow_l1 = shadow_l0
+            try:    shadow_l2 = orient(viewport_bbox.difference(sunlit_filtered.buffer(e2)), sign=1.0)
+            except: shadow_l2 = shadow_l1
+
+            yield _evt(100, "Done", result={
+                "time":      now.strftime("%H:%M"),
+                "elevation": elevation,
+                "azimuth":   azimuth,
+                "dark_area": {"type": "FeatureCollection", "features": [
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l0)),
+                     "properties": {"layer": "shadow-l0"}},
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l1)),
+                     "properties": {"layer": "shadow-l1"}},
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l2)),
+                     "properties": {"layer": "shadow-l2"}},
+                ]},
+            })
+
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            yield _evt(0, error=str(e))
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     load_buildings(PBF_PATH)
     print("Starting Flask server on http://127.0.0.1:5000 ...")
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False, threaded=True)
