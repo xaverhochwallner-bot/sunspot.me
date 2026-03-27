@@ -55,6 +55,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Timer?              _pillTimer;
   html.EventSource?   _activeEventSource;
   int                 _fetchGen        = 0;
+  Completer<void>?    _fetchCompleter;
 
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
@@ -175,6 +176,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _activeEventSource?.close();
     _activeEventSource = null;
     _pillTimer?.cancel();
+    // Complete previous completer so any awaiting caller (animation) unblocks
+    if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
+      _fetchCompleter!.complete();
+    }
+    final completer = Completer<void>();
+    _fetchCompleter = completer;
     final gen = ++_fetchGen;
 
     setState(() {
@@ -238,6 +245,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _showPill  = false;
             _hasData   = true;
           });
+          if (!completer.isCompleted) completer.complete();
         }
 
         if (data.containsKey('error')) {
@@ -246,6 +254,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _pillTimer?.cancel();
           _showError(data['error'] as String? ?? 'Server error');
           if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+          if (!completer.isCompleted) completer.complete();
         }
       });
 
@@ -256,12 +265,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         _pillTimer?.cancel();
         _showError('Could not load shadows — is the server running?');
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        if (!completer.isCompleted) completer.complete();
       });
+
+      return completer.future;
 
     } catch (e) {
       debugPrint('Fetch error: $e');
       _showError('Could not load shadows — is the server running?');
       if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+      if (!completer.isCompleted) completer.complete();
     }
   }
 
@@ -358,6 +371,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _pillTimer?.cancel();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
+    if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
+      _fetchCompleter!.complete();
+    }
     super.dispose();
   }
 
