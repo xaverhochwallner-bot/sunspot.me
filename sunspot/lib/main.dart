@@ -51,6 +51,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   double              _loadingProgress = 0.0;
   String              _loadingStage    = '';
+  bool                _showPill        = false;  // only true after 150ms delay
+  Timer?              _pillTimer;
   html.EventSource?   _activeEventSource;
   int                 _fetchGen        = 0;
 
@@ -172,12 +174,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     _activeEventSource?.close();
     _activeEventSource = null;
+    _pillTimer?.cancel();
     final gen = ++_fetchGen;
 
     setState(() {
       _loading         = true;
       _loadingProgress = 0.0;
-      _loadingStage    = 'Starting…';
+      _loadingStage    = '';
+      _showPill        = false;
+    });
+
+    // Only show the pill if loading takes longer than 150ms (skips cached hits)
+    _pillTimer = Timer(const Duration(milliseconds: 150), () {
+      if (mounted && _loading) setState(() => _showPill = true);
     });
 
     try {
@@ -221,10 +230,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (result['dark_area'] != null) {
             await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
           }
+          _pillTimer?.cancel();
           if (mounted) setState(() {
             _elevation = elev;
             _azimuth   = azim;
             _loading   = false;
+            _showPill  = false;
             _hasData   = true;
           });
         }
@@ -232,8 +243,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         if (data.containsKey('error')) {
           es.close();
           _activeEventSource = null;
+          _pillTimer?.cancel();
           _showError(data['error'] as String? ?? 'Server error');
-          if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+          if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         }
       });
 
@@ -241,8 +253,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         if (gen != _fetchGen) return;
         es.close();
         _activeEventSource = null;
+        _pillTimer?.cancel();
         _showError('Could not load shadows — is the server running?');
-        if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+        if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
       });
 
     } catch (e) {
@@ -342,6 +355,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _pillTimer?.cancel();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     super.dispose();
@@ -392,7 +406,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               backgroundColor: Colors.white,
               foregroundColor: Colors.black87,
               elevation: 2,
-              child: const Icon(Icons.my_location, size: 20),
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: _loading
+                    ? RotationTransition(
+                        key: const ValueKey('spin'),
+                        turns: _sunSpinCtrl,
+                        child: const Icon(Icons.wb_sunny, size: 20, color: Colors.orange),
+                      )
+                    : const Icon(Icons.my_location, size: 20, key: ValueKey('loc')),
+              ),
             ),
           ),
 
@@ -426,10 +449,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Widget _buildLoadingPill() {
     return AnimatedOpacity(
-      opacity: _loading ? 1.0 : 0.0,
+      opacity: _showPill ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 250),
       child: IgnorePointer(
-        ignoring: !_loading,
+        ignoring: !_showPill,
         child: Container(
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
           decoration: BoxDecoration(
