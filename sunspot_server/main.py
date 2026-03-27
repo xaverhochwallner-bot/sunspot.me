@@ -13,6 +13,7 @@ import os
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import pysolar.solar as ps
 
 app = Flask(__name__)
@@ -22,17 +23,25 @@ CORS(app)
 PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 
 # ---------------------------------------------------------------------------
-# Shadow cache — keyed by (hour, month, day, lat_grid, lon_grid)
+# Shadow cache — keyed by (hour, month, day, zoom, lat_grid, lon_grid)
 # Stores sunlit_filtered geometry; viewport overlay is recomputed cheaply on hit
 # ---------------------------------------------------------------------------
 _shadow_cache = {}
-MAX_CACHE     = 500
-CACHE_GRID    = 0.005  # ~500m grid
+MAX_CACHE     = 2000
+
+# Cache grid snaps lat/lon so nearby viewports share a cached result.
+# Coarser grid at low zoom → many more cache hits when panning at z12-13.
+def _cache_grid(zoom):
+    if zoom <= 12: return 0.05   # ~5 km  — whole-city tile
+    if zoom == 13: return 0.02   # ~2 km
+    if zoom == 14: return 0.01   # ~1 km
+    return 0.005                 # zoom ≥ 15 — ~500 m
 
 def _cache_key(hour, month, day, lat, lon, zoom):
+    g = _cache_grid(zoom)
     return (hour, month, day, zoom,
-            round(round(lat / CACHE_GRID) * CACHE_GRID, 6),
-            round(round(lon / CACHE_GRID) * CACHE_GRID, 6))
+            round(round(lat / g) * g, 6),
+            round(round(lon / g) * g, 6))
 
 
 # ---------------------------------------------------------------------------
@@ -52,9 +61,21 @@ def get_sun_angles(lat, lon, at_time):
 # Building data — loaded once at startup from local PBF
 # ---------------------------------------------------------------------------
 
-_buildings_polys   = []   # list of Shapely Polygon
+_buildings_polys   = []   # list of Shapely Polygon (full detail)
 _buildings_heights = []   # list of float
 _buildings_tree    = None # STRtree spatial index
+
+# Pre-simplified polygon sets built at startup — keyed by zoom level.
+# Same heights as _buildings_heights; only geometry is simplified.
+# Tolerances chosen so shadows are indistinguishable at each zoom level.
+_simplified_polys  = {}   # zoom → list[Polygon]
+_simplified_trees  = {}   # zoom → STRtree
+
+PRE_SIMPLIFY = {
+    12: 0.00020,  # ~20 m — buildings become pentagons
+    13: 0.00008,  # ~8 m
+    14: 0.00003,  # ~3 m
+}
 
 MIN_BUILDING_AREA = 5e-9  # ~25 m²
 
@@ -219,6 +240,7 @@ def load_buildings(pbf_path):
                 _buildings_polys, _buildings_heights = pickle.load(f)
             _buildings_tree = STRtree(_buildings_polys)
             print(f"Loaded {len(_buildings_polys):,} buildings from cache — ready.")
+            _build_simplified_sets()
             return
 
     print(f"Parsing buildings from {pbf_path} (first run, will cache) ...")
@@ -258,13 +280,38 @@ def load_buildings(pbf_path):
 
     _buildings_tree = STRtree(_buildings_polys)
     print(f"Loaded {len(_buildings_polys):,} buildings — spatial index ready.")
+    _build_simplified_sets()
 
 
-def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon):
-    bbox    = shapely_box(min_lon, min_lat, max_lon, max_lat)
-    indices = _buildings_tree.query(bbox)
-    return [(_buildings_polys[i], _buildings_heights[i]) for i in indices
-            if _buildings_polys[i].intersects(bbox)]
+def _build_simplified_sets():
+    """Build pre-simplified polygon sets for low zoom levels.
+    Called once after buildings are loaded. Pays the simplification cost
+    upfront so per-request parallel_union runs on smaller geometries.
+    """
+    global _simplified_polys, _simplified_trees
+    for zoom, tol in PRE_SIMPLIFY.items():
+        print(f"Pre-simplifying buildings for zoom {zoom} (tol={tol}) ...")
+        simplified = []
+        for p in _buildings_polys:
+            s = p.simplify(tol, preserve_topology=True)
+            simplified.append(s if (s and not s.is_empty and s.is_valid) else p)
+        _simplified_polys[zoom] = simplified
+        _simplified_trees[zoom] = STRtree(simplified)
+        print(f"  zoom {zoom}: {len(simplified):,} polygons ready.")
+
+
+def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=None):
+    bbox = shapely_box(min_lon, min_lat, max_lon, max_lat)
+    # Use pre-simplified set when available — same shadow result, faster union
+    if zoom is not None and zoom in _simplified_polys:
+        polys = _simplified_polys[zoom]
+        tree  = _simplified_trees[zoom]
+    else:
+        polys = _buildings_polys
+        tree  = _buildings_tree
+    indices = tree.query(bbox)
+    return [(polys[i], _buildings_heights[i]) for i in indices
+            if polys[i].intersects(bbox)]
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +467,98 @@ def filter_small_polygons(geom, min_area):
 
 
 # ---------------------------------------------------------------------------
+# Background pre-warming — compute lower-zoom shadows while user browses
+# ---------------------------------------------------------------------------
+
+_prewarm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prewarm")
+_prewarm_in_flight = set()
+_prewarm_lock = threading.Lock()
+
+def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
+    """Compute and cache shadow for a given center/zoom if not already cached."""
+    ck = _cache_key(hour, month, day, lat, lon, zoom)
+    if ck in _shadow_cache:
+        return
+    try:
+        tz  = pytz.timezone("Europe/Vienna")
+        now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
+        elevation, azimuth = get_sun_angles(lat, lon, now)
+        if elevation <= 0:
+            return
+
+        pad = 0.15
+        q_min_lat = lat - vp_h / 2 - vp_h * pad
+        q_min_lon = lon - vp_w / 2 - vp_w * pad
+        q_max_lat = lat + vp_h / 2 + vp_h * pad
+        q_max_lon = lon + vp_w / 2 + vp_w * pad
+        compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+
+        min_bld_area = _min_building_area(zoom)
+        buildings = [(p, h) for p, h in
+                     get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+                     if p.area >= min_bld_area]
+
+        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            all_shadows = list(ex.map(_proj, buildings))
+
+        if zoom >= 14:
+            tall_geoms = [sh for (_, h), sh in zip(buildings, all_shadows)
+                          if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
+            occluder_union = parallel_union(tall_geoms) if tall_geoms else None
+        else:
+            occluder_union = None
+
+        shadow_parts = []
+        for (poly, h), sh in zip(buildings, all_shadows):
+            if sh is None or sh.is_empty: continue
+            if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
+            shadow_parts.append(sh)
+
+        all_parts = [p for p, _ in buildings] + shadow_parts
+        if all_parts:
+            merged = parallel_union(all_parts)
+            gfill  = _gap_fill(zoom)
+            stol   = _simplify_tolerance(zoom)
+            merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+            merged = merged.simplify(stol, preserve_topology=True)
+            sunlit = compute_bbox.difference(merged)
+        else:
+            sunlit = compute_bbox
+
+        stol            = _simplify_tolerance(zoom)
+        sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+        sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+
+        _shadow_cache[ck] = sunlit_filtered
+        if len(_shadow_cache) > MAX_CACHE:
+            _shadow_cache.pop(next(iter(_shadow_cache)))
+        print(f"[prewarm] z={zoom} h={hour} cached")
+    except Exception as e:
+        print(f"[prewarm] error z={zoom}: {e}")
+    finally:
+        with _prewarm_lock:
+            _prewarm_in_flight.discard(ck)
+
+
+def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
+    """If the user is at zoom ≥ 14, pre-warm zoom 12 and 13 in the background."""
+    if zoom < 14:
+        return
+    targets = [z for z in [13, 12] if z < zoom]
+    for z in targets:
+        # Scale viewport size for the lower zoom (roughly 2x per zoom step)
+        scale = 2 ** (zoom - z)
+        w, h  = vp_w * scale, vp_h * scale
+        ck = _cache_key(hour, month, day, lat, lon, z)
+        with _prewarm_lock:
+            if ck in _shadow_cache or ck in _prewarm_in_flight:
+                continue
+            _prewarm_in_flight.add(ck)
+        _prewarm_executor.submit(_compute_shadow_cached, hour, month, day, lat, lon, z, w, h)
+
+
+# ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
 
@@ -482,7 +621,7 @@ def shadow():
             compute_bbox  = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
             min_bld_area  = _min_building_area(zoom)
             buildings     = [(p, h) for p, h in
-                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                              if p.area >= min_bld_area]
 
             def _project(args):
@@ -653,7 +792,7 @@ def shadow_stream():
                 compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
                 min_bld_area = _min_building_area(zoom)
                 buildings = [(p, h) for p, h in
-                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon)
+                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                              if p.area >= min_bld_area]
                 n = len(buildings)
 
@@ -747,6 +886,11 @@ def shadow_stream():
                      "properties": {"layer": "shadow-l2"}},
                 ]},
             })
+
+            # Pre-warm lower zoom levels in background while user browses
+            vp_w = (max_lon - min_lon) if None not in (min_lon, max_lon) else 0.02
+            vp_h = (max_lat - min_lat) if None not in (min_lat, max_lat) else 0.02
+            _trigger_prewarm(now.hour, now.month, now.day, lat, lon, zoom, vp_w, vp_h)
 
         except Exception as e:
             import traceback; traceback.print_exc()
