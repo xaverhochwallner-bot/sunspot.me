@@ -58,6 +58,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
 
+  // Search
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode             _searchFocus      = FocusNode();
+  List<Map<String, dynamic>>  _searchResults    = [];
+  bool                        _searchLoading    = false;
+  Timer?                      _searchDebounce;
+
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
     duration: const Duration(seconds: 3),
@@ -371,12 +378,64 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void dispose() {
     _debounceTimer?.cancel();
     _pillTimer?.cancel();
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _searchFocus.dispose();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
       _fetchCompleter!.complete();
     }
     super.dispose();
+  }
+
+  // -------------------------------------------------------------------------
+  // Address search (Nominatim)
+  // -------------------------------------------------------------------------
+
+  void _onSearchChanged(String query) {
+    _searchDebounce?.cancel();
+    if (query.trim().isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () => _runSearch(query.trim()));
+  }
+
+  Future<void> _runSearch(String query) async {
+    setState(() => _searchLoading = true);
+    try {
+      final uri = Uri.parse(
+        'https://nominatim.openstreetmap.org/search'
+        '?q=${Uri.encodeComponent(query)}&format=json&limit=5&addressdetails=1',
+      );
+      final resp = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as List;
+        setState(() => _searchResults = data.cast<Map<String, dynamic>>());
+      }
+    } catch (_) {
+      // silently ignore network errors during search
+    } finally {
+      setState(() => _searchLoading = false);
+    }
+  }
+
+  void _selectSearchResult(Map<String, dynamic> result) {
+    final lat = double.parse(result['lat'] as String);
+    final lon = double.parse(result['lon'] as String);
+    final name = result['display_name'] as String;
+    final target = LatLng(lat, lon);
+    _searchController.text = name.split(',').first.trim();
+    setState(() {
+      _searchResults = [];
+      _currentCenter = target;
+    });
+    _searchFocus.unfocus();
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(CameraPosition(target: target, zoom: 16.0)),
+    );
+    fetchShadows();
   }
 
   @override
@@ -397,6 +456,135 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             trackCameraPosition:   true,
           ),
 
+
+          // Address search bar + results
+          Positioned(
+            top: 12, left: 12, right: 292,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(22),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.15),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      Icon(Icons.search, color: Colors.grey.shade500, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocus,
+                          onChanged: _onSearchChanged,
+                          style: const TextStyle(fontSize: 14),
+                          decoration: InputDecoration(
+                            hintText: 'Search address or place…',
+                            hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                      if (_searchLoading)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 12),
+                          child: SizedBox(
+                            width: 14, height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange.shade400),
+                          ),
+                        )
+                      else if (_searchController.text.isNotEmpty)
+                        MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: GestureDetector(
+                            onTap: () {
+                              _searchController.clear();
+                              setState(() => _searchResults = []);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.only(right: 12),
+                              child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (_searchResults.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.12),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: _searchResults.asMap().entries.map((entry) {
+                        final i      = entry.key;
+                        final result = entry.value;
+                        final parts  = (result['display_name'] as String).split(',');
+                        final title  = parts.first.trim();
+                        final sub    = parts.length > 1
+                            ? parts.skip(1).take(2).map((s) => s.trim()).join(', ')
+                            : '';
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
+                            InkWell(
+                              onTap: () => _selectSearchResult(result),
+                              mouseCursor: SystemMouseCursors.click,
+                              borderRadius: BorderRadius.vertical(
+                                top:    i == 0 ? const Radius.circular(12) : Radius.zero,
+                                bottom: i == _searchResults.length - 1 ? const Radius.circular(12) : Radius.zero,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade500),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                                          if (sub.isNotEmpty)
+                                            Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+              ],
+            ),
+          ),
 
           // Loading bar — determinate when progress is known
           if (_loading)
@@ -685,20 +873,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final selected = _animSpeed == speed;
             return Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: GestureDetector(
-                onTap: () => setState(() => _animSpeed = speed),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: selected ? Colors.orange : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '${speed}x',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? Colors.white : Colors.black54,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => setState(() => _animSpeed = speed),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: selected ? Colors.orange : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${speed}x',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: selected ? Colors.white : Colors.black54,
+                      ),
                     ),
                   ),
                 ),
@@ -721,21 +912,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           Text('Date', style: TextStyle(fontSize: 12, color: Colors.grey)),
         ]),
         const SizedBox(height: 6),
-        GestureDetector(
-          onTap: _pickDate,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(_formattedDate,
-                    style: const TextStyle(fontSize: 14)),
-                const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
-              ],
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: _pickDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(_formattedDate,
+                      style: const TextStyle(fontSize: 14)),
+                  const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
+                ],
+              ),
             ),
           ),
         ),
