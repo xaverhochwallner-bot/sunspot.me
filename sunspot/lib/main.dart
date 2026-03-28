@@ -144,6 +144,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _mapController = controller;
   }
 
+  void _setMapCanvasInteractive(bool interactive) {
+    final pe = interactive ? '' : 'none';
+    html.document.querySelectorAll('.maplibregl-canvas-container').forEach((e) {
+      (e as html.Element).style.pointerEvents = pe;
+    });
+  }
+
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
     _shadowLayersReady = false;
@@ -585,17 +592,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       body: Stack(
         children: [
           // Full-screen map
-          MaplibreMap(
-            styleString: mapStyle,
-            initialCameraPosition: CameraPosition(
-              target: _currentCenter,
-              zoom: 16.5,
+          AbsorbPointer(
+            absorbing: _draggingSlider,
+            child: MaplibreMap(
+              styleString: mapStyle,
+              initialCameraPosition: CameraPosition(
+                target: _currentCenter,
+                zoom: 16.5,
+              ),
+              onMapCreated:          _onMapCreated,
+              onStyleLoadedCallback: _onStyleLoaded,
+              onCameraIdle:          _onCameraIdle,
+              onMapClick:            _onMapClick,
+              trackCameraPosition:   true,
             ),
-            onMapCreated:          _onMapCreated,
-            onStyleLoadedCallback: _onStyleLoaded,
-            onCameraIdle:          _onCameraIdle,
-            onMapClick:            _onMapClick,
-            trackCameraPosition:   true,
           ),
 
 
@@ -793,11 +803,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           // Right-side panel (slides in/out)
           Positioned(
             top: 0, right: 0, bottom: 0, width: 280,
-            child: AnimatedSlide(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeInOut,
-              offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
-              child: _buildPanel(),
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => _setMapCanvasInteractive(false),
+              onPointerUp:   (_) => _setMapCanvasInteractive(true),
+              onPointerCancel: (_) => _setMapCanvasInteractive(true),
+              child: AnimatedSlide(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
+                child: _buildPanel(),
+              ),
             ),
           ),
 
@@ -805,11 +821,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
-            top: 0, bottom: 0,
+            top: 16,
             right: _panelOpen ? 280 : 0,
             width: 20,
-            child: Center(
-              child: MouseRegion(
+            child: MouseRegion(
                 cursor: SystemMouseCursors.click,
                 child: GestureDetector(
                   onTap: () => setState(() => _panelOpen = !_panelOpen),
@@ -834,7 +849,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                 ),
               ),
-            ),
           ),
         ],
       ),
@@ -1019,7 +1033,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             min: 0,
             max: 23,
             divisions: 23,
-            onChanged:  (v) => setState(() { _hour = v; _draggingSlider = true; }),
+            onChangeStart: (_) => setState(() => _draggingSlider = true),
+            onChanged:  (v) => setState(() => _hour = v),
             onChangeEnd: (_) { setState(() => _draggingSlider = false); fetchShadows(); },
           ),
         ),
@@ -1140,115 +1155,99 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     String _fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Header bar
-          Container(
-            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-            decoration: BoxDecoration(
-              color: inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00),
-            ),
-            child: Row(
+    final statusColor = inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+          // Header row — same style as other section headers
+          Row(
+            children: [
+              Icon(
+                inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny,
+                color: statusColor, size: 16,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                _pointInfoLoading
+                    ? 'Checking…'
+                    : inShadow ? 'In Shadow' : 'In Sun',
+                style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w700,
+                  color: statusColor, letterSpacing: 0.5,
+                ),
+              ),
+              const Spacer(),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () {
+                    _ignoreNextMapClick = true;
+                    _hidePin();
+                    setState(() {
+                      _clickedPoint = null;
+                      _pointInfo    = null;
+                    });
+                  },
+                  child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (_pointInfoLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 4),
+                child: SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
+              ),
+            )
+          else ...[
+            Row(
               children: [
-                Icon(
-                  inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny,
-                  color: Colors.white, size: 20,
-                ),
-                const SizedBox(width: 8),
+                const Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange),
+                const SizedBox(width: 6),
                 Text(
-                  _pointInfoLoading
-                      ? 'Checking…'
-                      : inShadow ? 'In Shadow' : 'In Sun',
-                  style: const TextStyle(
-                    color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const Spacer(),
-                MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () {
-                      _ignoreNextMapClick = true;
-                      _hidePin();
-                      setState(() {
-                        _clickedPoint = null;
-                        _pointInfo    = null;
-                      });
-                    },
-                    child: const Icon(Icons.close, color: Colors.white70, size: 20),
-                  ),
+                  sunCount == 0
+                      ? 'No direct sun today'
+                      : '$sunCount hour${sunCount == 1 ? '' : 's'} of direct sun today',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
                 ),
               ],
             ),
-          ),
-          // Body
-          Container(
-            color: Colors.grey.shade50,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: _pointInfoLoading
-                ? const Center(
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8),
-                      child: SizedBox(
-                        width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange),
-                      ),
+            if (periods.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6, runSpacing: 4,
+                children: periods.map((p) {
+                  final from = p['from'] as int;
+                  final to   = p['to']   as int;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.shade200),
                     ),
-                  )
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange),
-                          const SizedBox(width: 6),
-                          Text(
-                            sunCount == 0
-                                ? 'No direct sun today'
-                                : '$sunCount hour${sunCount == 1 ? '' : 's'} of direct sun today',
-                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                          ),
-                        ],
-                      ),
-                      if (periods.isNotEmpty) ...[
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 6, runSpacing: 4,
-                          children: periods.map((p) {
-                            final from = p['from'] as int;
-                            final to   = p['to']   as int;
-                            return Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: Colors.orange.shade50,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: Colors.orange.shade200),
-                              ),
-                              child: Text(
-                                '${_fmt(from)} – ${_fmt(to)}',
-                                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ],
-                      const SizedBox(height: 8),
-                      Text(
-                        '${_clickedPoint!.latitude.toStringAsFixed(5)}°, '
-                        '${_clickedPoint!.longitude.toStringAsFixed(5)}°',
-                        style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                      ),
-                    ],
-                  ),
-          ),
-          ),
+                    child: Text(
+                      '${_fmt(from)} – ${_fmt(to)}',
+                      style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              '${_clickedPoint!.latitude.toStringAsFixed(5)}°, '
+              '${_clickedPoint!.longitude.toStringAsFixed(5)}°',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+            ),
+          ],
         ],
-      ),
-    );
+      );
   }
 
   // ---- Date section ----
