@@ -952,13 +952,17 @@ def point_info():
         elev, az = get_sun_angles(lat, lon, now_dt)
         in_shadow_now = _is_point_in_shadow(lat, lon, elev, az)
 
-        # Hourly sweep 5 AM – 9 PM to find sunny periods
-        sun_hours = []
-        for h in range(5, 22):
+        # Hourly sweep 5 AM – 9 PM to find sunny periods (parallelised)
+        def _check_hour(h):
             t    = datetime(d.year, d.month, d.day, h, 0, 0, tzinfo=tz)
             e, a = get_sun_angles(lat, lon, t)
-            if e > 0.5 and not _is_point_in_shadow(lat, lon, e, a):
-                sun_hours.append(h)
+            if e > 5.0 and not _is_point_in_shadow(lat, lon, e, a):
+                return h
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            results = list(ex.map(_check_hour, range(5, 22)))
+        sun_hours = sorted(h for h in results if h is not None)
 
         # Collapse into continuous periods
         periods = []

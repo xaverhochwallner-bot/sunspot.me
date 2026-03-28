@@ -59,10 +59,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
 
+  // Panel
+  bool _panelOpen = true;
+
+  // Live mode
+  bool   _liveMode  = false;
+  Timer? _liveTimer;
+
   // Point info popup
   LatLng?                _clickedPoint;
   bool                   _pointInfoLoading = false;
   Map<String, dynamic>?  _pointInfo;
+  bool                   _ignoreNextMapClick = false;
+  bool                   _pinLayerReady = false;
+  double                 _screenWidth = 1200;
 
   // Search
   final TextEditingController _searchController = TextEditingController();
@@ -136,7 +146,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
-    _shadowLayersReady = false;  // style reload clears all layers
+    _shadowLayersReady = false;
+    _pinLayerReady     = false;
     fetchShadows();
   }
 
@@ -150,7 +161,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   void _onMapClick(Point<double> point, LatLng coordinates) {
-    // Close search results if open
+    if (_ignoreNextMapClick) {
+      _ignoreNextMapClick = false;
+      return;
+    }
+    // Reject clicks in the panel/toggle zone
+    final panelZone = _panelOpen ? 300.0 : 22.0;
+    if (point.x > _screenWidth - panelZone) return;
     if (_searchResults.isNotEmpty) {
       setState(() => _searchResults = []);
       return;
@@ -160,6 +177,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _pointInfo         = null;
       _pointInfoLoading  = true;
     });
+    _showPin(coordinates);
     _fetchPointInfo(coordinates);
   }
 
@@ -182,6 +200,54 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {
       if (mounted) setState(() => _pointInfoLoading = false);
     }
+  }
+
+  Future<void> _showPin(LatLng point) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    final geoJson = {
+      'type': 'FeatureCollection',
+      'features': [{
+        'type': 'Feature',
+        'geometry': {'type': 'Point', 'coordinates': [point.longitude, point.latitude]},
+        'properties': {},
+      }],
+    };
+    if (_pinLayerReady) {
+      await ctrl.setGeoJsonSource('clicked-point', geoJson);
+    } else {
+      await ctrl.addSource('clicked-point', GeojsonSourceProperties(data: geoJson));
+      await ctrl.addLayer(
+        'clicked-point', 'clicked-point-outer',
+        CircleLayerProperties(
+          circleRadius: 12,
+          circleColor: '#FF8C00',
+          circleOpacity: 0.25,
+          circleStrokeWidth: 0,
+        ),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer(
+        'clicked-point', 'clicked-point-inner',
+        CircleLayerProperties(
+          circleRadius: 6,
+          circleColor: '#FF8C00',
+          circleOpacity: 1.0,
+          circleStrokeWidth: 2,
+          circleStrokeColor: '#FFFFFF',
+        ),
+        enableInteraction: false,
+      );
+      _pinLayerReady = true;
+    }
+  }
+
+  Future<void> _hidePin() async {
+    if (!_pinLayerReady) return;
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    await ctrl.setGeoJsonSource('clicked-point',
+        {'type': 'FeatureCollection', 'features': []});
   }
 
   // -------------------------------------------------------------------------
@@ -415,6 +481,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
+  // Live mode
+  // -------------------------------------------------------------------------
+
+  void _toggleLiveMode() {
+    if (_liveMode) {
+      _liveTimer?.cancel();
+      setState(() => _liveMode = false);
+    } else {
+      setState(() {
+        _liveMode = true;
+        _animating = false;  // stop animation when going live
+        _selectedDate = DateTime.now();
+        final now = DateTime.now();
+        _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
+      });
+      fetchShadows();
+      _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+        if (!mounted) return;
+        setState(() {
+          final now = DateTime.now();
+          _selectedDate = now;
+          _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
+        });
+        fetchShadows();
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Build
   // -------------------------------------------------------------------------
 
@@ -423,6 +518,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _debounceTimer?.cancel();
     _pillTimer?.cancel();
     _searchDebounce?.cancel();
+    _liveTimer?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
     _sunSpinCtrl.dispose();
@@ -484,6 +580,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
+    _screenWidth = MediaQuery.of(context).size.width;
     return Scaffold(
       body: Stack(
         children: [
@@ -503,8 +600,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
 
           // Address search bar + results
-          Positioned(
-            top: 12, left: 12, right: 292,
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            top: 12, left: 12, right: _panelOpen ? 292 : 12,
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -631,10 +730,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
-          // Loading bar — determinate when progress is known
+          // Loading bar
           if (_loading)
-            Positioned(
-              top: 0, left: 0, right: 280,
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              top: 0, left: 0, right: _panelOpen ? 280 : 0,
               child: LinearProgressIndicator(
                 value: _loadingProgress > 0 ? _loadingProgress : null,
                 minHeight: 3,
@@ -643,9 +744,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             ),
 
-          // Loading pill — bottom-center of map area
-          Positioned(
-            bottom: 24, left: 0, right: 280,
+          // Loading pill
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            bottom: 24, left: 0, right: _panelOpen ? 280 : 0,
             child: Center(child: _buildLoadingPill()),
           ),
 
@@ -672,8 +775,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
           // Error banner
           if (_errorMessage != null)
-            Positioned(
-              bottom: 80, left: 16, right: 296,
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              bottom: 80, left: 16, right: _panelOpen ? 296 : 16,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
@@ -685,20 +790,51 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             ),
 
-          // Point info popup
-          if (_clickedPoint != null)
-            Positioned(
-              bottom: 12, left: 12, right: 292,
-              child: _buildPointInfoCard(),
-            ),
-
-          // Right-side panel
+          // Right-side panel (slides in/out)
           Positioned(
-            top: 0,
-            right: 0,
-            bottom: 0,
-            width: 280,
-            child: _buildPanel(),
+            top: 0, right: 0, bottom: 0, width: 280,
+            child: AnimatedSlide(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
+              child: _buildPanel(),
+            ),
+          ),
+
+          // Panel toggle tab
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            top: 0, bottom: 0,
+            right: _panelOpen ? 280 : 0,
+            width: 20,
+            child: Center(
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => setState(() => _panelOpen = !_panelOpen),
+                  child: Container(
+                    width: 20, height: 52,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: const BorderRadius.horizontal(
+                          left: Radius.circular(8)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.12),
+                          blurRadius: 6,
+                          offset: const Offset(-2, 0),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      _panelOpen ? Icons.chevron_right : Icons.chevron_left,
+                      size: 16, color: Colors.grey.shade600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -801,6 +937,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildSunPosition(),
               const Divider(height: 28),
               _buildLegend(),
+              if (_clickedPoint != null) ...[
+                const Divider(height: 28),
+                _buildPointInfoCard(),
+              ],
             ],
           ),
         ),
@@ -921,7 +1061,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
         const SizedBox(height: 6),
         Row(
-          children: [1, 2, 4].map((speed) {
+          children: [
+            ...[1, 2, 4].map((speed) {
             final selected = _animSpeed == speed;
             return Padding(
               padding: const EdgeInsets.only(right: 6),
@@ -948,6 +1089,43 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             );
           }).toList(),
+            // LIVE button
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: _toggleLiveMode,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_liveMode)
+                        Container(
+                          width: 6, height: 6,
+                          margin: const EdgeInsets.only(right: 4),
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      Text(
+                        'LIVE',
+                        style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w700,
+                          color: _liveMode ? Colors.white : Colors.black54,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -962,18 +1140,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     String _fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
 
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.15),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -982,7 +1150,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
             decoration: BoxDecoration(
               color: inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
             ),
             child: Row(
               children: [
@@ -1003,10 +1170,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 MouseRegion(
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(
-                    onTap: () => setState(() {
-                      _clickedPoint = null;
-                      _pointInfo    = null;
-                    }),
+                    onTap: () {
+                      _ignoreNextMapClick = true;
+                      _hidePin();
+                      setState(() {
+                        _clickedPoint = null;
+                        _pointInfo    = null;
+                      });
+                    },
                     child: const Icon(Icons.close, color: Colors.white70, size: 20),
                   ),
                 ),
@@ -1014,7 +1185,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
           // Body
-          Padding(
+          Container(
+            color: Colors.grey.shade50,
+          child: Padding(
             padding: const EdgeInsets.all(14),
             child: _pointInfoLoading
                 ? const Center(
@@ -1071,6 +1244,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       ),
                     ],
                   ),
+          ),
           ),
         ],
       ),
