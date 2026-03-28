@@ -292,9 +292,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_shadowLayersReady) {
       // Update source data + opacity in-place — no remove/re-add, no flicker
       await ctrl.setGeoJsonSource('dark-area', geoJson);
-      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: opL0));
-      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: opL1));
-      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: opL2));
+      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0));
+      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1));
+      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2));
       return;
     }
 
