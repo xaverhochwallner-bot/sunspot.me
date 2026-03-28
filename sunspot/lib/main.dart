@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -57,6 +58,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
+
+  // Point info popup
+  LatLng?                _clickedPoint;
+  bool                   _pointInfoLoading = false;
+  Map<String, dynamic>?  _pointInfo;
 
   // Search
   final TextEditingController _searchController = TextEditingController();
@@ -141,6 +147,41 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentCenter = center;
     _debounceTimer?.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
+  }
+
+  void _onMapClick(Point<double> point, LatLng coordinates) {
+    // Close search results if open
+    if (_searchResults.isNotEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    setState(() {
+      _clickedPoint      = coordinates;
+      _pointInfo         = null;
+      _pointInfoLoading  = true;
+    });
+    _fetchPointInfo(coordinates);
+  }
+
+  Future<void> _fetchPointInfo(LatLng point) async {
+    try {
+      final d       = _selectedDate;
+      final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+      final uri     = Uri.parse(
+        '$flaskBaseUrl/point_info'
+        '?lat=${point.latitude}&lon=${point.longitude}'
+        '&date=$dateStr&hour=${_hour.toInt()}',
+      );
+      final resp = await http.get(uri);
+      if (mounted && resp.statusCode == 200) {
+        setState(() {
+          _pointInfo        = jsonDecode(resp.body) as Map<String, dynamic>;
+          _pointInfoLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _pointInfoLoading = false);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -317,16 +358,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       'dark-area', 'shadow-l0-fill',
       FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
+      enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
       FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
+      enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
       FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
+      enableInteraction: false,
     );
     _shadowLayersReady = true;
   }
@@ -453,6 +497,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             onMapCreated:          _onMapCreated,
             onStyleLoadedCallback: _onStyleLoaded,
             onCameraIdle:          _onCameraIdle,
+            onMapClick:            _onMapClick,
             trackCameraPosition:   true,
           ),
 
@@ -638,6 +683,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 child: Text(_errorMessage!,
                     style: const TextStyle(color: Colors.white, fontSize: 13)),
               ),
+            ),
+
+          // Point info popup
+          if (_clickedPoint != null)
+            Positioned(
+              bottom: 12, left: 12, right: 292,
+              child: _buildPointInfoCard(),
             ),
 
           // Right-side panel
@@ -898,6 +950,130 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           }).toList(),
         ),
       ],
+    );
+  }
+
+  // ---- Point info popup ----
+  Widget _buildPointInfoCard() {
+    final info = _pointInfo;
+    final inShadow = info == null ? true : (info['in_shadow'] as bool? ?? true);
+    final sunCount = info == null ? 0 : (info['sun_hours_count'] as int? ?? 0);
+    final periods  = info == null ? <dynamic>[] : (info['sun_periods'] as List<dynamic>? ?? []);
+
+    String _fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.15),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Header bar
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+            decoration: BoxDecoration(
+              color: inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny,
+                  color: Colors.white, size: 20,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _pointInfoLoading
+                      ? 'Checking…'
+                      : inShadow ? 'In Shadow' : 'In Sun',
+                  style: const TextStyle(
+                    color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const Spacer(),
+                MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: () => setState(() {
+                      _clickedPoint = null;
+                      _pointInfo    = null;
+                    }),
+                    child: const Icon(Icons.close, color: Colors.white70, size: 20),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: _pointInfoLoading
+                ? const Center(
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(vertical: 8),
+                      child: SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange),
+                      ),
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange),
+                          const SizedBox(width: 6),
+                          Text(
+                            sunCount == 0
+                                ? 'No direct sun today'
+                                : '$sunCount hour${sunCount == 1 ? '' : 's'} of direct sun today',
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                      if (periods.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 6, runSpacing: 4,
+                          children: periods.map((p) {
+                            final from = p['from'] as int;
+                            final to   = p['to']   as int;
+                            return Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: Colors.orange.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: Colors.orange.shade200),
+                              ),
+                              child: Text(
+                                '${_fmt(from)} – ${_fmt(to)}',
+                                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                      const SizedBox(height: 8),
+                      Text(
+                        '${_clickedPoint!.latitude.toStringAsFixed(5)}°, '
+                        '${_clickedPoint!.longitude.toStringAsFixed(5)}°',
+                        style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                      ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
     );
   }
 
