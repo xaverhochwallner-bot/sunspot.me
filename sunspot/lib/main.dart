@@ -58,6 +58,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
+  int                 _lastFetchZoom     = -1;
 
   // Panel
   bool _panelOpen = true;
@@ -282,6 +283,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Error display
   // -------------------------------------------------------------------------
 
+  // Disable/enable pointer events on the MapLibre canvas via DOM so slider
+  // drags don't also pan the map (AbsorbPointer doesn't reach platform views).
+  void _setMapPointerEvents(bool enabled) {
+    final els = html.document.querySelectorAll('.maplibregl-canvas-container');
+    for (final el in els) {
+      (el as html.Element).style.pointerEvents = enabled ? 'auto' : 'none';
+    }
+  }
+
   void _showError(String msg) {
     setState(() => _errorMessage = msg);
     Future.delayed(const Duration(seconds: 4), () {
@@ -320,8 +330,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
 
     try {
-      final bounds = await _mapController!.getVisibleRegion();
-      final zoom   = (_mapController!.cameraPosition?.zoom ?? 15.0).toInt();
+      final bounds   = await _mapController!.getVisibleRegion();
+      final rawZoom  = _mapController!.cameraPosition?.zoom ?? 15.0;
+      final zoom     = rawZoom.toInt();
+
+      // Below zoom 11.5, building shadows are too fragmented — clear and skip.
+      if (rawZoom < 11.5) {
+        if (_shadowLayersReady) {
+          final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
+          await _mapController!.setGeoJsonSource('dark-area', empty);
+        }
+        _pillTimer?.cancel();
+        if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        if (!completer.isCompleted) completer.complete();
+        return;
+      }
+
+      _lastFetchZoom = zoom;
+
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow/stream'
         '?lat=${_currentCenter.latitude}'
@@ -605,6 +631,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               onCameraIdle:          _onCameraIdle,
               onMapClick:            _onMapClick,
               trackCameraPosition:   true,
+              compassEnabled:        false,
             ),
           ),
 
@@ -821,10 +848,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
-            top: 16,
+            top: 0,
+            bottom: 0,
             right: _panelOpen ? 280 : 0,
             width: 20,
-            child: MouseRegion(
+            child: Align(
+              alignment: Alignment.center,
+              child: MouseRegion(
                 cursor: SystemMouseCursors.click,
                 child: GestureDetector(
                   onTap: () => setState(() => _panelOpen = !_panelOpen),
@@ -849,6 +879,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                 ),
               ),
+            ),
           ),
         ],
       ),
@@ -949,8 +980,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildDateSection(),
               const Divider(height: 28),
               _buildSunPosition(),
-              const Divider(height: 28),
-              _buildLegend(),
               if (_clickedPoint != null) ...[
                 const Divider(height: 28),
                 _buildPointInfoCard(),
@@ -1033,9 +1062,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             min: 0,
             max: 23,
             divisions: 23,
-            onChangeStart: (_) => setState(() => _draggingSlider = true),
+            onChangeStart: (_) {
+              setState(() => _draggingSlider = true);
+              _setMapPointerEvents(false);
+            },
             onChanged:  (v) => setState(() => _hour = v),
-            onChangeEnd: (_) { setState(() => _draggingSlider = false); fetchShadows(); },
+            onChangeEnd: (_) {
+              setState(() => _draggingSlider = false);
+              _setMapPointerEvents(true);
+              fetchShadows();
+            },
           ),
         ),
         Padding(

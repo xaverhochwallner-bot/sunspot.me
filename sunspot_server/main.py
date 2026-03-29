@@ -398,13 +398,11 @@ def _min_building_area(zoom):
 
 def _min_sunlit_area(zoom):
     """Minimum sunlit patch area (deg²) to keep at a given zoom level.
-    Small sunlit spots vanish when zoomed out and reappear when zoomed in.
-    Interpolated in log-space so the scaling feels proportional.
-      zoom 16+ → ~10 m²     — every courtyard / alley visible
-      zoom 12  → ~20,000 m² — only large open sunny areas survive
+    Sized to ~4 screen pixels² so only visibly-resolvable sunlit patches survive.
+      zoom 16+ → ~10 m²    zoom 14 → ~100 m²    zoom 12 → ~800 m²
     """
     z_low, z_high = 12, 16
-    a_low, a_high = 2e-6, 1e-9   # deg²  (low zoom → large threshold)
+    a_low, a_high = 8e-8, 1e-9   # deg²  (low zoom → ~800 m², high → ~10 m²)
     t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
     log_a = math.log10(a_low) + t * (math.log10(a_high) - math.log10(a_low))
     return 10 ** log_a
@@ -424,14 +422,15 @@ def _simplify_tolerance(zoom):
 
 def _gap_fill(zoom):
     """Morphological close distance (deg) — bridges hairline gaps between
-    adjacent shadow patches.  Kept proportional to screen pixel size so the
-    effect is consistent across zoom levels (~2-3 m at z16, ~35 m at z11).
+    adjacent shadow patches without bridging streets.
+    At z12-13 kept well below street width (~15m) so city blocks don't merge.
+    At z14+ scales up to ~1 screen-pixel for cleaner outlines.
     """
-    z_low, z_high = 11, 16
-    g_low, g_high = 0.00060, 0.000025  # ~60 m at z11, ~2.5 m at z16
-    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
-    log_g = math.log10(g_low) + t * (math.log10(g_high) - math.log10(g_low))
-    return 10 ** log_g
+    if zoom <= 12: return 0.000080   # ~8 m  — sub-street, avoids block merging
+    if zoom == 13: return 0.000100   # ~10 m
+    if zoom == 14: return 0.000080   # ~8 m  (same — already fine at z14)
+    if zoom == 15: return 0.000060   # ~6 m
+    return               0.000025   # z16+  — ~2.5 m
 
 
 def _shadow_erosion_steps(zoom):
@@ -621,7 +620,7 @@ def shadow():
                 q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
                 q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
 
-            compute_bbox  = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+            compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
             min_bld_area  = _min_building_area(zoom)
             buildings     = [(p, h) for p, h in
                              get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
