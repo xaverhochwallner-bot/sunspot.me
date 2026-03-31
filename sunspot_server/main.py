@@ -397,17 +397,16 @@ def _min_building_area(zoom):
 
 
 def _min_sunlit_area(zoom):
-    """Minimum sunlit patch area (deg²) to keep at a given zoom level.
-    Small sunlit spots vanish when zoomed out and reappear when zoomed in.
-    Interpolated in log-space so the scaling feels proportional.
-      zoom 16+ → ~10 m²     — every courtyard / alley visible
-      zoom 12  → ~20,000 m² — only large open sunny areas survive
+    """Minimum sunlit patch area (deg²) — LOD: scales 4× per zoom step down.
+    4× per zoom gives consistent visual density because map area quadruples per zoom.
+      zoom 16+ → ~150 m²      — small courtyards visible
+      zoom 15  → ~600 m²
+      zoom 14  → ~2,400 m²
+      zoom 13  → ~10,000 m²  — only wide streets / plazas survive
+      zoom 12  → ~38,000 m²  — only large parks survive
     """
-    z_low, z_high = 12, 16
-    a_low, a_high = 2e-6, 1e-9   # deg²  (low zoom → large threshold)
-    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
-    log_a = math.log10(a_low) + t * (math.log10(a_high) - math.log10(a_low))
-    return 10 ** log_a
+    base = 1.5e-8   # ~150 m² at z16
+    return base * (4 ** max(0, 16 - zoom))
 
 
 def _simplify_tolerance(zoom):
@@ -423,15 +422,16 @@ def _simplify_tolerance(zoom):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance (deg) — bridges hairline gaps between
-    adjacent shadow patches.  Kept proportional to screen pixel size so the
-    effect is consistent across zoom levels (~2-3 m at z16, ~35 m at z11).
+    """Morphological close distance (deg) — LOD blur: doubles per zoom step down.
+      zoom 16+ → ~3 m   — max detail, individual building shadows
+      zoom 15  → ~6 m   — fine
+      zoom 14  → ~12 m  — block level
+      zoom 13  → ~24 m  — neighbourhood blobs
+      zoom 12  → ~48 m  — district-scale blur
     """
-    z_low, z_high = 11, 16
-    g_low, g_high = 0.00060, 0.000025  # ~60 m at z11, ~2.5 m at z16
-    t = max(0.0, min(1.0, (zoom - z_low) / (z_high - z_low)))
-    log_g = math.log10(g_low) + t * (math.log10(g_high) - math.log10(g_low))
-    return 10 ** log_g
+    # Base at z16, doubles for each zoom step down
+    base = 0.000027  # ~3 m at z16
+    return base * (2 ** max(0, 16 - zoom))
 
 
 def _shadow_erosion_steps(zoom):
