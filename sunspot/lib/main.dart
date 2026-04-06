@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
-import 'dart:js_util' as js_util;
 import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -35,7 +34,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   static const String flaskBaseUrl = 'http://127.0.0.1:5000';
   static const String mapStyle     = 'https://tiles.openfreemap.org/styles/bright';
 
-  MaplibreMapController? _mapController;
+  MapLibreMapController? _mapController;
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
   Timer? _debounceTimer;
 
@@ -45,7 +44,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double   _azimuth       = 0.0;
   bool     _loading       = false;
   bool     _mapReady      = false;
-  bool     _hasData       = false;
   bool     _animating      = false;
   int      _animSpeed      = 1;   // 1, 2, or 4
   bool     _draggingSlider = false;
@@ -77,7 +75,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double                 _screenWidth = 1200;
 
   // GPS blue dot
-  LatLng? _myLocation;
   bool    _myLocationLayerReady = false;
 
   // Panel scroll
@@ -98,14 +95,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
-
-  String get _formattedTime {
-    final h = _hour.toInt();
-    if (h == 0)  return '12:00 AM';
-    if (h < 12)  return '$h:00 AM';
-    if (h == 12) return '12:00 PM';
-    return '${h - 12}:00 PM';
-  }
 
   // Used by TweenAnimationBuilder — accepts fractional hours during animation
   String _formatDisplayHour(double h) {
@@ -149,14 +138,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Map callbacks
   // -------------------------------------------------------------------------
 
-  void _onMapCreated(MaplibreMapController controller) {
+  void _onMapCreated(MapLibreMapController controller) {
     _mapController = controller;
   }
 
   void _setMapCanvasInteractive(bool interactive) {
     final pe = interactive ? '' : 'none';
     html.document.querySelectorAll('.maplibregl-canvas-container').forEach((e) {
-      (e as html.Element).style.pointerEvents = pe;
+      e.style.pointerEvents = pe;
     });
   }
 
@@ -295,12 +284,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         enableHighAccuracy: false,
         timeout: const Duration(seconds: 10),
       );
-      final coords = js_util.getProperty(pos as Object, 'coords');
-      final lat = (js_util.getProperty(coords as Object, 'latitude') as num).toDouble();
-      final lon = (js_util.getProperty(coords as Object, 'longitude') as num).toDouble();
+      final lat = pos.coords!.latitude!.toDouble();
+      final lon = pos.coords!.longitude!.toDouble();
       final newPos = LatLng(lat, lon);
       setState(() {
-        _myLocation    = newPos;
         _currentCenter = newPos;
       });
       await _mapController?.animateCamera(
@@ -319,12 +306,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         enableHighAccuracy: false,
         timeout: const Duration(seconds: 10),
       );
-      final coords = js_util.getProperty(pos as Object, 'coords');
-      final lat = (js_util.getProperty(coords as Object, 'latitude') as num).toDouble();
-      final lon = (js_util.getProperty(coords as Object, 'longitude') as num).toDouble();
+      final lat = pos.coords!.latitude!.toDouble();
+      final lon = pos.coords!.longitude!.toDouble();
       final newPos = LatLng(lat, lon);
       setState(() {
-        _myLocation    = newPos;
         _currentCenter = newPos;
       });
       final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
@@ -387,7 +372,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void _setMapPointerEvents(bool enabled) {
     final els = html.document.querySelectorAll('.maplibregl-canvas-container');
     for (final el in els) {
-      (el as html.Element).style.pointerEvents = enabled ? 'auto' : 'none';
+      el.style.pointerEvents = enabled ? 'auto' : 'none';
     }
   }
 
@@ -515,13 +500,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
           }
           _pillTimer?.cancel();
-          if (mounted) setState(() {
-            _elevation = elev;
-            _azimuth   = azim;
-            _loading   = false;
-            _showPill  = false;
-            _hasData   = true;
-          });
+          if (mounted) {
+            setState(() {
+              _elevation = elev;
+              _azimuth   = azim;
+              _loading   = false;
+              _showPill  = false;
+            });
+          }
           if (!completer.isCompleted) completer.complete();
         }
 
@@ -530,7 +516,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _activeEventSource = null;
           _pillTimer?.cancel();
           _showError(data['error'] as String? ?? 'Server error');
-          if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+          if (mounted) {
+            setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+          }
           if (!completer.isCompleted) completer.complete();
         }
       });
@@ -749,7 +737,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           // Full-screen map
           AbsorbPointer(
             absorbing: _draggingSlider,
-            child: MaplibreMap(
+            child: MapLibreMap(
               styleString: mapStyle,
               initialCameraPosition: CameraPosition(
                 target: _currentCenter,
@@ -780,7 +768,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     borderRadius: BorderRadius.circular(22),
                     boxShadow: [
                       BoxShadow(
-                        color: Colors.black.withOpacity(0.15),
+                        color: Colors.black.withValues(alpha: 0.15),
                         blurRadius: 10,
                         offset: const Offset(0, 3),
                       ),
@@ -839,7 +827,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       borderRadius: BorderRadius.circular(12),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.12),
+                          color: Colors.black.withValues(alpha: 0.12),
                           blurRadius: 10,
                           offset: const Offset(0, 4),
                         ),
@@ -1023,7 +1011,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           left: Radius.circular(8)),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.12),
+                          color: Colors.black.withValues(alpha: 0.12),
                           blurRadius: 6,
                           offset: const Offset(-2, 0),
                         ),
@@ -1068,11 +1056,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         child: Container(
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
           decoration: BoxDecoration(
-            color: Colors.white.withOpacity(0.94),
+            color: Colors.white.withValues(alpha: 0.94),
             borderRadius: BorderRadius.circular(28),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(0.16),
+                color: Colors.black.withValues(alpha: 0.16),
                 blurRadius: 18,
                 offset: const Offset(0, 4),
               ),
@@ -1127,10 +1115,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Widget _buildPanel() {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.95),
+        color: Colors.white.withValues(alpha: 0.95),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.15),
+            color: Colors.black.withValues(alpha: 0.15),
             blurRadius: 12,
             offset: const Offset(-4, 0),
           ),
@@ -1234,7 +1222,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             inactiveTrackColor: Colors.orange.shade100,
             thumbColor: Colors.white,
             thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-            overlayColor: Colors.orange.withOpacity(0.2),
+            overlayColor: Colors.orange.withValues(alpha: 0.2),
           ),
           child: Slider(
             value: _hour,
@@ -1292,7 +1280,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         const SizedBox(height: 6),
         Row(
           children: [
-            ...[1, 2, 4].map((speed) {
+            ...[1, 2, 4].map<Widget>((speed) {
             final selected = _animSpeed == speed;
             return Padding(
               padding: const EdgeInsets.only(right: 6),
@@ -1318,7 +1306,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ),
               ),
             );
-          }).toList(),
+          }),
             // LIVE button
             MouseRegion(
               cursor: SystemMouseCursors.click,
@@ -1368,7 +1356,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final sunCount = info == null ? 0 : (info['sun_hours_count'] as int? ?? 0);
     final periods  = info == null ? <dynamic>[] : (info['sun_periods'] as List<dynamic>? ?? []);
 
-    String _fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
+    String fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
 
     final statusColor = inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00);
 
@@ -1447,7 +1435,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       border: Border.all(color: Colors.orange.shade200),
                     ),
                     child: Text(
-                      '${_fmt(from)} – ${_fmt(to)}',
+                      '${fmt(from)} – ${fmt(to)}',
                       style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
                     ),
                   );
@@ -1555,40 +1543,4 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  // ---- Legend ----
-  Widget _buildLegend() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('LEGEND',
-            style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w700,
-                color: Colors.grey, letterSpacing: 1.2)),
-        const SizedBox(height: 10),
-        _legendItem(color: const Color(0x00000000), border: true,  label: 'Sunlit area (map colors)'),
-        const SizedBox(height: 6),
-        _legendItem(color: const Color(0xAA3d5f7d),               label: 'Shadow zone'),
-      ],
-    );
-  }
-
-  Widget _legendItem({required Color color, bool border = false, required String label}) {
-    return Row(
-      children: [
-        Container(
-          width: 18,
-          height: 18,
-          decoration: BoxDecoration(
-            color: border ? Colors.white : color,
-            shape: BoxShape.circle,
-            border: border
-                ? Border.all(color: Colors.grey.shade400, width: 1.5)
-                : null,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(label, style: const TextStyle(fontSize: 13)),
-      ],
-    );
-  }
 }
