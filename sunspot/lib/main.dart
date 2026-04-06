@@ -32,7 +32,16 @@ class SunMapScreen extends StatefulWidget {
 }
 
 class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderStateMixin {
-  static const String flaskBaseUrl = 'http://127.0.0.1:5000';
+  // Auto-detects the Flask server from the page's host (same machine, port 5000).
+  // Override with ?server=https://your-tunnel-url for Cloudflare/ngrok tunnels.
+  static String get flaskBaseUrl {
+    final uri = Uri.base;
+    final override = uri.queryParameters['server'];
+    if (override != null && override.isNotEmpty) {
+      return override.replaceAll(RegExp(r'/$'), '');
+    }
+    return '${uri.scheme}://${uri.host}:5000';
+  }
   static const String mapStyle     = 'https://tiles.openfreemap.org/styles/bright';
 
   MapLibreMapController? _mapController;
