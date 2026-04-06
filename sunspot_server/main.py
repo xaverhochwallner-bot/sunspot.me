@@ -934,6 +934,73 @@ def shadow_stream():
 
 
 # ---------------------------------------------------------------------------
+# Point info — is this lat/lon in sun or shadow? How many hours of sun today?
+# ---------------------------------------------------------------------------
+
+def _point_in_shadow(lon, lat, elevation_deg, azimuth_deg, search_radius_deg=0.003):
+    """Return True if the given point is inside a building shadow at this sun angle."""
+    from shapely.geometry import Point as SPoint
+    if elevation_deg <= 0:
+        return True
+    pt = SPoint(lon, lat)
+    bbox = shapely_box(lon - search_radius_deg, lat - search_radius_deg,
+                       lon + search_radius_deg, lat + search_radius_deg)
+    candidates = [(p, h) for p, h in zip(_buildings_polys, _buildings_heights)
+                  if p.intersects(bbox)]
+    for poly, height in candidates:
+        shadow = project_shadow(poly, height, elevation_deg, azimuth_deg)
+        if shadow and not shadow.is_empty and shadow.contains(pt):
+            return True
+    return False
+
+
+@app.route("/point_info")
+def point_info():
+    try:
+        lat      = float(request.args['lat'])
+        lon      = float(request.args['lon'])
+        date_str = request.args['date']   # YYYY-MM-DD
+        hour     = int(request.args.get('hour', 12))
+
+        date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        tz   = pytz.timezone('Europe/Vienna')
+
+        # Check shadow at requested hour
+        now = tz.localize(datetime(date.year, date.month, date.day, hour, 0, 0))
+        elevation, azimuth = get_sun_angles(lat, lon, now)
+        in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
+
+        # Sweep all hours to find sun periods
+        sun_hours = []
+        for h in range(24):
+            t = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
+            el, az = get_sun_angles(lat, lon, t)
+            if el > 0 and not _point_in_shadow(lon, lat, el, az):
+                sun_hours.append(h)
+
+        # Build contiguous periods [{from, to}, ...]
+        periods = []
+        if sun_hours:
+            start = sun_hours[0]
+            prev  = sun_hours[0]
+            for h in sun_hours[1:]:
+                if h == prev + 1:
+                    prev = h
+                else:
+                    periods.append({'from': start, 'to': prev + 1})
+                    start = prev = h
+            periods.append({'from': start, 'to': prev + 1})
+
+        return jsonify({
+            'in_shadow':       in_shadow,
+            'sun_hours_count': len(sun_hours),
+            'sun_periods':     periods,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------
 

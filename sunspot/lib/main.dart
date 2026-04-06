@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'dart:js_util' as js_util;
 import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -74,6 +75,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                   _ignoreNextMapClick = false;
   bool                   _pinLayerReady = false;
   double                 _screenWidth = 1200;
+
+  // GPS blue dot
+  LatLng? _myLocation;
+  bool    _myLocationLayerReady = false;
 
   // Search
   final TextEditingController _searchController = TextEditingController();
@@ -154,9 +159,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
-    _shadowLayersReady = false;
-    _pinLayerReady     = false;
+    _shadowLayersReady    = false;
+    _pinLayerReady        = false;
+    _myLocationLayerReady = false;
+    _injectAttributionCss();
     fetchShadows();
+    _initGpsOnStart();
+  }
+
+  void _injectAttributionCss() {
+    final style = html.StyleElement();
+    style.text = '.maplibregl-ctrl-bottom-right { padding-right: 4px !important; }'
+        '.maplibregl-ctrl-attrib { font-size: 10px !important; }';
+    html.document.head!.append(style);
   }
 
   void _onCameraIdle() {
@@ -262,20 +277,92 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Geolocation
   // -------------------------------------------------------------------------
 
+  Future<void> _initGpsOnStart() async {
+    try {
+      final pos = await html.window.navigator.geolocation.getCurrentPosition(
+        enableHighAccuracy: false,
+        timeout: const Duration(seconds: 10),
+      );
+      final coords = js_util.getProperty(pos as Object, 'coords');
+      final lat = (js_util.getProperty(coords as Object, 'latitude') as num).toDouble();
+      final lon = (js_util.getProperty(coords as Object, 'longitude') as num).toDouble();
+      final newPos = LatLng(lat, lon);
+      setState(() {
+        _myLocation    = newPos;
+        _currentCenter = newPos;
+      });
+      await _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
+      );
+      await _showMyLocationDot(newPos);
+    } catch (e) {
+      final msg = _gpsErrorMessage(e);
+      _showError('GPS: $msg');
+    }
+  }
+
   void _goToMyLocation() async {
     try {
-      final pos = await html.window.navigator.geolocation.getCurrentPosition();
-      final lat = (pos.coords!.latitude  as num).toDouble();
-      final lon = (pos.coords!.longitude as num).toDouble();
+      final pos = await html.window.navigator.geolocation.getCurrentPosition(
+        enableHighAccuracy: false,
+        timeout: const Duration(seconds: 10),
+      );
+      final coords = js_util.getProperty(pos as Object, 'coords');
+      final lat = (js_util.getProperty(coords as Object, 'latitude') as num).toDouble();
+      final lon = (js_util.getProperty(coords as Object, 'longitude') as num).toDouble();
       final newPos = LatLng(lat, lon);
-      setState(() => _currentCenter = newPos);
-      final zoom = _mapController?.cameraPosition?.zoom ?? 16.5;
+      setState(() {
+        _myLocation    = newPos;
+        _currentCenter = newPos;
+      });
+      final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
       await _mapController?.animateCamera(
         CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: zoom)),
       );
+      await _showMyLocationDot(newPos);
       fetchShadows();
-    } catch (_) {
-      _showError('Location access denied or unavailable');
+    } catch (e) {
+      _showError('Location error: ${_gpsErrorMessage(e)}');
+    }
+  }
+
+  Future<void> _showMyLocationDot(LatLng pos) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    final geoJson = {
+      'type': 'FeatureCollection',
+      'features': [{
+        'type': 'Feature',
+        'geometry': {'type': 'Point', 'coordinates': [pos.longitude, pos.latitude]},
+        'properties': {},
+      }],
+    };
+    if (_myLocationLayerReady) {
+      await ctrl.setGeoJsonSource('my-location', geoJson);
+    } else {
+      await ctrl.addSource('my-location', GeojsonSourceProperties(data: geoJson));
+      await ctrl.addLayer(
+        'my-location', 'my-location-pulse',
+        CircleLayerProperties(
+          circleRadius: 16,
+          circleColor: '#2979FF',
+          circleOpacity: 0.20,
+        ),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer(
+        'my-location', 'my-location-dot',
+        CircleLayerProperties(
+          circleRadius: 7,
+          circleColor: '#2979FF',
+          circleOpacity: 1.0,
+          circleStrokeWidth: 2.0,
+          circleStrokeColor: '#FFFFFF',
+          circleStrokeOpacity: 1.0,
+        ),
+        enableInteraction: false,
+      );
+      _myLocationLayerReady = true;
     }
   }
 
@@ -292,9 +379,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
+  String _gpsErrorMessage(Object e) {
+    try {
+      final js = e as dynamic;
+      final code = js.code as int?;
+      final message = js.message as String?;
+      if (code == 1) return 'Permission denied';
+      if (code == 2) return 'Position unavailable (code 2)${message != null ? ": $message" : ""}';
+      if (code == 3) return 'Timeout (code 3)';
+      return message ?? e.toString();
+    } catch (_) {
+      return e.toString();
+    }
+  }
+
   void _showError(String msg) {
     setState(() => _errorMessage = msg);
-    Future.delayed(const Duration(seconds: 4), () {
+    Future.delayed(const Duration(seconds: 10), () {
       if (mounted) setState(() => _errorMessage = null);
     });
   }
@@ -624,7 +725,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               styleString: mapStyle,
               initialCameraPosition: CameraPosition(
                 target: _currentCenter,
-                zoom: 16.5,
+                zoom: 13.0,
               ),
               onMapCreated:          _onMapCreated,
               onStyleLoadedCallback: _onStyleLoaded,
@@ -851,7 +952,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             top: 0,
             bottom: 0,
             right: _panelOpen ? 280 : 0,
-            width: 20,
+            width: 36,
             child: Align(
               alignment: Alignment.center,
               child: MouseRegion(
@@ -859,7 +960,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 child: GestureDetector(
                   onTap: () => setState(() => _panelOpen = !_panelOpen),
                   child: Container(
-                    width: 20, height: 52,
+                    width: 36, height: 64,
                     decoration: BoxDecoration(
                       color: Colors.white,
                       borderRadius: const BorderRadius.horizontal(
@@ -874,7 +975,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     ),
                     child: Icon(
                       _panelOpen ? Icons.chevron_right : Icons.chevron_left,
-                      size: 16, color: Colors.grey.shade600,
+                      size: 20, color: Colors.grey.shade600,
                     ),
                   ),
                 ),
@@ -980,10 +1081,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildDateSection(),
               const Divider(height: 28),
               _buildSunPosition(),
-              if (_clickedPoint != null) ...[
-                const Divider(height: 28),
-                _buildPointInfoCard(),
-              ],
+              const Divider(height: 28),
+              if (_clickedPoint != null)
+                _buildPointInfoCard()
+              else
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    children: [
+                      Icon(Icons.touch_app_outlined, size: 15, color: Colors.grey.shade400),
+                      const SizedBox(width: 6),
+                      Text('Tap the map to inspect a point',
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+                    ],
+                  ),
+                ),
             ],
           ),
         ),
@@ -1043,12 +1155,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(children: const [
-          Icon(Icons.access_time, size: 14, color: Colors.grey),
-          SizedBox(width: 4),
-          Text('Time of Day',
-              style: TextStyle(fontSize: 12, color: Colors.grey)),
-        ]),
         SliderTheme(
           data: SliderTheme.of(context).copyWith(
             activeTrackColor: Colors.orange,
