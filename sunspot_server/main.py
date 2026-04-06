@@ -612,6 +612,21 @@ def _simplify_tolerance(zoom):
     return               0.00030    # zoom ≤ 12 — ~30 m
 
 
+def _get_sunrise_sunset(lat, lon, now, tz):
+    """Return (sunrise_hour, sunset_hour) as floats (local time, hour precision)."""
+    sr, ss, prev_el = None, None, None
+    for h in range(24):
+        t = tz.localize(datetime(now.year, now.month, now.day, h, 0, 0))
+        el, _ = get_sun_angles(lat, lon, t)
+        if prev_el is not None:
+            if prev_el <= 0 < el and sr is None:
+                sr = float(h)
+            elif prev_el > 0 >= el and ss is None:
+                ss = float(h)
+        prev_el = el
+    return sr, ss
+
+
 def _gap_fill(zoom):
     """Morphological close distance (deg) — smooth LOD: 3× per zoom step.
     Continuous in both directions — finer at high zoom, coarser at low zoom.
@@ -1077,10 +1092,14 @@ def shadow_stream():
             try:    shadow_l2 = orient(viewport_bbox.difference(sunlit_filtered.buffer(e2)), sign=1.0)
             except: shadow_l2 = shadow_l1
 
+            sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
+
             yield _evt(100, "Done", result={
                 "time":      now.strftime("%H:%M"),
                 "elevation": elevation,
                 "azimuth":   azimuth,
+                "sunrise":   sr,
+                "sunset":    ss,
                 "dark_area": {"type": "FeatureCollection", "features": [
                     {"type": "Feature", "geometry": round_coords(mapping(shadow_l0)),
                      "properties": {"layer": "shadow-l0"}},

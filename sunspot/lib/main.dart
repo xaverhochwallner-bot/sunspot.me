@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'package:geolocator/geolocator.dart';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -65,6 +66,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Live mode
   bool   _liveMode  = false;
   Timer? _liveTimer;
+
+  // Sunrise / sunset (local hours, e.g. 6.0, 20.0)
+  double? _sunriseHour;
+  double? _sunsetHour;
 
   // Point info popup
   LatLng?                _clickedPoint;
@@ -395,51 +400,55 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Geolocation
   // -------------------------------------------------------------------------
 
-  Future<void> _initGpsOnStart() async {
+  Future<LatLng?> _getGpsPosition() async {
     try {
-      final pos = await html.window.navigator.geolocation.getCurrentPosition(
-        enableHighAccuracy: false,
-        timeout: const Duration(seconds: 10),
-      );
-      final lat = pos.coords!.latitude!.toDouble();
-      final lon = pos.coords!.longitude!.toDouble();
-      final newPos = LatLng(lat, lon);
-      setState(() {
-        _gpsPosition   = newPos;
-        _currentCenter = newPos;
-      });
-      await _mapController?.animateCamera(
-        CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
-      );
-      await _showMyLocationDot(newPos);
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        final req = await Geolocator.requestPermission();
+        if (req == LocationPermission.denied ||
+            req == LocationPermission.deniedForever) {
+          _showError('GPS: permission denied');
+          return null;
+        }
+      }
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+        ),
+      ).timeout(const Duration(seconds: 10));
+      return LatLng(pos.latitude, pos.longitude);
     } catch (e) {
-      final msg = _gpsErrorMessage(e);
-      _showError('GPS: $msg');
+      _showError('GPS: ${e.toString().split('\n').first}');
+      return null;
     }
   }
 
+  Future<void> _initGpsOnStart() async {
+    final newPos = await _getGpsPosition();
+    if (newPos == null || !mounted) return;
+    setState(() {
+      _gpsPosition   = newPos;
+      _currentCenter = newPos;
+    });
+    await _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
+    );
+    await _showMyLocationDot(newPos);
+  }
+
   void _goToMyLocation() async {
-    try {
-      final pos = await html.window.navigator.geolocation.getCurrentPosition(
-        enableHighAccuracy: false,
-        timeout: const Duration(seconds: 10),
-      );
-      final lat = pos.coords!.latitude!.toDouble();
-      final lon = pos.coords!.longitude!.toDouble();
-      final newPos = LatLng(lat, lon);
-      setState(() {
-        _gpsPosition   = newPos;
-        _currentCenter = newPos;
-      });
-      final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
-      await _mapController?.animateCamera(
-        CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: zoom)),
-      );
-      await _showMyLocationDot(newPos);
-      fetchShadows();
-    } catch (e) {
-      _showError('Location error: ${_gpsErrorMessage(e)}');
-    }
+    final newPos = await _getGpsPosition();
+    if (newPos == null || !mounted) return;
+    setState(() {
+      _gpsPosition   = newPos;
+      _currentCenter = newPos;
+    });
+    final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
+    await _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: zoom)),
+    );
+    await _showMyLocationDot(newPos);
+    fetchShadows();
   }
 
   Future<void> _showMyLocationDot(LatLng pos) async {
@@ -492,20 +501,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final els = html.document.querySelectorAll('.maplibregl-canvas-container');
     for (final el in els) {
       el.style.pointerEvents = enabled ? 'auto' : 'none';
-    }
-  }
-
-  String _gpsErrorMessage(Object e) {
-    try {
-      final js = e as dynamic;
-      final code = js.code as int?;
-      final message = js.message as String?;
-      if (code == 1) return 'Permission denied';
-      if (code == 2) return 'Position unavailable (code 2)${message != null ? ": $message" : ""}';
-      if (code == 3) return 'Timeout (code 3)';
-      return message ?? e.toString();
-    } catch (_) {
-      return e.toString();
     }
   }
 
@@ -612,19 +607,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         if (data.containsKey('result')) {
           es.close();
           _activeEventSource = null;
-          final result = data['result'] as Map<String, dynamic>;
-          final elev   = (result['elevation'] as num?)?.toDouble() ?? 0.0;
-          final azim   = (result['azimuth']   as num?)?.toDouble() ?? 0.0;
+          final result  = data['result'] as Map<String, dynamic>;
+          final elev    = (result['elevation'] as num?)?.toDouble() ?? 0.0;
+          final azim    = (result['azimuth']   as num?)?.toDouble() ?? 0.0;
+          final srHour  = (result['sunrise']   as num?)?.toDouble();
+          final ssHour  = (result['sunset']    as num?)?.toDouble();
           if (result['dark_area'] != null) {
             await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
           }
           _pillTimer?.cancel();
           if (mounted) {
             setState(() {
-              _elevation = elev;
-              _azimuth   = azim;
-              _loading   = false;
-              _showPill  = false;
+              _elevation   = elev;
+              _azimuth     = azim;
+              _sunriseHour = srHour;
+              _sunsetHour  = ssHour;
+              _loading     = false;
+              _showPill    = false;
             });
           }
           if (!completer.isCompleted) completer.complete();
@@ -1347,14 +1346,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
           child: Slider(
             value: _hour,
-            min: 0,
-            max: 23,
-            divisions: 23,
+            min: 0, max: 23, divisions: 23,
             onChangeStart: (_) {
               setState(() => _draggingSlider = true);
               _setMapPointerEvents(false);
             },
-            onChanged:  (v) => setState(() => _hour = v),
+            onChanged:   (v) => setState(() => _hour = v),
             onChangeEnd: (_) {
               setState(() => _draggingSlider = false);
               _setMapPointerEvents(true);
@@ -1362,8 +1359,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             },
           ),
         ),
+        // Day/night strip with sunrise/sunset markers
+        if (_sunriseHour != null && _sunsetHour != null)
+          _buildDayNightStrip(_sunriseHour!, _sunsetHour!),
+        // Hour labels
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.only(left: 4, right: 4, top: 2),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: const [
@@ -1377,6 +1378,113 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
       ],
     );
+  }
+
+  /// Thin coloured bar + tick marks showing day (amber) vs night (grey).
+  /// Flutter's Slider track starts/ends at 12 px from the widget edge (overlay radius).
+  Widget _buildDayNightStrip(double sr, double ss) {
+    const sliderPad = 12.0;
+    const nightClr  = Color(0xFFCFD8DC); // blue-grey 100
+    const dayClr    = Color(0xFFFFE082); // amber 200
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final total   = constraints.maxWidth;
+        final trackW  = total - sliderPad * 2;
+        final srFrac  = (sr / 23.0).clamp(0.0, 1.0);
+        final ssFrac  = (ss / 23.0).clamp(0.0, 1.0);
+        final srX     = sliderPad + srFrac * trackW;
+        final ssX     = sliderPad + ssFrac * trackW;
+
+        // Clamp label positions so they don't overflow the widget
+        final srLabelX = (srX - 14).clamp(0.0, total - 36);
+        final ssLabelX = (ssX - 14).clamp(0.0, total - 36);
+
+        return SizedBox(
+          height: 20,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              // ── coloured strip ──
+              Positioned(
+                left: sliderPad, right: sliderPad, top: 4,
+                child: SizedBox(
+                  height: 4,
+                  child: Row(
+                    children: [
+                      Flexible(
+                        flex: (srFrac * 1000).round().clamp(1, 999),
+                        child: Container(color: nightClr),
+                      ),
+                      Flexible(
+                        flex: ((ssFrac - srFrac) * 1000).round().clamp(1, 999),
+                        child: Container(color: dayClr),
+                      ),
+                      Flexible(
+                        flex: ((1 - ssFrac) * 1000).round().clamp(1, 999),
+                        child: Container(color: nightClr),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // ── sunrise tick ──
+              Positioned(
+                left: srX - 0.5, top: 0,
+                child: Container(width: 1, height: 12,
+                    color: Colors.orange.shade400),
+              ),
+              // ── sunset tick ──
+              Positioned(
+                left: ssX - 0.5, top: 0,
+                child: Container(width: 1, height: 12,
+                    color: Colors.blueGrey.shade300),
+              ),
+              // ── sunrise label ──
+              Positioned(
+                left: srLabelX, top: 12,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.wb_sunny_outlined, size: 8,
+                        color: Colors.orange.shade500),
+                    const SizedBox(width: 1),
+                    Text(_formatSliderHour(sr),
+                        style: TextStyle(
+                            fontSize: 8,
+                            color: Colors.orange.shade700,
+                            fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+              // ── sunset label ──
+              Positioned(
+                left: ssLabelX, top: 12,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.nightlight_round, size: 8,
+                        color: Colors.blueGrey.shade400),
+                    const SizedBox(width: 1),
+                    Text(_formatSliderHour(ss),
+                        style: TextStyle(
+                            fontSize: 8,
+                            color: Colors.blueGrey.shade500,
+                            fontWeight: FontWeight.w600)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatSliderHour(double hour) {
+    final h = hour.toInt().clamp(0, 23);
+    final m = ((hour - h) * 60).round();
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
   // ---- Animate button ----
