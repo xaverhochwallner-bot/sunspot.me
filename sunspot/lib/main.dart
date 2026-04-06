@@ -91,6 +91,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
+  // Mobile bottom sheet
+  int _mobileTab = 0;
+  final DraggableScrollableController _sheetController = DraggableScrollableController();
+  double _screenHeight = 800.0;
+
+  bool get _isMobile => _screenWidth < 650;
+
   // Search
   final TextEditingController _searchController = TextEditingController();
   final FocusNode             _searchFocus      = FocusNode();
@@ -192,9 +199,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _ignoreNextMapClick = false;
       return;
     }
-    // Reject clicks in the panel/toggle zone
-    final panelZone = _panelOpen ? 300.0 : 22.0;
-    if (point.x > _screenWidth - panelZone) return;
+    // Reject clicks in the panel/toggle zone (desktop only)
+    final panelZone = _isMobile ? 0.0 : (_panelOpen ? 300.0 : 22.0);
+    if (panelZone > 0 && point.x > _screenWidth - panelZone) return;
     if (_searchResults.isNotEmpty) {
       setState(() => _searchResults = []);
       return;
@@ -224,7 +231,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _pointInfoLoading = false;
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_panelScroll.hasClients) {
+          if (_isMobile) {
+            setState(() => _mobileTab = 2);
+            if (_sheetController.isAttached) {
+              _sheetController.animateTo(
+                0.7,
+                duration: const Duration(milliseconds: 350),
+                curve: Curves.easeOut,
+              );
+            }
+          } else if (_panelScroll.hasClients) {
             _panelScroll.animateTo(
               _panelScroll.position.maxScrollExtent,
               duration: const Duration(milliseconds: 350),
@@ -332,11 +348,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       if (spots.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 150));
-        _panelScroll.animateTo(
-          _panelScroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeOut,
-        );
+        if (_isMobile) {
+          setState(() => _mobileTab = 1);
+          if (_sheetController.isAttached) {
+            _sheetController.animateTo(
+              0.55,
+              duration: const Duration(milliseconds: 400),
+              curve: Curves.easeOut,
+            );
+          }
+        } else if (_panelScroll.hasClients) {
+          _panelScroll.animateTo(
+            _panelScroll.position.maxScrollExtent,
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeOut,
+          );
+        }
       }
     } catch (_) {
       _showError('Could not find sunny spots');
@@ -789,6 +816,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _searchController.dispose();
     _searchFocus.dispose();
     _panelScroll.dispose();
+    _sheetController.dispose();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
@@ -848,7 +876,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   @override
   Widget build(BuildContext context) {
-    _screenWidth = MediaQuery.of(context).size.width;
+    _screenWidth  = MediaQuery.of(context).size.width;
+    _screenHeight = MediaQuery.of(context).size.height;
+    final isMobile = _isMobile;
+    // On mobile the sheet peeks ~8% height; buttons sit above that
+    final btnBottom     = isMobile ? (_screenHeight * 0.08 + 34).roundToDouble() : 24.0;
+    final zoomBottom    = isMobile ? (_screenHeight * 0.08 + 90).roundToDouble() : 80.0;
+    final pillBottom    = isMobile ? (_screenHeight * 0.08 + 24).roundToDouble() : 24.0;
+    final panelRightPad = isMobile ? 0 : ((_panelOpen ? 280 : 0));
     return Scaffold(
       body: Stack(
         children: [
@@ -875,7 +910,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
-            top: 12, left: 12, right: _panelOpen ? 292 : 12,
+            top: 12, left: 12, right: isMobile ? 12 : (_panelOpen ? 292 : 12),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1007,7 +1042,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             AnimatedPositioned(
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOut,
-              top: 0, left: 0, right: _panelOpen ? 280 : 0,
+              top: 0, left: 0, right: panelRightPad.toDouble(),
               child: LinearProgressIndicator(
                 value: _loadingProgress > 0 ? _loadingProgress : null,
                 minHeight: 3,
@@ -1020,13 +1055,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             curve: Curves.easeInOut,
-            bottom: 24, left: 0, right: _panelOpen ? 280 : 0,
+            bottom: pillBottom, left: 0, right: panelRightPad.toDouble(),
             child: Center(child: _buildLoadingPill()),
           ),
 
           // Geolocation button
           Positioned(
-            bottom: 24, left: 16,
+            bottom: btnBottom, left: 16,
             child: FloatingActionButton.small(
               onPressed: _goToMyLocation,
               backgroundColor: Colors.white,
@@ -1047,7 +1082,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
           // Zoom buttons
           Positioned(
-            bottom: 80, left: 16,
+            bottom: zoomBottom, left: 16,
             child: Column(
               children: [
                 _buildZoomButton(Icons.add, () async {
@@ -1078,7 +1113,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             AnimatedPositioned(
               duration: const Duration(milliseconds: 300),
               curve: Curves.easeInOut,
-              bottom: 80, left: 16, right: _panelOpen ? 296 : 16,
+              bottom: zoomBottom, left: 16,
+              right: isMobile ? 16 : (_panelOpen ? 296 : 16),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
@@ -1090,60 +1126,63 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             ),
 
-          // Right-side panel (slides in/out)
-          Positioned(
-            top: 0, right: 0, bottom: 0, width: 280,
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (_) => _setMapCanvasInteractive(false),
-              onPointerUp:   (_) => _setMapCanvasInteractive(true),
-              onPointerCancel: (_) => _setMapCanvasInteractive(true),
-              child: AnimatedSlide(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOut,
-                offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
-                child: _buildPanel(),
+          // Desktop: right-side panel (slides in/out)
+          if (!isMobile) ...[
+            Positioned(
+              top: 0, right: 0, bottom: 0, width: 280,
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _setMapCanvasInteractive(false),
+                onPointerUp:   (_) => _setMapCanvasInteractive(true),
+                onPointerCancel: (_) => _setMapCanvasInteractive(true),
+                child: AnimatedSlide(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeInOut,
+                  offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
+                  child: _buildPanel(),
+                ),
               ),
             ),
-          ),
-
-          // Panel toggle tab
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            top: 0,
-            bottom: 0,
-            right: _panelOpen ? 280 : 0,
-            width: 36,
-            child: Align(
-              alignment: Alignment.center,
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () => setState(() => _panelOpen = !_panelOpen),
-                  child: Container(
-                    width: 36, height: 64,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: const BorderRadius.horizontal(
-                          left: Radius.circular(8)),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.12),
-                          blurRadius: 6,
-                          offset: const Offset(-2, 0),
-                        ),
-                      ],
-                    ),
-                    child: Icon(
-                      _panelOpen ? Icons.chevron_right : Icons.chevron_left,
-                      size: 20, color: Colors.grey.shade600,
+            // Panel toggle tab
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              top: 0, bottom: 0,
+              right: _panelOpen ? 280 : 0,
+              width: 36,
+              child: Align(
+                alignment: Alignment.center,
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: () => setState(() => _panelOpen = !_panelOpen),
+                    child: Container(
+                      width: 36, height: 64,
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: const BorderRadius.horizontal(
+                            left: Radius.circular(8)),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.12),
+                            blurRadius: 6,
+                            offset: const Offset(-2, 0),
+                          ),
+                        ],
+                      ),
+                      child: Icon(
+                        _panelOpen ? Icons.chevron_right : Icons.chevron_left,
+                        size: 20, color: Colors.grey.shade600,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
-          ),
+          ],
+
+          // Mobile: bottom sheet
+          if (isMobile) _buildMobileSheet(),
         ],
       ),
     );
@@ -1933,6 +1972,186 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ],
       ),
     );
+  }
+
+  // =========================================================================
+  // Mobile bottom sheet
+  // =========================================================================
+
+  Widget _buildMobileSheet() {
+    return DraggableScrollableSheet(
+      controller: _sheetController,
+      initialChildSize: 0.40,
+      minChildSize: 0.08,
+      maxChildSize: 0.88,
+      snap: true,
+      snapSizes: const [0.08, 0.40, 0.88],
+      builder: (context, scrollController) {
+        return Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (_) => _setMapCanvasInteractive(false),
+          onPointerUp:   (_) => _setMapCanvasInteractive(true),
+          onPointerCancel: (_) => _setMapCanvasInteractive(true),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.15),
+                  blurRadius: 12,
+                  offset: const Offset(0, -4),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                // Drag handle
+                Center(
+                  child: Container(
+                    margin: const EdgeInsets.only(top: 8, bottom: 2),
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                // Tab bar
+                _buildMobileTabBar(),
+                Divider(height: 1, color: Colors.grey.shade200),
+                // Tab content
+                Expanded(
+                  child: SingleChildScrollView(
+                    controller: scrollController,
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+                    child: _buildMobileTabContent(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMobileTabBar() {
+    const tabs = [
+      (Icons.access_time,       'Time'),
+      (Icons.wb_sunny_outlined, 'Spots'),
+      (Icons.info_outline,      'Info'),
+      (Icons.favorite_outline,  'Saved'),
+    ];
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      child: Row(
+        children: tabs.asMap().entries.map((entry) {
+          final i       = entry.key;
+          final icon    = entry.value.$1;
+          final label   = entry.value.$2;
+          final selected = _mobileTab == i;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => setState(() => _mobileTab = i),
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: selected ? Colors.orange : Colors.transparent,
+                      width: 2,
+                    ),
+                  ),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(icon, size: 20,
+                        color: selected ? Colors.orange : Colors.grey.shade500),
+                    const SizedBox(height: 2),
+                    Text(label,
+                        style: TextStyle(
+                          fontSize: 10, fontWeight: FontWeight.w600,
+                          color: selected ? Colors.orange : Colors.grey.shade500,
+                        )),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildMobileTabContent() {
+    switch (_mobileTab) {
+      case 0: // Time
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildTimeHeader(),
+            const SizedBox(height: 2),
+            _buildSunSummary(),
+            const SizedBox(height: 4),
+            _buildTimeSlider(),
+            const SizedBox(height: 12),
+            _buildAnimateButton(),
+            const SizedBox(height: 16),
+            _buildDateSection(),
+          ],
+        );
+      case 1: // Spots
+        return _buildFindSunnySpotsSection();
+      case 2: // Info
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSunPosition(),
+            const Divider(height: 28),
+            if (_clickedPoint != null)
+              _buildPointInfoCard()
+            else
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.touch_app_outlined, size: 15,
+                        color: Colors.grey.shade400),
+                    const SizedBox(width: 6),
+                    Text('Tap the map to inspect a point',
+                        style: TextStyle(fontSize: 12,
+                            color: Colors.grey.shade400)),
+                  ],
+                ),
+              ),
+          ],
+        );
+      case 3: // Saved (placeholder)
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 32),
+          child: Center(
+            child: Column(
+              children: [
+                Icon(Icons.favorite_outline, size: 44,
+                    color: Colors.grey.shade300),
+                const SizedBox(height: 10),
+                Text('No saved spots yet',
+                    style: TextStyle(fontSize: 14,
+                        color: Colors.grey.shade400)),
+                const SizedBox(height: 4),
+                Text('Coming soon',
+                    style: TextStyle(fontSize: 12,
+                        color: Colors.grey.shade300)),
+              ],
+            ),
+          ),
+        );
+      default:
+        return const SizedBox.shrink();
+    }
   }
 
 }
