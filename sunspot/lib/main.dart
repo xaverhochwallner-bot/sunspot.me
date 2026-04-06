@@ -80,6 +80,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   LatLng? _myLocation;
   bool    _myLocationLayerReady = false;
 
+  // Panel scroll
+  final ScrollController _panelScroll = ScrollController();
+
   // Search
   final TextEditingController _searchController = TextEditingController();
   final FocusNode             _searchFocus      = FocusNode();
@@ -218,6 +221,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         setState(() {
           _pointInfo        = jsonDecode(resp.body) as Map<String, dynamic>;
           _pointInfoLoading = false;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_panelScroll.hasClients) {
+            _panelScroll.animateTo(
+              _panelScroll.position.maxScrollExtent,
+              duration: const Duration(milliseconds: 350),
+              curve: Curves.easeOut,
+            );
+          }
         });
       }
     } catch (_) {
@@ -656,6 +668,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _liveTimer?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
+    _panelScroll.dispose();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
@@ -912,6 +925,34 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
+          // Zoom buttons
+          Positioned(
+            bottom: 80, left: 16,
+            child: Column(
+              children: [
+                _buildZoomButton(Icons.add, () async {
+                  final cam = _mapController?.cameraPosition;
+                  if (cam == null) return;
+                  await _mapController?.animateCamera(
+                    CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20)),
+                    ),
+                  );
+                }),
+                const SizedBox(height: 4),
+                _buildZoomButton(Icons.remove, () async {
+                  final cam = _mapController?.cameraPosition;
+                  if (cam == null) return;
+                  await _mapController?.animateCamera(
+                    CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20)),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+
           // Error banner
           if (_errorMessage != null)
             AnimatedPositioned(
@@ -984,6 +1025,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildZoomButton(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      elevation: 2,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: SizedBox(
+          width: 36, height: 36,
+          child: Icon(icon, size: 20, color: Colors.black87),
+        ),
       ),
     );
   }
@@ -1067,6 +1124,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
       child: SafeArea(
         child: SingleChildScrollView(
+          controller: _panelScroll,
           padding: const EdgeInsets.all(16),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
