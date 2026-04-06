@@ -71,6 +71,37 @@ _buildings_tree    = None # STRtree spatial index
 _simplified_polys  = {}   # zoom → list[Polygon]
 _simplified_trees  = {}   # zoom → STRtree
 
+# ---------------------------------------------------------------------------
+# POI / open-space data — loaded once at startup
+# ---------------------------------------------------------------------------
+_open_spaces     = []   # list of (Polygon, float boost)
+_open_space_tree = None
+_amenity_pts     = []   # list of shapely Point — cafés, benches, etc.
+_amenity_tree    = None
+_penalized_areas = []   # list of (Polygon, float penalty factor)
+_penalized_tree  = None
+
+# Score boosts for open spaces (multiplied onto the base patch-area score)
+_LEISURE_BOOST = {
+    'park': 4.0, 'garden': 3.5, 'playground': 2.5, 'pitch': 1.8,
+    'recreation_ground': 3.0, 'common': 3.5, 'village_green': 4.0,
+}
+_LANDUSE_BOOST = {
+    'grass': 3.0, 'meadow': 3.0, 'recreation_ground': 3.0,
+    'village_green': 4.0, 'greenfield': 2.0,
+}
+_LANDUSE_PENALTY = {
+    'parking': 0.05, 'garages': 0.05,
+    'industrial': 0.15, 'commercial': 0.4, 'retail': 0.5,
+}
+_AMENITY_BOOST_TYPES = {
+    'cafe', 'restaurant', 'bar', 'pub', 'biergarten',
+    'bench', 'fountain', 'marketplace', 'food_court',
+}
+
+# Minimum separation between returned sunny spots (~150 m in degrees)
+MIN_SPOT_SEPARATION = 0.0015
+
 PRE_SIMPLIFY = {
     12: 0.00020,  # ~20 m — buildings become pentagons
     13: 0.00008,  # ~8 m
@@ -188,13 +219,47 @@ class BuildingHandler(osmium.SimpleHandler):
         self.main_heights  = []
         self.part_polys    = []   # ways with building:part=* (individual sections)
         self.part_heights  = []
+        self.open_spaces   = []   # (Polygon, boost)
+        self.penalized     = []   # (Polygon, penalty)
         self._bbox         = LOAD_BBOX
+
+    def _make_area_poly(self, w):
+        """Extract a valid closed polygon from a way, or return None."""
+        coords = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
+        if len(coords) < 3:
+            return None
+        min_lat, min_lon, max_lat, max_lon = self._bbox
+        lats = [c[1] for c in coords]
+        lons = [c[0] for c in coords]
+        if max(lats) < min_lat or min(lats) > max_lat: return None
+        if max(lons) < min_lon or min(lons) > max_lon: return None
+        try:
+            poly = Polygon(coords)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            return poly if (poly.is_valid and not poly.is_empty) else None
+        except Exception:
+            return None
 
     def way(self, w):
         has_building = "building" in w.tags
         has_part     = "building:part" in w.tags
+
+        # --- Open spaces & penalized areas ---
+        # Only 2 tag lookups for the 20M+ non-building ways — keep the hot path fast
         if not has_building and not has_part:
+            landuse = w.tags.get('landuse', '')
+            leisure = w.tags.get('leisure', '')
+            boost   = _LEISURE_BOOST.get(leisure) or _LANDUSE_BOOST.get(landuse)
+            penalty = _LANDUSE_PENALTY.get(landuse)
+            if boost is None and penalty is None:
+                return
+            poly = self._make_area_poly(w)
+            if poly is not None:
+                if boost:   self.open_spaces.append((poly, boost))
+                if penalty: self.penalized.append((poly, penalty))
             return
+
         try:
             coords = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
             if len(coords) < 3:
@@ -228,7 +293,72 @@ class BuildingHandler(osmium.SimpleHandler):
             pass
 
 
+class AmenityHandler(osmium.SimpleHandler):
+    """Separate lightweight handler for amenity nodes only.
+    Run as a node-only pass (no location index needed) — much faster than
+    embedding node() in BuildingHandler which processes 90M+ nodes."""
+    def __init__(self):
+        super().__init__()
+        self.amenity_pts = []
+        self._bbox = LOAD_BBOX
+
+    def node(self, n):
+        if not n.location.valid():
+            return
+        min_lat, min_lon, max_lat, max_lon = self._bbox
+        if not (min_lat <= n.location.lat <= max_lat
+                and min_lon <= n.location.lon <= max_lon):
+            return
+        if n.tags.get('amenity') in _AMENITY_BOOST_TYPES:
+            self.amenity_pts.append((n.location.lat, n.location.lon))
+
+
+def _parse_amenities(pbf_path):
+    """Fast node-only PBF pass to collect amenity points.
+    Uses osmium entity-bits filter so only NODE entities are decoded."""
+    try:
+        import osmium.io as oio
+        # osm_entity_bits.NODE tells osmium to skip way/relation decoding entirely
+        reader = oio.Reader(pbf_path, oio.osm_entity_bits.NODE)
+        handler = AmenityHandler()
+        osmium.apply(reader, handler)
+        reader.close()
+        print(f"Parsed {len(handler.amenity_pts):,} amenity points.")
+        return handler.amenity_pts
+    except Exception as e:
+        print(f"Amenity node scan skipped ({e}); proximity bonus disabled.")
+        return []
+
+
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "buildings_cache.pkl")
+
+def _build_poi_trees(handler_or_data):
+    """Build global STRtrees for open spaces, penalized areas, amenity points."""
+    global _open_spaces, _open_space_tree, _amenity_pts, _amenity_tree
+    global _penalized_areas, _penalized_tree
+    from shapely.geometry import Point as SPoint
+
+    if isinstance(handler_or_data, dict):
+        open_spaces  = handler_or_data['open_spaces']
+        penalized    = handler_or_data['penalized']
+        amenity_pts  = handler_or_data['amenity_pts']
+    else:
+        open_spaces  = handler_or_data.open_spaces
+        penalized    = handler_or_data.penalized
+        amenity_pts  = handler_or_data.amenity_pts
+
+    _open_spaces  = open_spaces
+    _penalized_areas = penalized
+    _amenity_pts  = [SPoint(lon, lat) for lat, lon in amenity_pts]
+
+    _open_space_tree = STRtree([p for p, _ in _open_spaces])  if _open_spaces  else None
+    _penalized_tree  = STRtree([p for p, _ in _penalized_areas]) if _penalized_areas else None
+    _amenity_tree    = STRtree(_amenity_pts)                   if _amenity_pts   else None
+
+    print(f"POI: {len(_open_spaces):,} open spaces, "
+          f"{len(_penalized_areas):,} penalized areas, "
+          f"{len(_amenity_pts):,} amenity points indexed.")
+
 
 def load_buildings(pbf_path):
     global _buildings_polys, _buildings_heights, _buildings_tree
@@ -238,15 +368,30 @@ def load_buildings(pbf_path):
         if os.path.getmtime(CACHE_PATH) > os.path.getmtime(pbf_path):
             print("Loading buildings from cache ...")
             with open(CACHE_PATH, "rb") as f:
-                _buildings_polys, _buildings_heights = pickle.load(f)
-            _buildings_tree = STRtree(_buildings_polys)
-            print(f"Loaded {len(_buildings_polys):,} buildings from cache — ready.")
-            _build_simplified_sets()
+                cached = pickle.load(f)
+            # Cache formats:
+            #   2-tuple: (polys, heights)                         — legacy
+            #   3-tuple: (polys, heights, poi_data)               — v2
+            #   4-tuple: (polys, heights, poi_data, simp_polys)   — v3 (current)
+            if isinstance(cached, tuple) and len(cached) >= 3:
+                _buildings_polys, _buildings_heights, poi_data = cached[:3]
+                simp_polys = cached[3] if len(cached) >= 4 else None
+                _buildings_tree = STRtree(_buildings_polys)
+                print(f"Loaded {len(_buildings_polys):,} buildings from cache — ready.")
+                _build_poi_trees(poi_data)
+            else:
+                # Legacy format — force full rebuild on next run by returning early
+                _buildings_polys, _buildings_heights = cached
+                _buildings_tree = STRtree(_buildings_polys)
+                print("Old cache format — delete buildings_cache.pkl to rebuild with POI data.")
+                simp_polys = None
+            _build_simplified_sets(from_cache=simp_polys)
             return
 
     print(f"Parsing buildings from {pbf_path} (first run, will cache) ...")
     handler = BuildingHandler()
     handler.apply_file(pbf_path, locations=True)
+    amenity_pts = _parse_amenities(pbf_path)
 
     # Remove main building outlines that have building:part children inside them.
     # Parts have specific per-section heights; the parent outline is redundant and
@@ -275,30 +420,57 @@ def load_buildings(pbf_path):
     _buildings_heights = filtered_main_heights + handler.part_heights
     print(f"After dedup: {len(_buildings_polys):,} buildings kept.")
 
-    print(f"Saving cache to {CACHE_PATH} ...")
-    with open(CACHE_PATH, "wb") as f:
-        pickle.dump((_buildings_polys, _buildings_heights), f)
+    poi_data = {
+        'open_spaces': handler.open_spaces,
+        'penalized':   handler.penalized,
+        'amenity_pts': amenity_pts,
+    }
 
     _buildings_tree = STRtree(_buildings_polys)
     print(f"Loaded {len(_buildings_polys):,} buildings — spatial index ready.")
-    _build_simplified_sets()
+    _build_poi_trees(poi_data)
+    _build_simplified_sets()   # parallel simplification — populates _simplified_polys
+
+    print(f"Saving cache to {CACHE_PATH} ...")
+    with open(CACHE_PATH, "wb") as f:
+        pickle.dump((_buildings_polys, _buildings_heights, poi_data, dict(_simplified_polys)), f)
+    print("Cache saved.")
 
 
-def _build_simplified_sets():
+def _simplify_zoom(args):
+    """Simplify all building polygons for one zoom level (runs in a worker process)."""
+    zoom, tol, polys = args
+    simplified = []
+    for p in polys:
+        s = p.simplify(tol, preserve_topology=True)
+        simplified.append(s if (s and not s.is_empty and s.is_valid) else p)
+    return zoom, simplified
+
+
+def _build_simplified_sets(from_cache=None):
     """Build pre-simplified polygon sets for low zoom levels.
-    Called once after buildings are loaded. Pays the simplification cost
-    upfront so per-request parallel_union runs on smaller geometries.
+    If from_cache is provided (dict zoom→list), skip simplification and
+    just rebuild the STRtrees (fast). Otherwise simplify all 4 zoom levels
+    in parallel.
     """
     global _simplified_polys, _simplified_trees
-    for zoom, tol in PRE_SIMPLIFY.items():
-        print(f"Pre-simplifying buildings for zoom {zoom} (tol={tol}) ...")
-        simplified = []
-        for p in _buildings_polys:
-            s = p.simplify(tol, preserve_topology=True)
-            simplified.append(s if (s and not s.is_empty and s.is_valid) else p)
-        _simplified_polys[zoom] = simplified
-        _simplified_trees[zoom] = STRtree(simplified)
-        print(f"  zoom {zoom}: {len(simplified):,} polygons ready.")
+    if from_cache is not None:
+        # Restore polygons from cache, only rebuild STRtrees
+        print("Rebuilding simplified STRtrees from cache ...")
+        for zoom, simplified in from_cache.items():
+            _simplified_polys[zoom] = simplified
+            _simplified_trees[zoom] = STRtree(simplified)
+            print(f"  zoom {zoom}: {len(simplified):,} polygons indexed.")
+        return
+
+    print(f"Pre-simplifying {len(_buildings_polys):,} buildings for "
+          f"{len(PRE_SIMPLIFY)} zoom levels in parallel ...")
+    args = [(zoom, tol, _buildings_polys) for zoom, tol in PRE_SIMPLIFY.items()]
+    with ThreadPoolExecutor(max_workers=len(PRE_SIMPLIFY)) as ex:
+        for zoom, simplified in ex.map(_simplify_zoom, args):
+            _simplified_polys[zoom] = simplified
+            _simplified_trees[zoom] = STRtree(simplified)
+            print(f"  zoom {zoom}: {len(simplified):,} polygons ready.")
 
 
 def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=None):
@@ -1007,6 +1179,247 @@ def point_info():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Find sunny spots — returns top N sunlit centroids in the current viewport
+# ---------------------------------------------------------------------------
+
+@app.route("/find_sunny_spots")
+def find_sunny_spots():
+    try:
+        from shapely.geometry import Point as SPoint
+
+        lat     = request.args.get("lat",    default=48.2082, type=float)
+        lon     = request.args.get("lon",    default=16.3738, type=float)
+        hour    = request.args.get("hour",   default=None,    type=int)
+        minute  = request.args.get("minute", default=0,       type=int)
+        month   = request.args.get("month",  default=None,    type=int)
+        day     = request.args.get("day",    default=None,    type=int)
+        zoom    = request.args.get("zoom",   default=15.0,    type=float)
+        min_lat = request.args.get("minLat", default=None,    type=float)
+        min_lon = request.args.get("minLon", default=None,    type=float)
+        max_lat = request.args.get("maxLat", default=None,    type=float)
+        max_lon = request.args.get("maxLon", default=None,    type=float)
+        n       = min(request.args.get("n", default=5, type=int), 10)
+
+        tz  = pytz.timezone("Europe/Vienna")
+        now = datetime.now(tz)
+        if month is not None and day is not None:
+            now = now.replace(month=month, day=day)
+        if hour is not None:
+            now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        elevation, azimuth = get_sun_angles(lat, lon, now)
+
+        if elevation <= 0:
+            return jsonify({"spots": [], "reason": "night"})
+
+        ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
+
+        if ck in _shadow_cache:
+            sunlit_filtered = _shadow_cache[ck]
+        else:
+            # Compute shadow inline (same logic as /shadow endpoint)
+            VIEWPORT_PAD = 0.15
+            if None not in (min_lat, min_lon, max_lat, max_lon):
+                _vw = max_lon - min_lon
+                _vh = max_lat - min_lat
+                q_min_lat = min_lat - _vh * VIEWPORT_PAD
+                q_min_lon = min_lon - _vw * VIEWPORT_PAD
+                q_max_lat = max_lat + _vh * VIEWPORT_PAD
+                q_max_lon = max_lon + _vw * VIEWPORT_PAD
+            else:
+                q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
+                q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
+
+            compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+            min_bld_area = _min_building_area(zoom)
+            buildings    = [(p, h) for p, h in
+                            get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+                            if p.area >= min_bld_area]
+
+            def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                all_shadows = list(ex.map(_proj, buildings))
+
+            if zoom >= 14:
+                tall = [sh for (_, h), sh in zip(buildings, all_shadows)
+                        if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
+                occluder_union = parallel_union(tall) if tall else None
+            else:
+                occluder_union = None
+
+            shadow_parts = []
+            for (poly, h), sh in zip(buildings, all_shadows):
+                if sh is None or sh.is_empty: continue
+                if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
+                shadow_parts.append(sh)
+
+            all_parts = [p for p, _ in buildings] + shadow_parts
+            if all_parts:
+                merged = parallel_union(all_parts)
+                gfill  = _gap_fill(zoom)
+                stol   = _simplify_tolerance(zoom)
+                merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                merged = merged.simplify(stol, preserve_topology=True)
+                sunlit = compute_bbox.difference(merged)
+            else:
+                sunlit = compute_bbox
+
+            stol            = _simplify_tolerance(zoom)
+            sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+            sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+
+            _shadow_cache[ck] = sunlit_filtered
+            if len(_shadow_cache) > MAX_CACHE:
+                _shadow_cache.pop(next(iter(_shadow_cache)))
+
+        # Clip sunlit geometry to the actual visible viewport
+        if None not in (min_lat, min_lon, max_lat, max_lon):
+            actual_vp = shapely_box(min_lon, min_lat, max_lon, max_lat)
+        else:
+            actual_vp = shapely_box(lon - 0.01, lat - 0.01, lon + 0.01, lat + 0.01)
+
+        try:
+            sunlit_vp = sunlit_filtered.intersection(actual_vp)
+        except Exception:
+            sunlit_vp = sunlit_filtered
+
+        # Extract distinct sunlit patches
+        if sunlit_vp is None or sunlit_vp.is_empty:
+            patches = []
+        elif sunlit_vp.geom_type == 'Polygon':
+            patches = [sunlit_vp]
+        elif sunlit_vp.geom_type == 'MultiPolygon':
+            patches = list(sunlit_vp.geoms)
+        else:
+            patches = []
+
+        # Consider top-50 patches by area — avoids scoring thousands of tiny slivers
+        patches.sort(key=lambda p: p.area, reverse=True)
+        patches = patches[:50]
+
+        # Extract one representative point per patch, skip points inside buildings
+        raw_candidates = []   # list of (pt, patch_area)
+        for patch in patches:
+            if patch.is_empty:
+                continue
+            pt = patch.representative_point()
+            bbox_q = shapely_box(pt.x - 0.0002, pt.y - 0.0002, pt.x + 0.0002, pt.y + 0.0002)
+            in_building = False
+            if _buildings_tree is not None:
+                for i in _buildings_tree.query(bbox_q):
+                    if _buildings_polys[i].contains(pt):
+                        in_building = True
+                        break
+            if not in_building:
+                raw_candidates.append((pt, patch.area))
+
+        # Score each candidate: base = patch area, boosted/penalised by land-use
+        def _score(pt, patch_area):
+            from shapely.geometry import Point as SPoint
+            score = patch_area
+
+            query_box = shapely_box(pt.x - 0.001, pt.y - 0.001, pt.x + 0.001, pt.y + 0.001)
+
+            # Open space boost (park, plaza, grass, …)
+            if _open_space_tree is not None:
+                for i in _open_space_tree.query(query_box):
+                    poly, boost = _open_spaces[i]
+                    if poly.contains(pt):
+                        score *= boost
+                        break   # apply highest-priority boost only
+
+            # Penalised area (parking, industrial, …)
+            if _penalized_tree is not None:
+                for i in _penalized_tree.query(query_box):
+                    poly, penalty = _penalized_areas[i]
+                    if poly.contains(pt):
+                        score *= penalty
+                        break
+
+            # Amenity proximity bonus: café / bench / fountain within ~50 m
+            if _amenity_tree is not None:
+                amb = shapely_box(pt.x - 0.0005, pt.y - 0.0005,
+                                  pt.x + 0.0005, pt.y + 0.0005)
+                if len(_amenity_tree.query(amb)) > 0:
+                    score *= 1.5
+
+            return score
+
+        scored = sorted(
+            ((pt, area, _score(pt, area)) for pt, area in raw_candidates),
+            key=lambda x: x[2], reverse=True,
+        )
+
+        # Greedy minimum-distance filter — keep top-scored spots ≥ MIN_SPOT_SEPARATION apart
+        candidate_pts = []
+        for pt, area, score in scored:
+            too_close = any(pt.distance(s) < MIN_SPOT_SEPARATION for s in candidate_pts)
+            if not too_close:
+                candidate_pts.append(pt)
+            if len(candidate_pts) >= n:
+                break
+
+        # Compute remaining sun hours for each candidate (cache-first, then projection fallback)
+        def _sun_remaining(pt):
+            from shapely.geometry import Point as SPoint
+            spot_lat, spot_lon = pt.y, pt.x
+            current_hour = now.hour
+            sun_hours = []
+
+            for h in range(current_hour, 24):
+                ck_h = _cache_key(h, now.month, now.day, lat, lon, zoom)
+                if ck_h in _shadow_cache:
+                    # Fast path: point-in-polygon against cached sunlit geometry
+                    try:
+                        in_sun = _shadow_cache[ck_h].contains(SPoint(spot_lon, spot_lat))
+                    except Exception:
+                        in_sun = False
+                else:
+                    # Slow path: full shadow projection
+                    t  = tz.localize(datetime(now.year, now.month, now.day, h, 0, 0))
+                    el, az = get_sun_angles(spot_lat, spot_lon, t)
+                    in_sun = el > 0 and not _point_in_shadow(spot_lon, spot_lat, el, az)
+
+                if in_sun:
+                    sun_hours.append(h)
+
+            sun_hours_left = len(sun_hours)
+
+            # sun_until = end of the current/next consecutive sunny block
+            sun_until = None
+            if sun_hours and current_hour in sun_hours:
+                last_h = current_hour
+                for h in sun_hours:
+                    if h <= last_h + 1:
+                        last_h = h
+                    else:
+                        break
+                sun_until = last_h + 1  # exclusive end hour
+
+            return sun_hours_left, sun_until
+
+        with ThreadPoolExecutor(max_workers=min(len(candidate_pts), 5)) as ex:
+            sun_infos = list(ex.map(_sun_remaining, candidate_pts))
+
+        spots = []
+        for pt, (sun_hours_left, sun_until) in zip(candidate_pts, sun_infos):
+            entry = {
+                'lat': round(pt.y, 6),
+                'lon': round(pt.x, 6),
+                'sun_hours_left': sun_hours_left,
+            }
+            if sun_until is not None:
+                entry['sun_until'] = sun_until
+            spots.append(entry)
+
+        return jsonify({"spots": spots})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------------------

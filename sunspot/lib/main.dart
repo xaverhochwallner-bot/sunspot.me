@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
-import 'dart:math' show Point;
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -75,7 +75,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double                 _screenWidth = 1200;
 
   // GPS blue dot
+  LatLng? _gpsPosition;
   bool    _myLocationLayerReady = false;
+
+  // Sunny spots
+  List<Map<String, dynamic>> _sunnySpots          = [];
+  bool                       _sunnySpotsLayerReady = false;
+  bool                       _findingSunnySpots    = false;
 
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
@@ -154,6 +160,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _shadowLayersReady    = false;
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
+    _sunnySpotsLayerReady = false;
     _injectAttributionCss();
     fetchShadows();
     _initGpsOnStart();
@@ -275,6 +282,116 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
+  // Sunny spots
+  // -------------------------------------------------------------------------
+
+  Future<void> _findSunnySpots() async {
+    final ctrl = _mapController;
+    if (ctrl == null || !_mapReady) return;
+
+    setState(() => _findingSunnySpots = true);
+    try {
+      final bounds = await ctrl.getVisibleRegion();
+      final zoom   = ctrl.cameraPosition?.zoom ?? 15.0;
+      final h      = _hour.toInt();
+      final min    = ((_hour * 60).toInt() % 60);
+      final date   = _selectedDate;
+
+      final uri = Uri.parse(
+        '$flaskBaseUrl/find_sunny_spots'
+        '?lat=${_currentCenter.latitude}'
+        '&lon=${_currentCenter.longitude}'
+        '&hour=$h&minute=$min'
+        '&month=${date.month}&day=${date.day}'
+        '&zoom=${zoom.round()}'
+        '&minLat=${bounds.southwest.latitude}'
+        '&minLon=${bounds.southwest.longitude}'
+        '&maxLat=${bounds.northeast.latitude}'
+        '&maxLon=${bounds.northeast.longitude}'
+        '&n=5',
+      );
+
+      final response = await http.get(uri).timeout(const Duration(seconds: 30));
+      final data     = jsonDecode(response.body) as Map<String, dynamic>;
+      final spots    = (data['spots'] as List<dynamic>? ?? [])
+          .map((s) => <String, dynamic>{
+                'lat':            (s['lat']  as num).toDouble(),
+                'lon':            (s['lon']  as num).toDouble(),
+                'sun_hours_left': (s['sun_hours_left'] as num?)?.toInt() ?? 0,
+                'sun_until':      s['sun_until'] as int?,
+              })
+          .toList();
+
+      setState(() => _sunnySpots = spots);
+      await _showSunnySpotMarkers(spots);
+
+      if (spots.isNotEmpty) {
+        await Future.delayed(const Duration(milliseconds: 150));
+        _panelScroll.animateTo(
+          _panelScroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 400),
+          curve: Curves.easeOut,
+        );
+      }
+    } catch (_) {
+      _showError('Could not find sunny spots');
+    } finally {
+      if (mounted) setState(() => _findingSunnySpots = false);
+    }
+  }
+
+  Future<void> _showSunnySpotMarkers(List<Map<String, dynamic>> spots) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+
+    final features = spots.asMap().entries.map((e) => {
+      'type': 'Feature',
+      'geometry': {
+        'type': 'Point',
+        'coordinates': [e.value['lon'], e.value['lat']],
+      },
+      'properties': {'index': e.key + 1},
+    }).toList();
+
+    final geoJson = {'type': 'FeatureCollection', 'features': features};
+
+    if (_sunnySpotsLayerReady) {
+      await ctrl.setGeoJsonSource('sunny-spots', geoJson);
+    } else {
+      await ctrl.addSource('sunny-spots', GeojsonSourceProperties(data: geoJson));
+      await ctrl.addLayer(
+        'sunny-spots', 'sunny-spots-glow',
+        CircleLayerProperties(
+          circleRadius: 20,
+          circleColor: '#FFD700',
+          circleOpacity: 0.25,
+          circleStrokeWidth: 0,
+        ),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer(
+        'sunny-spots', 'sunny-spots-dot',
+        CircleLayerProperties(
+          circleRadius: 8,
+          circleColor: '#FFD700',
+          circleOpacity: 1.0,
+          circleStrokeWidth: 2,
+          circleStrokeColor: '#FFFFFF',
+        ),
+        enableInteraction: false,
+      );
+      _sunnySpotsLayerReady = true;
+    }
+  }
+
+  Future<void> _clearSunnySpots() async {
+    setState(() => _sunnySpots = []);
+    if (!_sunnySpotsLayerReady) return;
+    await _mapController?.setGeoJsonSource(
+        'sunny-spots', {'type': 'FeatureCollection', 'features': []});
+  }
+
+  // -------------------------------------------------------------------------
   // Geolocation
   // -------------------------------------------------------------------------
 
@@ -288,6 +405,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final lon = pos.coords!.longitude!.toDouble();
       final newPos = LatLng(lat, lon);
       setState(() {
+        _gpsPosition   = newPos;
         _currentCenter = newPos;
       });
       await _mapController?.animateCamera(
@@ -310,6 +428,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final lon = pos.coords!.longitude!.toDouble();
       final newPos = LatLng(lat, lon);
       setState(() {
+        _gpsPosition   = newPos;
         _currentCenter = newPos;
       });
       final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
@@ -1143,6 +1262,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               const Divider(height: 28),
               _buildSunPosition(),
               const Divider(height: 28),
+              _buildFindSunnySpotsSection(),
+              const Divider(height: 28),
               if (_clickedPoint != null)
                 _buildPointInfoCard()
               else
@@ -1451,6 +1572,169 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ],
         ],
       );
+  }
+
+  // ---- Haversine distance helper ----
+  double _distanceMeters(LatLng a, LatLng b) {
+    const r = 6371000.0;
+    final lat1 = a.latitude  * pi / 180;
+    final lat2 = b.latitude  * pi / 180;
+    final dlat = (b.latitude  - a.latitude)  * pi / 180;
+    final dlon = (b.longitude - a.longitude) * pi / 180;
+    final x = sin(dlat / 2) * sin(dlat / 2) +
+        cos(lat1) * cos(lat2) * sin(dlon / 2) * sin(dlon / 2);
+    return r * 2 * atan2(sqrt(x), sqrt(1 - x));
+  }
+
+  String _formatDistance(double meters) {
+    if (meters < 1000) return '${meters.round()} m';
+    return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+
+  // ---- Find sunny spots ----
+  Widget _buildFindSunnySpotsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: _findingSunnySpots ? null : _findSunnySpots,
+                icon: _findingSunnySpots
+                    ? const SizedBox(
+                        width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.wb_sunny, size: 16),
+                label: Text(_findingSunnySpots ? 'Searching...' : 'Find sunny spots'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.orange.shade200,
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+            if (_sunnySpots.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              IconButton(
+                onPressed: _clearSunnySpots,
+                icon: const Icon(Icons.close, size: 16),
+                tooltip: 'Clear spots',
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.grey.shade100,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                padding: const EdgeInsets.all(10),
+              ),
+            ],
+          ],
+        ),
+        if (_sunnySpots.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          ..._sunnySpots.asMap().entries.map((e) {
+            final idx          = e.key;
+            final spot         = e.value;
+            final spotPos      = LatLng(spot['lat'] as double, spot['lon'] as double);
+            final sunHoursLeft = spot['sun_hours_left'] as int;
+            final sunUntil     = spot['sun_until'] as int?;
+
+            // Distance from GPS fix (if available)
+            final gps = _gpsPosition;
+            final distLabel = gps != null
+                ? _formatDistance(_distanceMeters(gps, spotPos))
+                : null;
+
+            // "Sun until HH:00" label
+            final sunUntilLabel = sunUntil != null
+                ? 'until ${sunUntil.toString().padLeft(2, '0')}:00'
+                : null;
+
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () {
+                    _mapController?.animateCamera(
+                      CameraUpdate.newLatLngZoom(spotPos, 17.5),
+                    );
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 22, height: 22,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFFFD700),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Center(
+                            child: Text(
+                              '${idx + 1}',
+                              style: const TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Sunny spot ${idx + 1}',
+                                style: const TextStyle(
+                                    fontSize: 13, fontWeight: FontWeight.w500),
+                              ),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  if (distLabel != null) ...[
+                                    Icon(Icons.directions_walk, size: 11,
+                                        color: Colors.grey.shade500),
+                                    const SizedBox(width: 2),
+                                    Text(distLabel,
+                                        style: TextStyle(
+                                            fontSize: 11, color: Colors.grey.shade600)),
+                                    const SizedBox(width: 8),
+                                  ],
+                                  Icon(Icons.wb_sunny_outlined, size: 11,
+                                      color: Colors.orange.shade400),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    sunUntilLabel != null
+                                        ? '$sunHoursLeft h · $sunUntilLabel'
+                                        : '$sunHoursLeft h left',
+                                    style: TextStyle(
+                                        fontSize: 11, color: Colors.orange.shade700),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }),
+        ],
+      ],
+    );
   }
 
   // ---- Date section ----
