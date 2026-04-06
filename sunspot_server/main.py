@@ -590,6 +590,7 @@ def shadow():
         lat     = request.args.get("lat",    default=48.2082, type=float)
         lon     = request.args.get("lon",    default=16.3738, type=float)
         hour    = request.args.get("hour",   default=None,    type=int)
+        minute  = request.args.get("minute", default=0,       type=int)
         month   = request.args.get("month",  default=None,    type=int)
         day     = request.args.get("day",    default=None,    type=int)
         zoom    = request.args.get("zoom",   default=15,      type=int)
@@ -603,7 +604,7 @@ def shadow():
         if month is not None and day is not None:
             now = now.replace(month=month, day=day)
         if hour is not None:
-            now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         elevation, azimuth = get_sun_angles(lat, lon, now)
 
@@ -753,6 +754,7 @@ def shadow_stream():
     lat     = request.args.get("lat",    default=48.2082, type=float)
     lon     = request.args.get("lon",    default=16.3738, type=float)
     hour    = request.args.get("hour",   default=None,    type=int)
+    minute  = request.args.get("minute", default=0,       type=int)
     month   = request.args.get("month",  default=None,    type=int)
     day     = request.args.get("day",    default=None,    type=int)
     zoom    = request.args.get("zoom",   default=15.0,    type=float)
@@ -778,7 +780,7 @@ def shadow_stream():
             if month is not None and day is not None:
                 now = now.replace(month=month, day=day)
             if hour is not None:
-                now = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
             elevation, azimuth = get_sun_angles(lat, lon, now)
 
@@ -961,12 +963,13 @@ def point_info():
         lon      = float(request.args['lon'])
         date_str = request.args['date']   # YYYY-MM-DD
         hour     = int(request.args.get('hour', 12))
+        minute   = int(request.args.get('minute', 0))
 
         date = datetime.strptime(date_str, '%Y-%m-%d').date()
         tz   = pytz.timezone('Europe/Vienna')
 
-        # Check shadow at requested hour
-        now = tz.localize(datetime(date.year, date.month, date.day, hour, 0, 0))
+        # Check shadow at requested hour+minute
+        now = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
         elevation, azimuth = get_sun_angles(lat, lon, now)
         in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
 

@@ -211,7 +211,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final uri     = Uri.parse(
         '$flaskBaseUrl/point_info'
         '?lat=${point.latitude}&lon=${point.longitude}'
-        '&date=$dateStr&hour=${_hour.toInt()}',
+        '&date=$dateStr&hour=${_hour.toInt()}&minute=${((_hour * 60).toInt() % 60)}',
       );
       final resp = await http.get(uri);
       if (mounted && resp.statusCode == 200) {
@@ -454,6 +454,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '?lat=${_currentCenter.latitude}'
         '&lon=${_currentCenter.longitude}'
         '&hour=${_hour.toInt()}'
+        '&minute=${((_hour * 60).toInt() % 60)}'
         '&month=${_selectedDate.month}'
         '&day=${_selectedDate.day}'
         '&zoom=$zoom'
