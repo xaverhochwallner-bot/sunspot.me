@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'dart:math' show Point;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -57,6 +58,29 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
+  int                 _lastFetchZoom     = -1;
+
+  // Panel
+  bool _panelOpen = true;
+
+  // Live mode
+  bool   _liveMode  = false;
+  Timer? _liveTimer;
+
+  // Point info popup
+  LatLng?                _clickedPoint;
+  bool                   _pointInfoLoading = false;
+  Map<String, dynamic>?  _pointInfo;
+  bool                   _ignoreNextMapClick = false;
+  bool                   _pinLayerReady = false;
+  double                 _screenWidth = 1200;
+
+  // Search
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode             _searchFocus      = FocusNode();
+  List<Map<String, dynamic>>  _searchResults    = [];
+  bool                        _searchLoading    = false;
+  Timer?                      _searchDebounce;
 
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
@@ -121,9 +145,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _mapController = controller;
   }
 
+  void _setMapCanvasInteractive(bool interactive) {
+    final pe = interactive ? '' : 'none';
+    html.document.querySelectorAll('.maplibregl-canvas-container').forEach((e) {
+      (e as html.Element).style.pointerEvents = pe;
+    });
+  }
+
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
-    _shadowLayersReady = false;  // style reload clears all layers
+    _shadowLayersReady = false;
+    _pinLayerReady     = false;
     fetchShadows();
   }
 
@@ -134,6 +166,96 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentCenter = center;
     _debounceTimer?.cancel();
     _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
+  }
+
+  void _onMapClick(Point<double> point, LatLng coordinates) {
+    if (_ignoreNextMapClick) {
+      _ignoreNextMapClick = false;
+      return;
+    }
+    // Reject clicks in the panel/toggle zone
+    final panelZone = _panelOpen ? 300.0 : 22.0;
+    if (point.x > _screenWidth - panelZone) return;
+    if (_searchResults.isNotEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    setState(() {
+      _clickedPoint      = coordinates;
+      _pointInfo         = null;
+      _pointInfoLoading  = true;
+    });
+    _showPin(coordinates);
+    _fetchPointInfo(coordinates);
+  }
+
+  Future<void> _fetchPointInfo(LatLng point) async {
+    try {
+      final d       = _selectedDate;
+      final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+      final uri     = Uri.parse(
+        '$flaskBaseUrl/point_info'
+        '?lat=${point.latitude}&lon=${point.longitude}'
+        '&date=$dateStr&hour=${_hour.toInt()}',
+      );
+      final resp = await http.get(uri);
+      if (mounted && resp.statusCode == 200) {
+        setState(() {
+          _pointInfo        = jsonDecode(resp.body) as Map<String, dynamic>;
+          _pointInfoLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _pointInfoLoading = false);
+    }
+  }
+
+  Future<void> _showPin(LatLng point) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    final geoJson = {
+      'type': 'FeatureCollection',
+      'features': [{
+        'type': 'Feature',
+        'geometry': {'type': 'Point', 'coordinates': [point.longitude, point.latitude]},
+        'properties': {},
+      }],
+    };
+    if (_pinLayerReady) {
+      await ctrl.setGeoJsonSource('clicked-point', geoJson);
+    } else {
+      await ctrl.addSource('clicked-point', GeojsonSourceProperties(data: geoJson));
+      await ctrl.addLayer(
+        'clicked-point', 'clicked-point-outer',
+        CircleLayerProperties(
+          circleRadius: 12,
+          circleColor: '#FF8C00',
+          circleOpacity: 0.25,
+          circleStrokeWidth: 0,
+        ),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer(
+        'clicked-point', 'clicked-point-inner',
+        CircleLayerProperties(
+          circleRadius: 6,
+          circleColor: '#FF8C00',
+          circleOpacity: 1.0,
+          circleStrokeWidth: 2,
+          circleStrokeColor: '#FFFFFF',
+        ),
+        enableInteraction: false,
+      );
+      _pinLayerReady = true;
+    }
+  }
+
+  Future<void> _hidePin() async {
+    if (!_pinLayerReady) return;
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    await ctrl.setGeoJsonSource('clicked-point',
+        {'type': 'FeatureCollection', 'features': []});
   }
 
   // -------------------------------------------------------------------------
@@ -160,6 +282,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
   // Error display
   // -------------------------------------------------------------------------
+
+  // Disable/enable pointer events on the MapLibre canvas via DOM so slider
+  // drags don't also pan the map (AbsorbPointer doesn't reach platform views).
+  void _setMapPointerEvents(bool enabled) {
+    final els = html.document.querySelectorAll('.maplibregl-canvas-container');
+    for (final el in els) {
+      (el as html.Element).style.pointerEvents = enabled ? 'auto' : 'none';
+    }
+  }
 
   void _showError(String msg) {
     setState(() => _errorMessage = msg);
@@ -199,8 +330,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
 
     try {
-      final bounds = await _mapController!.getVisibleRegion();
-      final zoom   = (_mapController!.cameraPosition?.zoom ?? 15.0).toInt();
+      final bounds   = await _mapController!.getVisibleRegion();
+      final rawZoom  = _mapController!.cameraPosition?.zoom ?? 15.0;
+      final zoom     = rawZoom.toInt();
+
+      // Below zoom 11.5, building shadows are too fragmented — clear and skip.
+      if (rawZoom < 11.5) {
+        if (_shadowLayersReady) {
+          final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
+          await _mapController!.setGeoJsonSource('dark-area', empty);
+        }
+        _pillTimer?.cancel();
+        if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        if (!completer.isCompleted) completer.complete();
+        return;
+      }
+
+      _lastFetchZoom = zoom;
+
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow/stream'
         '?lat=${_currentCenter.latitude}'
@@ -310,16 +457,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       'dark-area', 'shadow-l0-fill',
       FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
+      enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
       FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
+      enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
       FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
+      enableInteraction: false,
     );
     _shadowLayersReady = true;
   }
@@ -364,6 +514,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
+  // Live mode
+  // -------------------------------------------------------------------------
+
+  void _toggleLiveMode() {
+    if (_liveMode) {
+      _liveTimer?.cancel();
+      setState(() => _liveMode = false);
+    } else {
+      setState(() {
+        _liveMode = true;
+        _animating = false;  // stop animation when going live
+        _selectedDate = DateTime.now();
+        final now = DateTime.now();
+        _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
+      });
+      fetchShadows();
+      _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+        if (!mounted) return;
+        setState(() {
+          final now = DateTime.now();
+          _selectedDate = now;
+          _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
+        });
+        fetchShadows();
+      });
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Build
   // -------------------------------------------------------------------------
 
@@ -371,6 +550,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void dispose() {
     _debounceTimer?.cancel();
     _pillTimer?.cancel();
+    _searchDebounce?.cancel();
+    _liveTimer?.cancel();
+    _searchController.dispose();
+    _searchFocus.dispose();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
@@ -379,29 +562,217 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     super.dispose();
   }
 
+  // -------------------------------------------------------------------------
+  // Address search (Nominatim)
+  // -------------------------------------------------------------------------
+
+  void _onSearchChanged(String query) {
+    _searchDebounce?.cancel();
+    if (query.trim().isEmpty) {
+      setState(() => _searchResults = []);
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 400), () => _runSearch(query.trim()));
+  }
+
+  Future<void> _runSearch(String query) async {
+    setState(() => _searchLoading = true);
+    try {
+      final uri = Uri.parse(
+        'https://nominatim.openstreetmap.org/search'
+        '?q=${Uri.encodeComponent(query)}&format=json&limit=5&addressdetails=1',
+      );
+      final resp = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as List;
+        setState(() => _searchResults = data.cast<Map<String, dynamic>>());
+      }
+    } catch (_) {
+      // silently ignore network errors during search
+    } finally {
+      setState(() => _searchLoading = false);
+    }
+  }
+
+  void _selectSearchResult(Map<String, dynamic> result) {
+    final lat = double.parse(result['lat'] as String);
+    final lon = double.parse(result['lon'] as String);
+    final name = result['display_name'] as String;
+    final target = LatLng(lat, lon);
+    _searchController.text = name.split(',').first.trim();
+    setState(() {
+      _searchResults = [];
+      _currentCenter = target;
+    });
+    _searchFocus.unfocus();
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(CameraPosition(target: target, zoom: 16.0)),
+    );
+    fetchShadows();
+  }
+
   @override
   Widget build(BuildContext context) {
+    _screenWidth = MediaQuery.of(context).size.width;
     return Scaffold(
       body: Stack(
         children: [
           // Full-screen map
-          MaplibreMap(
-            styleString: mapStyle,
-            initialCameraPosition: CameraPosition(
-              target: _currentCenter,
-              zoom: 16.5,
+          AbsorbPointer(
+            absorbing: _draggingSlider,
+            child: MaplibreMap(
+              styleString: mapStyle,
+              initialCameraPosition: CameraPosition(
+                target: _currentCenter,
+                zoom: 16.5,
+              ),
+              onMapCreated:          _onMapCreated,
+              onStyleLoadedCallback: _onStyleLoaded,
+              onCameraIdle:          _onCameraIdle,
+              onMapClick:            _onMapClick,
+              trackCameraPosition:   true,
+              compassEnabled:        false,
             ),
-            onMapCreated:          _onMapCreated,
-            onStyleLoadedCallback: _onStyleLoaded,
-            onCameraIdle:          _onCameraIdle,
-            trackCameraPosition:   true,
           ),
 
 
-          // Loading bar — determinate when progress is known
+          // Address search bar + results
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            top: 12, left: 12, right: _panelOpen ? 292 : 12,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(22),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.15),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 12),
+                      Icon(Icons.search, color: Colors.grey.shade500, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocus,
+                          onChanged: _onSearchChanged,
+                          style: const TextStyle(fontSize: 14),
+                          decoration: InputDecoration(
+                            hintText: 'Search address or place…',
+                            hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                            border: InputBorder.none,
+                            isDense: true,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                        ),
+                      ),
+                      if (_searchLoading)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 12),
+                          child: SizedBox(
+                            width: 14, height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange.shade400),
+                          ),
+                        )
+                      else if (_searchController.text.isNotEmpty)
+                        MouseRegion(
+                          cursor: SystemMouseCursors.click,
+                          child: GestureDetector(
+                            onTap: () {
+                              _searchController.clear();
+                              setState(() => _searchResults = []);
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.only(right: 12),
+                              child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (_searchResults.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.12),
+                          blurRadius: 10,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: _searchResults.asMap().entries.map((entry) {
+                        final i      = entry.key;
+                        final result = entry.value;
+                        final parts  = (result['display_name'] as String).split(',');
+                        final title  = parts.first.trim();
+                        final sub    = parts.length > 1
+                            ? parts.skip(1).take(2).map((s) => s.trim()).join(', ')
+                            : '';
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
+                            InkWell(
+                              onTap: () => _selectSearchResult(result),
+                              mouseCursor: SystemMouseCursors.click,
+                              borderRadius: BorderRadius.vertical(
+                                top:    i == 0 ? const Radius.circular(12) : Radius.zero,
+                                bottom: i == _searchResults.length - 1 ? const Radius.circular(12) : Radius.zero,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade500),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                                          if (sub.isNotEmpty)
+                                            Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+
+          // Loading bar
           if (_loading)
-            Positioned(
-              top: 0, left: 0, right: 280,
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              top: 0, left: 0, right: _panelOpen ? 280 : 0,
               child: LinearProgressIndicator(
                 value: _loadingProgress > 0 ? _loadingProgress : null,
                 minHeight: 3,
@@ -410,9 +781,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             ),
 
-          // Loading pill — bottom-center of map area
-          Positioned(
-            bottom: 24, left: 0, right: 280,
+          // Loading pill
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            bottom: 24, left: 0, right: _panelOpen ? 280 : 0,
             child: Center(child: _buildLoadingPill()),
           ),
 
@@ -439,8 +812,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
           // Error banner
           if (_errorMessage != null)
-            Positioned(
-              bottom: 80, left: 16, right: 296,
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOut,
+              bottom: 80, left: 16, right: _panelOpen ? 296 : 16,
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
@@ -452,13 +827,59 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
             ),
 
-          // Right-side panel
+          // Right-side panel (slides in/out)
           Positioned(
+            top: 0, right: 0, bottom: 0, width: 280,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => _setMapCanvasInteractive(false),
+              onPointerUp:   (_) => _setMapCanvasInteractive(true),
+              onPointerCancel: (_) => _setMapCanvasInteractive(true),
+              child: AnimatedSlide(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
+                child: _buildPanel(),
+              ),
+            ),
+          ),
+
+          // Panel toggle tab
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
             top: 0,
-            right: 0,
             bottom: 0,
-            width: 280,
-            child: _buildPanel(),
+            right: _panelOpen ? 280 : 0,
+            width: 20,
+            child: Align(
+              alignment: Alignment.center,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => setState(() => _panelOpen = !_panelOpen),
+                  child: Container(
+                    width: 20, height: 52,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: const BorderRadius.horizontal(
+                          left: Radius.circular(8)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.12),
+                          blurRadius: 6,
+                          offset: const Offset(-2, 0),
+                        ),
+                      ],
+                    ),
+                    child: Icon(
+                      _panelOpen ? Icons.chevron_right : Icons.chevron_left,
+                      size: 16, color: Colors.grey.shade600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -559,8 +980,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildDateSection(),
               const Divider(height: 28),
               _buildSunPosition(),
-              const Divider(height: 28),
-              _buildLegend(),
+              if (_clickedPoint != null) ...[
+                const Divider(height: 28),
+                _buildPointInfoCard(),
+              ],
             ],
           ),
         ),
@@ -639,8 +1062,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             min: 0,
             max: 23,
             divisions: 23,
-            onChanged:  (v) => setState(() { _hour = v; _draggingSlider = true; }),
-            onChangeEnd: (_) { setState(() => _draggingSlider = false); fetchShadows(); },
+            onChangeStart: (_) {
+              setState(() => _draggingSlider = true);
+              _setMapPointerEvents(false);
+            },
+            onChanged:  (v) => setState(() => _hour = v),
+            onChangeEnd: (_) {
+              setState(() => _draggingSlider = false);
+              _setMapPointerEvents(true);
+              fetchShadows();
+            },
           ),
         ),
         Padding(
@@ -681,33 +1112,178 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
         const SizedBox(height: 6),
         Row(
-          children: [1, 2, 4].map((speed) {
+          children: [
+            ...[1, 2, 4].map((speed) {
             final selected = _animSpeed == speed;
             return Padding(
               padding: const EdgeInsets.only(right: 6),
-              child: GestureDetector(
-                onTap: () => setState(() => _animSpeed = speed),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: selected ? Colors.orange : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '${speed}x',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? Colors.white : Colors.black54,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => setState(() => _animSpeed = speed),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: selected ? Colors.orange : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${speed}x',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: selected ? Colors.white : Colors.black54,
+                      ),
                     ),
                   ),
                 ),
               ),
             );
           }).toList(),
+            // LIVE button
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: _toggleLiveMode,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_liveMode)
+                        Container(
+                          width: 6, height: 6,
+                          margin: const EdgeInsets.only(right: 4),
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      Text(
+                        'LIVE',
+                        style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w700,
+                          color: _liveMode ? Colors.white : Colors.black54,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
+  }
+
+  // ---- Point info popup ----
+  Widget _buildPointInfoCard() {
+    final info = _pointInfo;
+    final inShadow = info == null ? true : (info['in_shadow'] as bool? ?? true);
+    final sunCount = info == null ? 0 : (info['sun_hours_count'] as int? ?? 0);
+    final periods  = info == null ? <dynamic>[] : (info['sun_periods'] as List<dynamic>? ?? []);
+
+    String _fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
+
+    final statusColor = inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+          // Header row — same style as other section headers
+          Row(
+            children: [
+              Icon(
+                inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny,
+                color: statusColor, size: 16,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                _pointInfoLoading
+                    ? 'Checking…'
+                    : inShadow ? 'In Shadow' : 'In Sun',
+                style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w700,
+                  color: statusColor, letterSpacing: 0.5,
+                ),
+              ),
+              const Spacer(),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () {
+                    _ignoreNextMapClick = true;
+                    _hidePin();
+                    setState(() {
+                      _clickedPoint = null;
+                      _pointInfo    = null;
+                    });
+                  },
+                  child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (_pointInfoLoading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(vertical: 4),
+                child: SizedBox(width: 18, height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
+              ),
+            )
+          else ...[
+            Row(
+              children: [
+                const Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange),
+                const SizedBox(width: 6),
+                Text(
+                  sunCount == 0
+                      ? 'No direct sun today'
+                      : '$sunCount hour${sunCount == 1 ? '' : 's'} of direct sun today',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+              ],
+            ),
+            if (periods.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6, runSpacing: 4,
+                children: periods.map((p) {
+                  final from = p['from'] as int;
+                  final to   = p['to']   as int;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Text(
+                      '${_fmt(from)} – ${_fmt(to)}',
+                      style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              '${_clickedPoint!.latitude.toStringAsFixed(5)}°, '
+              '${_clickedPoint!.longitude.toStringAsFixed(5)}°',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+            ),
+          ],
+        ],
+      );
   }
 
   // ---- Date section ----
@@ -721,21 +1297,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           Text('Date', style: TextStyle(fontSize: 12, color: Colors.grey)),
         ]),
         const SizedBox(height: 6),
-        GestureDetector(
-          onTap: _pickDate,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(_formattedDate,
-                    style: const TextStyle(fontSize: 14)),
-                const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
-              ],
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: _pickDate,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(_formattedDate,
+                      style: const TextStyle(fontSize: 14)),
+                  const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
+                ],
+              ),
             ),
           ),
         ),
