@@ -75,6 +75,7 @@ PRE_SIMPLIFY = {
     12: 0.00020,  # ~20 m — buildings become pentagons
     13: 0.00008,  # ~8 m
     14: 0.00003,  # ~3 m
+    15: 0.000010, # ~1 m — modest reduction, still worth the STRtree cache
 }
 
 MIN_BUILDING_AREA = 5e-9  # ~25 m²
@@ -338,6 +339,11 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
         if not polygon.is_valid:
             polygon = polygon.buffer(0)
 
+        if polygon.geom_type == 'MultiPolygon':
+            parts = [project_shadow(p, height, elevation_deg, azimuth_deg) for p in polygon.geoms]
+            parts = [p for p in parts if p is not None]
+            return unary_union(parts) if parts else None
+
         coords        = list(polygon.exterior.coords[:-1])
         n             = len(coords)
         shadow_coords = [(x + dx, y + dy) for x, y in coords]
@@ -397,23 +403,36 @@ def _min_building_area(zoom):
 
 
 def _min_sunlit_area(zoom):
-    """Minimum sunlit patch area (deg²) — LOD: scales 4× per zoom step down.
-    4× per zoom gives consistent visual density because map area quadruples per zoom.
-      zoom 16+ → ~150 m²      — small courtyards visible
-      zoom 15  → ~600 m²
-      zoom 14  → ~2,400 m²
-      zoom 13  → ~10,000 m²  — only wide streets / plazas survive
-      zoom 12  → ~38,000 m²  — only large parks survive
+    """Minimum sunlit patch area (deg²) — smooth LOD: 5× per zoom step.
+    Continuous in both directions — finer at high zoom, coarser at low zoom.
+      zoom 19  → ~2 m²        — individual sunlit slivers
+      zoom 18  → ~8 m²
+      zoom 17  → ~40 m²
+      zoom 16  → ~200 m²      — small courtyards visible
+      zoom 15  → ~1,000 m²
+      zoom 14  → ~5,000 m²
+      zoom 13  → ~25,000 m²
+      zoom 12  → ~125,000 m²
+      zoom 11  → ~625,000 m²
+      zoom 10  → ~3,000,000 m²
     """
-    base = 1.5e-8   # ~150 m² at z16
-    return base * (4 ** max(0, 16 - zoom))
+    base = 2e-8   # ~200 m² at z16
+    return max(1e-10, base * (5 ** (16 - zoom)))
 
 
 def _simplify_tolerance(zoom):
     """Geometry simplification tolerance (deg).
     Scaled so fine shadow edges are preserved at high zoom.
-      zoom 16+ → ~2 m    zoom 14 → ~8 m    zoom 12 → ~30 m
+      zoom 18+ → ~0.5 m
+      zoom 17  → ~1 m
+      zoom 16  → ~2 m
+      zoom 15  → ~4 m
+      zoom 14  → ~8 m
+      zoom 13  → ~15 m
+      zoom ≤12 → ~30 m
     """
+    if zoom >= 18: return 0.000005   # ~0.5 m
+    if zoom == 17: return 0.000010   # ~1 m
     if zoom >= 16: return 0.000020   # ~2 m
     if zoom == 15: return 0.000040   # ~4 m
     if zoom == 14: return 0.000080   # ~8 m
@@ -422,16 +441,21 @@ def _simplify_tolerance(zoom):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance (deg) — LOD blur: doubles per zoom step down.
-      zoom 16+ → ~3 m   — max detail, individual building shadows
-      zoom 15  → ~6 m   — fine
-      zoom 14  → ~12 m  — block level
-      zoom 13  → ~24 m  — neighbourhood blobs
-      zoom 12  → ~48 m  — district-scale blur
+    """Morphological close distance (deg) — smooth LOD: 3× per zoom step.
+    Continuous in both directions — finer at high zoom, coarser at low zoom.
+      zoom 19  → ~0.13 m — sub-pixel, effectively 0 gap fill
+      zoom 18  → ~0.4 m
+      zoom 17  → ~1.2 m  — ultra-fine building edges
+      zoom 16  → ~3.6 m  — individual building shadows
+      zoom 15  → ~11 m   — fine street detail
+      zoom 14  → ~33 m   — main streets visible, alleys filled
+      zoom 13  → ~99 m   — neighbourhood blobs, only boulevards remain
+      zoom 12  → ~297 m  — district-scale blobs
+      zoom 11  → ~500 m  — (capped) city-scale
+      zoom 10  → ~500 m  — (capped)
     """
-    # Base at z16, doubles for each zoom step down
-    base = 0.000027  # ~3 m at z16
-    return base * (2 ** max(0, 16 - zoom))
+    base = 0.000033  # ~3.6 m at z16
+    return min(0.0045, max(1e-7, base * (3 ** (16 - zoom))))
 
 
 def _shadow_erosion_steps(zoom):
