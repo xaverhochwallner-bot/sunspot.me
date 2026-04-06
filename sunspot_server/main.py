@@ -947,9 +947,12 @@ def _point_in_shadow(lon, lat, elevation_deg, azimuth_deg, search_radius_deg=0.0
     pt = SPoint(lon, lat)
     bbox = shapely_box(lon - search_radius_deg, lat - search_radius_deg,
                        lon + search_radius_deg, lat + search_radius_deg)
-    candidates = [(p, h) for p, h in zip(_buildings_polys, _buildings_heights)
-                  if p.intersects(bbox)]
-    for poly, height in candidates:
+    # Use STRtree for fast spatial lookup instead of linear scan
+    indices = _buildings_tree.query(bbox) if _buildings_tree is not None else range(len(_buildings_polys))
+    for i in indices:
+        poly, height = _buildings_polys[i], _buildings_heights[i]
+        if not poly.intersects(bbox):
+            continue
         shadow = project_shadow(poly, height, elevation_deg, azimuth_deg)
         if shadow and not shadow.is_empty and shadow.contains(pt):
             return True
@@ -973,13 +976,16 @@ def point_info():
         elevation, azimuth = get_sun_angles(lat, lon, now)
         in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
 
-        # Sweep all hours to find sun periods
-        sun_hours = []
-        for h in range(24):
+        # Sweep all hours to find sun periods (parallel for speed)
+        def _check_hour(h):
             t = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
             el, az = get_sun_angles(lat, lon, t)
             if el > 0 and not _point_in_shadow(lon, lat, el, az):
-                sun_hours.append(h)
+                return h
+            return None
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            sun_hours = sorted(h for h in ex.map(_check_hour, range(24)) if h is not None)
 
         # Build contiguous periods [{from, to}, ...]
         periods = []

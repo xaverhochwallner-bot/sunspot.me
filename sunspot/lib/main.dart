@@ -459,6 +459,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         return;
       }
 
+      if (_shadowLayersReady && _lastFetchZoom != -1 && zoom != _lastFetchZoom) {
+        final zoomDelta = (zoom - _lastFetchZoom).abs();
+        if (zoomDelta >= 2) {
+          // Large jump — old rectangle looks obviously wrong: clear it.
+          final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
+          await _mapController!.setGeoJsonSource('dark-area', empty);
+        } else {
+          // Small step — keep old shadow visible but dim it to signal stale data.
+          await _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: 0.15));
+          await _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: 0.10));
+          await _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#2d4862', fillOpacity: 0.08));
+        }
+      }
+
       _lastFetchZoom = zoom;
 
       final uri = Uri.parse(
