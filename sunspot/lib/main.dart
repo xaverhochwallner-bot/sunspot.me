@@ -100,9 +100,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
-  // Mobile bottom sheet
+  // Mobile bottom UI
   int _mobileTab = 0;
-  final DraggableScrollableController _sheetController = DraggableScrollableController();
+  final ScrollController _mobileContentScroll = ScrollController();
   double _screenHeight = 800.0;
 
   bool get _isMobile => _screenWidth < 650;
@@ -242,13 +242,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_isMobile) {
             setState(() => _mobileTab = 2);
-            if (_sheetController.isAttached) {
-              _sheetController.animateTo(
-                0.7,
-                duration: const Duration(milliseconds: 350),
-                curve: Curves.easeOut,
-              );
-            }
           } else if (_panelScroll.hasClients) {
             _panelScroll.animateTo(
               _panelScroll.position.maxScrollExtent,
@@ -359,13 +352,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         await Future.delayed(const Duration(milliseconds: 150));
         if (_isMobile) {
           setState(() => _mobileTab = 1);
-          if (_sheetController.isAttached) {
-            _sheetController.animateTo(
-              0.55,
-              duration: const Duration(milliseconds: 400),
-              curve: Curves.easeOut,
-            );
-          }
         } else if (_panelScroll.hasClients) {
           _panelScroll.animateTo(
             _panelScroll.position.maxScrollExtent,
@@ -825,7 +811,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _searchController.dispose();
     _searchFocus.dispose();
     _panelScroll.dispose();
-    _sheetController.dispose();
+    _mobileContentScroll.dispose();
     _sunSpinCtrl.dispose();
     _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
@@ -888,189 +874,163 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _screenWidth  = MediaQuery.of(context).size.width;
     _screenHeight = MediaQuery.of(context).size.height;
     final isMobile = _isMobile;
-    // On mobile the sheet peeks ~8% height; buttons sit above that
-    final btnBottom     = isMobile ? (_screenHeight * 0.08 + 34).roundToDouble() : 24.0;
-    final zoomBottom    = isMobile ? (_screenHeight * 0.08 + 90).roundToDouble() : 80.0;
-    final pillBottom    = isMobile ? (_screenHeight * 0.08 + 24).roundToDouble() : 24.0;
     final panelRightPad = isMobile ? 0 : ((_panelOpen ? 280 : 0));
-    return Scaffold(
-      body: Stack(
-        children: [
-          // Full-screen map
-          AbsorbPointer(
-            absorbing: _draggingSlider,
-            child: MapLibreMap(
-              styleString: mapStyle,
-              initialCameraPosition: CameraPosition(
-                target: _currentCenter,
-                zoom: 13.0,
-              ),
-              onMapCreated:          _onMapCreated,
-              onStyleLoadedCallback: _onStyleLoaded,
-              onCameraIdle:          _onCameraIdle,
-              onMapClick:            _onMapClick,
-              trackCameraPosition:   true,
-              compassEnabled:        false,
-            ),
+
+    // Map area — used as Expanded child on mobile, full Scaffold body on desktop
+    final mapArea = Stack(
+      children: [
+        AbsorbPointer(
+          absorbing: _draggingSlider,
+          child: MapLibreMap(
+            styleString: mapStyle,
+            initialCameraPosition: CameraPosition(target: _currentCenter, zoom: 13.0),
+            onMapCreated:          _onMapCreated,
+            onStyleLoadedCallback: _onStyleLoaded,
+            onCameraIdle:          _onCameraIdle,
+            onMapClick:            _onMapClick,
+            trackCameraPosition:   true,
+            compassEnabled:        false,
           ),
+        ),
 
-
-          // Address search bar + results
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            top: 12, left: 12, right: isMobile ? 12 : (_panelOpen ? 292 : 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
+        // Search bar
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          top: 12, left: 12, right: isMobile ? 12 : (_panelOpen ? 292 : 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                height: 44,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(22),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 10, offset: const Offset(0, 3))],
+                ),
+                child: Row(
+                  children: [
+                    const SizedBox(width: 12),
+                    Icon(Icons.search, color: Colors.grey.shade500, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        focusNode: _searchFocus,
+                        onChanged: _onSearchChanged,
+                        style: const TextStyle(fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'Search address or place…',
+                          hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                          border: InputBorder.none,
+                          isDense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ),
+                    if (_searchLoading)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 12),
+                        child: SizedBox(width: 14, height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange.shade400)),
+                      )
+                    else if (_searchController.text.isNotEmpty)
+                      MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          onTap: () { _searchController.clear(); setState(() => _searchResults = []); },
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 12),
+                            child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (_searchResults.isNotEmpty)
                 Container(
-                  height: 44,
+                  margin: const EdgeInsets.only(top: 4),
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(22),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.15),
-                        blurRadius: 10,
-                        offset: const Offset(0, 3),
-                      ),
-                    ],
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 10, offset: const Offset(0, 4))],
                   ),
-                  child: Row(
-                    children: [
-                      const SizedBox(width: 12),
-                      Icon(Icons.search, color: Colors.grey.shade500, size: 20),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: TextField(
-                          controller: _searchController,
-                          focusNode: _searchFocus,
-                          onChanged: _onSearchChanged,
-                          style: const TextStyle(fontSize: 14),
-                          decoration: InputDecoration(
-                            hintText: 'Search address or place…',
-                            hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
-                            border: InputBorder.none,
-                            isDense: true,
-                            contentPadding: EdgeInsets.zero,
-                          ),
-                        ),
-                      ),
-                      if (_searchLoading)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 12),
-                          child: SizedBox(
-                            width: 14, height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange.shade400),
-                          ),
-                        )
-                      else if (_searchController.text.isNotEmpty)
-                        MouseRegion(
-                          cursor: SystemMouseCursors.click,
-                          child: GestureDetector(
-                            onTap: () {
-                              _searchController.clear();
-                              setState(() => _searchResults = []);
-                            },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: _searchResults.asMap().entries.map((entry) {
+                      final i      = entry.key;
+                      final result = entry.value;
+                      final parts  = (result['display_name'] as String).split(',');
+                      final title  = parts.first.trim();
+                      final sub    = parts.length > 1 ? parts.skip(1).take(2).map((s) => s.trim()).join(', ') : '';
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
+                          InkWell(
+                            onTap: () => _selectSearchResult(result),
+                            mouseCursor: SystemMouseCursors.click,
+                            borderRadius: BorderRadius.vertical(
+                              top:    i == 0 ? const Radius.circular(12) : Radius.zero,
+                              bottom: i == _searchResults.length - 1 ? const Radius.circular(12) : Radius.zero,
+                            ),
                             child: Padding(
-                              padding: const EdgeInsets.only(right: 12),
-                              child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade500),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                                        if (sub.isNotEmpty)
+                                          Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                    ],
+                        ],
+                      );
+                    }).toList(),
                   ),
                 ),
-                if (_searchResults.isNotEmpty)
-                  Container(
-                    margin: const EdgeInsets.only(top: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(12),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.12),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: _searchResults.asMap().entries.map((entry) {
-                        final i      = entry.key;
-                        final result = entry.value;
-                        final parts  = (result['display_name'] as String).split(',');
-                        final title  = parts.first.trim();
-                        final sub    = parts.length > 1
-                            ? parts.skip(1).take(2).map((s) => s.trim()).join(', ')
-                            : '';
-                        return Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
-                            InkWell(
-                              onTap: () => _selectSearchResult(result),
-                              mouseCursor: SystemMouseCursors.click,
-                              borderRadius: BorderRadius.vertical(
-                                top:    i == 0 ? const Radius.circular(12) : Radius.zero,
-                                bottom: i == _searchResults.length - 1 ? const Radius.circular(12) : Radius.zero,
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                                child: Row(
-                                  children: [
-                                    Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade500),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                                          if (sub.isNotEmpty)
-                                            Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                                                maxLines: 1, overflow: TextOverflow.ellipsis),
-                                        ],
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      }).toList(),
-                    ),
-                  ),
-              ],
-            ),
+            ],
           ),
+        ),
 
-          // Loading bar
-          if (_loading)
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeInOut,
-              top: 0, left: 0, right: panelRightPad.toDouble(),
-              child: LinearProgressIndicator(
-                value: _loadingProgress > 0 ? _loadingProgress : null,
-                minHeight: 3,
-                backgroundColor: Colors.transparent,
-                color: Colors.orangeAccent,
-              ),
-            ),
-
-          // Loading pill
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            bottom: pillBottom, left: 0, right: panelRightPad.toDouble(),
-            child: Center(child: _buildLoadingPill()),
-          ),
-
-          // Geolocation button
+        // Loading bar (top)
+        if (_loading)
           Positioned(
-            bottom: btnBottom, left: 16,
+            top: 0, left: 0, right: panelRightPad.toDouble(),
+            child: LinearProgressIndicator(
+              value: _loadingProgress > 0 ? _loadingProgress : null,
+              minHeight: 3,
+              backgroundColor: Colors.transparent,
+              color: Colors.orangeAccent,
+            ),
+          ),
+
+        // Loading pill
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          bottom: 24, left: 0, right: panelRightPad.toDouble(),
+          child: Center(child: _buildLoadingPill()),
+        ),
+
+        // GPS button — right side; Listener blocks map-click from firing underneath
+        Positioned(
+          bottom: 24, right: 16,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _ignoreNextMapClick = true,
             child: FloatingActionButton.small(
               onPressed: _goToMyLocation,
               backgroundColor: Colors.white,
@@ -1079,121 +1039,108 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 200),
                 child: _loading
-                    ? RotationTransition(
-                        key: const ValueKey('spin'),
-                        turns: _sunSpinCtrl,
-                        child: const Icon(Icons.wb_sunny, size: 20, color: Colors.orange),
-                      )
+                    ? RotationTransition(key: const ValueKey('spin'), turns: _sunSpinCtrl,
+                        child: const Icon(Icons.wb_sunny, size: 20, color: Colors.orange))
                     : const Icon(Icons.my_location, size: 20, key: ValueKey('loc')),
               ),
             ),
           ),
+        ),
 
-          // Zoom buttons
-          Positioned(
-            bottom: zoomBottom, left: 16,
+        // Zoom buttons — left side
+        Positioned(
+          bottom: 80, left: 16,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _ignoreNextMapClick = true,
             child: Column(
               children: [
                 _buildZoomButton(Icons.add, () async {
                   final cam = _mapController?.cameraPosition;
                   if (cam == null) return;
-                  await _mapController?.animateCamera(
-                    CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20)),
-                    ),
-                  );
+                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
                 }),
                 const SizedBox(height: 4),
                 _buildZoomButton(Icons.remove, () async {
                   final cam = _mapController?.cameraPosition;
                   if (cam == null) return;
-                  await _mapController?.animateCamera(
-                    CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20)),
-                    ),
-                  );
+                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
                 }),
               ],
             ),
           ),
+        ),
 
-          // Error banner
-          if (_errorMessage != null)
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeInOut,
-              bottom: zoomBottom, left: 16,
-              right: isMobile ? 16 : (_panelOpen ? 296 : 16),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.red.shade700,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(_errorMessage!,
-                    style: const TextStyle(color: Colors.white, fontSize: 13)),
+        // Error banner
+        if (_errorMessage != null)
+          Positioned(
+            bottom: 80, left: 16,
+            right: isMobile ? 16 : (_panelOpen ? 296 : 16),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(color: Colors.red.shade700, borderRadius: BorderRadius.circular(8)),
+              child: Text(_errorMessage!, style: const TextStyle(color: Colors.white, fontSize: 13)),
+            ),
+          ),
+
+        // Desktop panel
+        if (!isMobile) ...[
+          Positioned(
+            top: 0, right: 0, bottom: 0, width: 280,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => _setMapCanvasInteractive(false),
+              onPointerUp:   (_) => _setMapCanvasInteractive(true),
+              onPointerCancel: (_) => _setMapCanvasInteractive(true),
+              child: AnimatedSlide(
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeInOut,
+                offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
+                child: _buildPanel(),
               ),
             ),
-
-          // Desktop: right-side panel (slides in/out)
-          if (!isMobile) ...[
-            Positioned(
-              top: 0, right: 0, bottom: 0, width: 280,
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _setMapCanvasInteractive(false),
-                onPointerUp:   (_) => _setMapCanvasInteractive(true),
-                onPointerCancel: (_) => _setMapCanvasInteractive(true),
-                child: AnimatedSlide(
-                  duration: const Duration(milliseconds: 300),
-                  curve: Curves.easeInOut,
-                  offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
-                  child: _buildPanel(),
-                ),
-              ),
-            ),
-            // Panel toggle tab
-            AnimatedPositioned(
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeInOut,
-              top: 0, bottom: 0,
-              right: _panelOpen ? 280 : 0,
-              width: 36,
-              child: Align(
-                alignment: Alignment.center,
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () => setState(() => _panelOpen = !_panelOpen),
-                    child: Container(
-                      width: 36, height: 64,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: const BorderRadius.horizontal(
-                            left: Radius.circular(8)),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.12),
-                            blurRadius: 6,
-                            offset: const Offset(-2, 0),
-                          ),
-                        ],
-                      ),
-                      child: Icon(
-                        _panelOpen ? Icons.chevron_right : Icons.chevron_left,
-                        size: 20, color: Colors.grey.shade600,
-                      ),
+          ),
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeInOut,
+            top: 0, bottom: 0,
+            right: _panelOpen ? 280 : 0,
+            width: 36,
+            child: Align(
+              alignment: Alignment.center,
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () => setState(() => _panelOpen = !_panelOpen),
+                  child: Container(
+                    width: 36, height: 64,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(8)),
+                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 6, offset: const Offset(-2, 0))],
                     ),
+                    child: Icon(_panelOpen ? Icons.chevron_right : Icons.chevron_left,
+                        size: 20, color: Colors.grey.shade600),
                   ),
                 ),
               ),
             ),
-          ],
-
-          // Mobile: bottom sheet
-          if (isMobile) _buildMobileSheet(),
+          ),
         ],
-      ),
+      ],
+    );
+
+    return Scaffold(
+      body: isMobile
+          ? Column(
+              children: [
+                Expanded(child: mapArea),
+                _buildMobileBottom(),
+              ],
+            )
+          : mapArea,
     );
   }
 
@@ -1984,113 +1931,95 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // =========================================================================
-  // Mobile bottom sheet
+  // Mobile bottom UI — separated from map (no overlap = no panning conflict)
   // =========================================================================
 
-  Widget _buildMobileSheet() {
-    return DraggableScrollableSheet(
-      controller: _sheetController,
-      initialChildSize: 0.40,
-      minChildSize: 0.08,
-      maxChildSize: 0.88,
-      snap: true,
-      snapSizes: const [0.08, 0.40, 0.88],
-      builder: (context, scrollController) {
-        return Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (_) => _setMapCanvasInteractive(false),
-          onPointerUp:   (_) => _setMapCanvasInteractive(true),
-          onPointerCancel: (_) => _setMapCanvasInteractive(true),
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.15),
-                  blurRadius: 12,
-                  offset: const Offset(0, -4),
-                ),
-              ],
-            ),
-            child: Column(
-              children: [
-                // Drag handle
-                Center(
-                  child: Container(
-                    margin: const EdgeInsets.only(top: 8, bottom: 2),
-                    width: 36, height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                // Tab bar
-                _buildMobileTabBar(),
-                Divider(height: 1, color: Colors.grey.shade200),
-                // Tab content
-                Expanded(
-                  child: SingleChildScrollView(
-                    controller: scrollController,
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-                    child: _buildMobileTabContent(),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildMobileTabBar() {
+  Widget _buildMobileBottom() {
     const tabs = [
       (Icons.access_time,       'Time'),
       (Icons.wb_sunny_outlined, 'Spots'),
       (Icons.info_outline,      'Info'),
       (Icons.favorite_outline,  'Saved'),
     ];
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      child: Row(
-        children: tabs.asMap().entries.map((entry) {
-          final i       = entry.key;
-          final icon    = entry.value.$1;
-          final label   = entry.value.$2;
-          final selected = _mobileTab == i;
-          return Expanded(
-            child: GestureDetector(
-              onTap: () => setState(() => _mobileTab = i),
-              behavior: HitTestBehavior.opaque,
-              child: Container(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(
-                  border: Border(
-                    bottom: BorderSide(
-                      color: selected ? Colors.orange : Colors.transparent,
-                      width: 2,
-                    ),
-                  ),
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(icon, size: 20,
-                        color: selected ? Colors.orange : Colors.grey.shade500),
-                    const SizedBox(height: 2),
-                    Text(label,
-                        style: TextStyle(
-                          fontSize: 10, fontWeight: FontWeight.w600,
-                          color: selected ? Colors.orange : Colors.grey.shade500,
-                        )),
-                  ],
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.14),
+              blurRadius: 12,
+              offset: const Offset(0, -3),
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Content area — fade at bottom signals more content below
+            SizedBox(
+              height: (_screenHeight * 0.30 - 56).clamp(160.0, 260.0),
+              child: ShaderMask(
+                shaderCallback: (bounds) => LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
+                  stops: const [0.0, 0.75, 1.0],
+                ).createShader(bounds),
+                blendMode: BlendMode.dstIn,
+                child: SingleChildScrollView(
+                  controller: _mobileContentScroll,
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                  child: _buildMobileTabContent(),
                 ),
               ),
             ),
-          );
-        }).toList(),
+            // Tab bar
+            Divider(height: 1, color: Colors.grey.shade200),
+            SizedBox(
+              height: 56,
+              child: Row(
+                children: tabs.asMap().entries.map((entry) {
+                  final i     = entry.key;
+                  final icon  = entry.value.$1;
+                  final label = entry.value.$2;
+                  final sel   = _mobileTab == i;
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        setState(() => _mobileTab = i);
+                        _mobileContentScroll.jumpTo(0);
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: sel ? Colors.orange.withValues(alpha: 0.12) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Icon(icon, size: 22,
+                                color: sel ? Colors.orange : Colors.grey.shade400),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(label,
+                              style: TextStyle(
+                                fontSize: 10, fontWeight: FontWeight.w600,
+                                color: sel ? Colors.orange : Colors.grey.shade400,
+                              )),
+                        ],
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
