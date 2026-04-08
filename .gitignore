@@ -15,7 +15,7 @@ __pycache__/
 # Build outputs
 build/
 
-# Large OSM data files
+# Large OSM data files (raw — not in git)
 *.osm.pbf
 *.osm.bz2
-buildings_cache.pkl
+# buildings_cache.pkl is tracked via Git LFS

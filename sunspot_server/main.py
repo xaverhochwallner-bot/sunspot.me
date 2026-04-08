@@ -360,12 +360,14 @@ def _build_poi_trees(handler_or_data):
           f"{len(_amenity_pts):,} amenity points indexed.")
 
 
-def load_buildings(pbf_path):
+def load_buildings(pbf_path=None):
     global _buildings_polys, _buildings_heights, _buildings_tree
 
-    # Use cache if it exists and is newer than the PBF
+    # Use cache if it exists (and is newer than PBF if pbf is present)
     if os.path.exists(CACHE_PATH):
-        if os.path.getmtime(CACHE_PATH) > os.path.getmtime(pbf_path):
+        cache_ok = (pbf_path is None or not os.path.exists(pbf_path) or
+                    os.path.getmtime(CACHE_PATH) > os.path.getmtime(pbf_path))
+        if cache_ok:
             print("Loading buildings from cache ...")
             with open(CACHE_PATH, "rb") as f:
                 cached = pickle.load(f)
@@ -1448,7 +1450,19 @@ def find_sunny_spots():
 # Start
 # ---------------------------------------------------------------------------
 
+def _download_pbf(path):
+    import urllib.request
+    url = "https://download.geofabrik.de/europe/austria-latest.osm.pbf"
+    print(f"Downloading {url} (~760 MB) ...")
+    urllib.request.urlretrieve(url, path)
+    print("Download complete.")
+
 if __name__ == "__main__":
-    load_buildings(PBF_PATH)
-    print("Starting Flask server on http://127.0.0.1:5000 ...")
-    app.run(host="0.0.0.0", port=5000, debug=True, use_reloader=False, threaded=True)
+    pbf = PBF_PATH if os.path.exists(PBF_PATH) else None
+    if not os.path.exists(CACHE_PATH) and pbf is None:
+        _download_pbf(PBF_PATH)
+        pbf = PBF_PATH
+    load_buildings(pbf)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting Flask server on http://0.0.0.0:{port} ...")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
