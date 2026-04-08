@@ -1,5 +1,5 @@
 [phases.install]
-cmds = ["python -m pip install -r requirements.txt"]
+cmds = ["/opt/venv/bin/pip install -r requirements.txt"]
 
 [start]
 cmd = "python sunspot_server/main.py"
