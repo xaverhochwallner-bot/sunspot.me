@@ -644,6 +644,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _azimuth     = azim;
               _sunriseHour = srHour;
               _sunsetHour  = ssHour;
+              // Clamp current hour to daylight window
+              if (srHour != null && ssHour != null) {
+                _hour = _hour.clamp(srHour, ssHour);
+              }
               _loading     = false;
               _showPill    = false;
             });
@@ -1328,6 +1332,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // ---- Time slider ----
   Widget _buildTimeSlider() {
+    final minH      = _sunriseHour ?? 5.0;
+    final maxH      = _sunsetHour  ?? 22.0;
+    final divisions = (maxH - minH).round().clamp(1, 23);
+    final sliderVal = _hour.clamp(minH, maxH);
+    // Midpoint label — only show noon if it falls inside the daylight window
+    final noonInRange = minH < 12.0 && maxH > 12.0;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1340,8 +1351,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             overlayColor: Colors.orange.withValues(alpha: 0.2),
           ),
           child: Slider(
-            value: _hour,
-            min: 0, max: 23, divisions: 23,
+            value: sliderVal,
+            min: minH, max: maxH, divisions: divisions,
             onChangeStart: (_) {
               setState(() => _draggingSlider = true);
               _setMapPointerEvents(false);
@@ -1354,20 +1365,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             },
           ),
         ),
-        // Day/night strip with sunrise/sunset markers
-        if (_sunriseHour != null && _sunsetHour != null)
-          _buildDayNightStrip(_sunriseHour!, _sunsetHour!),
-        // Hour labels
+        // Labels: sunrise · (noon) · sunset
         Padding(
           padding: const EdgeInsets.only(left: 4, right: 4, top: 2),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: const [
-              Text('12 AM', style: TextStyle(fontSize: 10, color: Colors.grey)),
-              Text('6 AM',  style: TextStyle(fontSize: 10, color: Colors.grey)),
-              Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey)),
-              Text('6 PM',  style: TextStyle(fontSize: 10, color: Colors.grey)),
-              Text('12 AM', style: TextStyle(fontSize: 10, color: Colors.grey)),
+            children: [
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
+                const SizedBox(width: 2),
+                Text(_formatSliderHour(minH),
+                    style: TextStyle(fontSize: 10, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
+              ]),
+              if (noonInRange)
+                const Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade400),
+                const SizedBox(width: 2),
+                Text(_formatSliderHour(maxH),
+                    style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade500, fontWeight: FontWeight.w600)),
+              ]),
             ],
           ),
         ),
