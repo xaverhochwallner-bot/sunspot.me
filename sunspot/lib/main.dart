@@ -55,7 +55,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool     _loading       = false;
   bool     _mapReady      = false;
   bool     _animating      = false;
-  int      _animSpeed      = 1;   // 1, 2, or 4
   bool     _draggingSlider = false;
   String?  _errorMessage;
 
@@ -738,22 +737,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Animation
   // -------------------------------------------------------------------------
 
-  void _toggleAnimation() {
+  void _toggle24h() {
     if (_animating) {
       setState(() => _animating = false);
-    } else {
-      setState(() => _animating = true);
-      _runAnimationStep();
+      return;
     }
+    final start = _sunriseHour ?? 6.0;
+    setState(() {
+      _animating = true;
+      _liveMode = false;
+      _hour = start;
+    });
+    _run24hStep();
   }
 
-  Future<void> _runAnimationStep() async {
+  Future<void> _run24hStep() async {
     if (!_animating) return;
-    setState(() => _hour = (_hour + 1) % 24);
     await fetchShadows();
-    final ms = _animSpeed == 4 ? 0 : (_animSpeed == 2 ? 200 : 500);
-    if (ms > 0) await Future.delayed(Duration(milliseconds: ms));
-    if (_animating) _runAnimationStep();
+    await Future.delayed(const Duration(milliseconds: 400));
+    if (!_animating) return;
+    final end = _sunsetHour ?? 20.0;
+    if (_hour >= end) {
+      setState(() => _animating = false);
+      return;
+    }
+    setState(() => _hour = _hour + 1.0);
+    _run24hStep();
   }
 
   // -------------------------------------------------------------------------
@@ -1249,12 +1258,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildTimeHeader(),
-              const SizedBox(height: 2),
-              _buildSunSummary(),
-              const SizedBox(height: 2),
+              const SizedBox(height: 4),
               _buildTimeSlider(),
-              const SizedBox(height: 12),
-              _buildAnimateButton(),
+              const SizedBox(height: 10),
+              _buildTimeActions(),
               const SizedBox(height: 16),
               _buildDateSection(),
               const Divider(height: 28),
@@ -1307,25 +1314,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             );
           },
         ),
-      ],
-    );
-  }
-
-  // ---- Compact sun summary (always visible under time header) ----
-  Widget _buildSunSummary() {
-    if (_elevation == 0.0 && _azimuth == 0.0) return const SizedBox.shrink();
-    final label = _elevation <= 0
-        ? 'Below horizon'
-        : '${_elevation.toStringAsFixed(1)}°  ·  ${_azimuth.toStringAsFixed(0)}° ${_azimuthDirection(_azimuth)}';
-    return Row(
-      children: [
-        Icon(
-          _elevation <= 0 ? Icons.nightlight_round : Icons.wb_sunny_outlined,
-          size: 12, color: Colors.grey,
-        ),
-        const SizedBox(width: 4),
-        Text(label,
-            style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
     );
   }
@@ -1392,199 +1380,71 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  /// Thin coloured bar + tick marks showing day (amber) vs night (grey).
-  /// Flutter's Slider track starts/ends at 12 px from the widget edge (overlay radius).
-  Widget _buildDayNightStrip(double sr, double ss) {
-    const sliderPad = 12.0;
-    const nightClr  = Color(0xFFCFD8DC); // blue-grey 100
-    const dayClr    = Color(0xFFFFE082); // amber 200
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final total   = constraints.maxWidth;
-        final trackW  = total - sliderPad * 2;
-        final srFrac  = (sr / 23.0).clamp(0.0, 1.0);
-        final ssFrac  = (ss / 23.0).clamp(0.0, 1.0);
-        final srX     = sliderPad + srFrac * trackW;
-        final ssX     = sliderPad + ssFrac * trackW;
-
-        // Clamp label positions so they don't overflow the widget
-        final srLabelX = (srX - 14).clamp(0.0, total - 36);
-        final ssLabelX = (ssX - 14).clamp(0.0, total - 36);
-
-        return SizedBox(
-          height: 20,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              // ── coloured strip ──
-              Positioned(
-                left: sliderPad, right: sliderPad, top: 4,
-                child: SizedBox(
-                  height: 4,
-                  child: Row(
-                    children: [
-                      Flexible(
-                        flex: (srFrac * 1000).round().clamp(1, 999),
-                        child: Container(color: nightClr),
-                      ),
-                      Flexible(
-                        flex: ((ssFrac - srFrac) * 1000).round().clamp(1, 999),
-                        child: Container(color: dayClr),
-                      ),
-                      Flexible(
-                        flex: ((1 - ssFrac) * 1000).round().clamp(1, 999),
-                        child: Container(color: nightClr),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // ── sunrise tick ──
-              Positioned(
-                left: srX - 0.5, top: 0,
-                child: Container(width: 1, height: 12,
-                    color: Colors.orange.shade400),
-              ),
-              // ── sunset tick ──
-              Positioned(
-                left: ssX - 0.5, top: 0,
-                child: Container(width: 1, height: 12,
-                    color: Colors.blueGrey.shade300),
-              ),
-              // ── sunrise label ──
-              Positioned(
-                left: srLabelX, top: 12,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.wb_sunny_outlined, size: 8,
-                        color: Colors.orange.shade500),
-                    const SizedBox(width: 1),
-                    Text(_formatSliderHour(sr),
-                        style: TextStyle(
-                            fontSize: 8,
-                            color: Colors.orange.shade700,
-                            fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
-              // ── sunset label ──
-              Positioned(
-                left: ssLabelX, top: 12,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.nightlight_round, size: 8,
-                        color: Colors.blueGrey.shade400),
-                    const SizedBox(width: 1),
-                    Text(_formatSliderHour(ss),
-                        style: TextStyle(
-                            fontSize: 8,
-                            color: Colors.blueGrey.shade500,
-                            fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
   String _formatSliderHour(double hour) {
     final h = hour.toInt().clamp(0, 23);
     final m = ((hour - h) * 60).round();
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
-  // ---- Animate button ----
-  Widget _buildAnimateButton() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  // ---- Time action buttons (LIVE + 24h) ----
+  Widget _buildTimeActions() {
+    return Row(
       children: [
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: _toggleAnimation,
-            icon: Icon(_animating ? Icons.stop : Icons.play_arrow, size: 18),
-            label: Text(_animating ? 'Stop animation' : 'Animate shadows'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: Colors.black87,
-              side: const BorderSide(color: Colors.black26),
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              textStyle: const TextStyle(fontSize: 13),
+        // LIVE button
+        GestureDetector(
+          onTap: _toggleLiveMode,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_liveMode)
+                  Container(
+                    width: 6, height: 6,
+                    margin: const EdgeInsets.only(right: 4),
+                    decoration: const BoxDecoration(
+                      color: Colors.white, shape: BoxShape.circle,
+                    ),
+                  ),
+                Text('LIVE', style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w700,
+                  color: _liveMode ? Colors.white : Colors.black54,
+                  letterSpacing: 0.5,
+                )),
+              ],
             ),
           ),
         ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            ...[1, 2, 4].map<Widget>((speed) {
-            final selected = _animSpeed == speed;
-            return Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () => setState(() => _animSpeed = speed),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: selected ? Colors.orange : Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '${speed}x',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: selected ? Colors.white : Colors.black54,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            );
-          }),
-            // LIVE button
-            MouseRegion(
-              cursor: SystemMouseCursors.click,
-              child: GestureDetector(
-                onTap: _toggleLiveMode,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (_liveMode)
-                        Container(
-                          width: 6, height: 6,
-                          margin: const EdgeInsets.only(right: 4),
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      Text(
-                        'LIVE',
-                        style: TextStyle(
-                          fontSize: 12, fontWeight: FontWeight.w700,
-                          color: _liveMode ? Colors.white : Colors.black54,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+        const SizedBox(width: 8),
+        // 24h animation button
+        GestureDetector(
+          onTap: _toggle24h,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: _animating ? Colors.orange : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(14),
             ),
-          ],
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _animating ? Icons.stop : Icons.play_arrow,
+                  size: 13,
+                  color: _animating ? Colors.white : Colors.black54,
+                ),
+                const SizedBox(width: 3),
+                Text('24h', style: TextStyle(
+                  fontSize: 12, fontWeight: FontWeight.w700,
+                  color: _animating ? Colors.white : Colors.black54,
+                )),
+              ],
+            ),
+          ),
         ),
       ],
     );
@@ -2048,12 +1908,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _buildTimeHeader(),
-            const SizedBox(height: 2),
-            _buildSunSummary(),
             const SizedBox(height: 4),
             _buildTimeSlider(),
-            const SizedBox(height: 12),
-            _buildAnimateButton(),
+            const SizedBox(height: 10),
+            _buildTimeActions(),
             const SizedBox(height: 16),
             _buildDateSection(),
           ],
