@@ -1482,7 +1482,7 @@ def _resolve_lfs_pointer(path):
     print(f"Cache is LFS pointer — downloading real file ({size//1024//1024} MB)...")
     repo  = os.environ.get("GITHUB_REPO", "xaverhochwallner-bot/sunspot.me")
     token = os.environ.get("GITHUB_TOKEN", "")
-    api   = f"https://github.com/{repo}.git/info/lfs/objects/batch"
+    api   = f"https://github.com/{repo}/info/lfs/objects/batch"
     hdrs  = {"Accept": "application/vnd.git-lfs+json",
              "Content-Type": "application/vnd.git-lfs+json"}
     if token:
