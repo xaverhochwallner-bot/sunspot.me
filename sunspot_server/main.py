@@ -1456,6 +1456,53 @@ def find_sunny_spots():
 # Start
 # ---------------------------------------------------------------------------
 
+def _is_lfs_pointer(path):
+    """Return True if the file is a Git LFS pointer (not actual content)."""
+    try:
+        with open(path, 'rb') as f:
+            return f.read(8) == b'version '
+    except OSError:
+        return False
+
+def _resolve_lfs_pointer(path):
+    """If path is a Git LFS pointer, download the real content in-place."""
+    if not _is_lfs_pointer(path):
+        return
+    import re, requests as req
+    with open(path, 'r') as f:
+        txt = f.read()
+    oid_m  = re.search(r'oid sha256:([a-f0-9]+)', txt)
+    size_m = re.search(r'size (\d+)', txt)
+    if not oid_m:
+        print("LFS pointer found but OID missing — deleting stale cache.")
+        os.remove(path)
+        return
+    oid  = oid_m.group(1)
+    size = int(size_m.group(1)) if size_m else 0
+    print(f"Cache is LFS pointer — downloading real file ({size//1024//1024} MB)...")
+    repo  = os.environ.get("GITHUB_REPO", "xaverhochwallner-bot/sunspot.me")
+    token = os.environ.get("GITHUB_TOKEN", "")
+    api   = f"https://github.com/{repo}.git/info/lfs/objects/batch"
+    hdrs  = {"Accept": "application/vnd.git-lfs+json",
+             "Content-Type": "application/vnd.git-lfs+json"}
+    if token:
+        hdrs["Authorization"] = f"token {token}"
+    resp = req.post(api, json={"operation": "download", "transfers": ["basic"],
+                               "objects": [{"oid": oid, "size": size}]},
+                    headers=hdrs, timeout=30)
+    resp.raise_for_status()
+    dl_url = resp.json()['objects'][0]['actions']['download']['href']
+    r = req.get(dl_url, stream=True, timeout=600)
+    r.raise_for_status()
+    with open(path, 'wb') as f:
+        done = 0
+        for chunk in r.iter_content(65536):
+            f.write(chunk)
+            done += len(chunk)
+            if done % (20 * 1024 * 1024) < 65536:
+                print(f"  {done//1024//1024}/{size//1024//1024} MB")
+    print("LFS download complete.")
+
 def _download_pbf(path):
     import urllib.request
     url = "https://download.geofabrik.de/europe/austria-latest.osm.pbf"
@@ -1464,6 +1511,8 @@ def _download_pbf(path):
     print("Download complete.")
 
 if __name__ == "__main__":
+    if os.path.exists(CACHE_PATH):
+        _resolve_lfs_pointer(CACHE_PATH)
     pbf = PBF_PATH if os.path.exists(PBF_PATH) else None
     if not os.path.exists(CACHE_PATH) and pbf is None:
         _download_pbf(PBF_PATH)
