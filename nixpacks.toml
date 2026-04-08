@@ -1,8 +1,5 @@
-[variables]
-PATH = "/opt/venv/bin:/usr/local/bin:/usr/bin:/bin"
-
 [phases.install]
-cmds = ["PATH=/opt/venv/bin:$PATH pip install -r requirements.txt"]
+cmds = ["/opt/venv/bin/pip install -r sunspot_server/requirements.txt"]
 
 [start]
 cmd = "python sunspot_server/main.py"
