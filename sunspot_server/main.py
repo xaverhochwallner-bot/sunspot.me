@@ -5,7 +5,11 @@ from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 from datetime import datetime
-import osmium
+try:
+    import osmium
+    _OSMIUM_AVAILABLE = True
+except ImportError:
+    _OSMIUM_AVAILABLE = False
 import pickle
 import pytz
 import math
@@ -212,7 +216,9 @@ def _parse_height(tags):
     return DEFAULT_HEIGHT
 
 
-class BuildingHandler(osmium.SimpleHandler):
+_OsmiumBase = osmium.SimpleHandler if _OSMIUM_AVAILABLE else object
+
+class BuildingHandler(_OsmiumBase):
     def __init__(self):
         super().__init__()
         self.main_polys    = []   # ways with building=* (full outlines)
@@ -293,7 +299,7 @@ class BuildingHandler(osmium.SimpleHandler):
             pass
 
 
-class AmenityHandler(osmium.SimpleHandler):
+class AmenityHandler(_OsmiumBase):
     """Separate lightweight handler for amenity nodes only.
     Run as a node-only pass (no location index needed) — much faster than
     embedding node() in BuildingHandler which processes 90M+ nodes."""
