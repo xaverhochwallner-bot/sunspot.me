@@ -1,5 +1,8 @@
+[phases.setup]
+aptPkgs = ["python3-pip"]
+
 [phases.install]
-cmds = ["/opt/venv/bin/pip install -r sunspot_server/requirements.txt"]
+cmds = ["pip3 install -r sunspot_server/requirements.txt"]
 
 [start]
-cmd = "python sunspot_server/main.py"
+cmd = "python3 sunspot_server/main.py"
