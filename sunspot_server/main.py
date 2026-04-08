@@ -630,21 +630,22 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance (deg) — smooth LOD: 3× per zoom step.
-    Continuous in both directions — finer at high zoom, coarser at low zoom.
-      zoom 19  → ~0.13 m — sub-pixel, effectively 0 gap fill
-      zoom 18  → ~0.4 m
-      zoom 17  → ~1.2 m  — ultra-fine building edges
+    """Morphological close distance (deg) — lookup table for controlled ramp.
+      zoom ≥17 → ~1.5 m
       zoom 16  → ~3.6 m  — individual building shadows
-      zoom 15  → ~11 m   — fine street detail
-      zoom 14  → ~33 m   — main streets visible, alleys filled
-      zoom 13  → ~99 m   — neighbourhood blobs, only boulevards remain
-      zoom 12  → ~297 m  — district-scale blobs
-      zoom 11  → ~500 m  — (capped) city-scale
-      zoom 10  → ~500 m  — (capped)
+      zoom 15  → ~8 m    — fine street detail
+      zoom 14  → ~14 m   — main streets visible
+      zoom 13  → ~24 m   — neighbourhood scale
+      zoom 12  → ~44 m   — district scale
+      zoom ≤11 → ~80 m   — city scale
     """
-    base = 0.000033  # ~3.6 m at z16
-    return min(0.0045, max(1e-7, base * (3 ** (16 - zoom))))
+    if zoom >= 17: return 0.000014
+    if zoom == 16: return 0.000033
+    if zoom == 15: return 0.000072
+    if zoom == 14: return 0.000130
+    if zoom == 13: return 0.000220
+    if zoom == 12: return 0.000400
+    return                0.000720
 
 
 def _shadow_erosion_steps(zoom):
