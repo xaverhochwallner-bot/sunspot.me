@@ -24,14 +24,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Path to the local OSM PBF file — place it next to main.py
-# Can be overridden via PBF_PATH env var
-PBF_PATH = os.environ.get(
-    "PBF_PATH",
-    os.path.join(os.path.dirname(__file__),
-                 "wien-latest.osm.pbf" if os.path.exists(
-                     os.path.join(os.path.dirname(__file__), "wien-latest.osm.pbf"))
-                 else "austria-latest.osm.pbf")
-)
+PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 
 # ---------------------------------------------------------------------------
 # Shadow cache — keyed by (hour, month, day, zoom, lat_grid, lon_grid)
