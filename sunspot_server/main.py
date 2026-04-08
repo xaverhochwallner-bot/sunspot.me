@@ -599,17 +599,19 @@ def _simplify_tolerance(zoom):
       zoom 17  → ~1 m
       zoom 16  → ~2 m
       zoom 15  → ~4 m
-      zoom 14  → ~8 m
-      zoom 13  → ~15 m
-      zoom ≤12 → ~30 m
+      zoom 14  → ~4 m
+      zoom 13  → ~8 m
+      zoom 12  → ~15 m
+      zoom ≤11 → ~22 m
     """
     if zoom >= 18: return 0.000005   # ~0.5 m
     if zoom == 17: return 0.000010   # ~1 m
     if zoom >= 16: return 0.000020   # ~2 m
     if zoom == 15: return 0.000040   # ~4 m
-    if zoom == 14: return 0.000080   # ~8 m
-    if zoom == 13: return 0.00015    # ~15 m
-    return               0.00030    # zoom ≤ 12 — ~30 m
+    if zoom == 14: return 0.000045   # ~4 m
+    if zoom == 13: return 0.000080   # ~8 m
+    if zoom == 12: return 0.00015    # ~15 m
+    return               0.00022    # zoom ≤ 11 — ~22 m
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
