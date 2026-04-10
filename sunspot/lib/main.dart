@@ -4,6 +4,7 @@ import 'dart:html' as html;
 import 'package:geolocator/geolocator.dart';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
@@ -96,6 +97,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _sunnySpotsLayerReady = false;
   bool                       _findingSunnySpots    = false;
 
+  // Reverse-geocoded addresses — keyed by "lat,lon"
+  Map<String, String> _spotAddresses = {};
+
+  // Saved spots — persisted to localStorage
+  List<Map<String, dynamic>> _savedSpots = [];
+
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
@@ -182,6 +189,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
     _injectAttributionCss();
+    _loadSaved();
     fetchShadows();
     _initGpsOnStart();
   }
@@ -345,6 +353,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           .toList();
 
       setState(() => _sunnySpots = spots);
+      _geocodeSpots(spots);
       await _showSunnySpotMarkers(spots);
 
       if (spots.isNotEmpty) {
@@ -418,6 +427,233 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
+  // Saved spots — localStorage persistence
+  // -------------------------------------------------------------------------
+
+  void _loadSaved() {
+    try {
+      final raw = html.window.localStorage['sunspot_saved'];
+      if (raw != null) {
+        setState(() {
+          _savedSpots = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+        });
+      }
+    } catch (_) {}
+  }
+
+  void _persistSaved() {
+    html.window.localStorage['sunspot_saved'] = jsonEncode(_savedSpots);
+  }
+
+  // -------------------------------------------------------------------------
+  // Reverse geocoding (Nominatim)
+  // -------------------------------------------------------------------------
+
+  Future<void> _geocodeSpots(List<Map<String, dynamic>> spots) async {
+    for (final spot in spots) {
+      final lat = spot['lat'] as double;
+      final lon = spot['lon'] as double;
+      await _reverseGeocode(lat, lon);
+      await Future.delayed(const Duration(milliseconds: 300)); // respect Nominatim rate limit
+    }
+  }
+
+  Future<String> _reverseGeocode(double lat, double lon) async {
+    final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+    if (_spotAddresses.containsKey(key)) return _spotAddresses[key]!;
+    try {
+      final uri = Uri.parse(
+        'https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lon&format=json',
+      );
+      final res = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
+      if (res.statusCode != 200) return '';
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final addr = data['address'] as Map<String, dynamic>?;
+      String label = '';
+      if (addr != null) {
+        final road = (addr['road'] ?? addr['pedestrian'] ?? addr['path'] ?? '') as String;
+        final num  = (addr['house_number'] ?? '') as String;
+        label = num.isNotEmpty ? '$road $num' : road;
+      }
+      if (label.isEmpty) {
+        label = ((data['display_name'] as String?) ?? '').split(',').first.trim();
+      }
+      if (mounted) setState(() => _spotAddresses[key] = label);
+      return label;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Spot bottom sheet
+  // -------------------------------------------------------------------------
+
+  void _showSpotSheet(Map<String, dynamic> spot, int idx) {
+    final lat         = spot['lat'] as double;
+    final lon         = spot['lon'] as double;
+    final key         = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+    final address     = _spotAddresses[key] ?? 'Sunny spot ${idx + 1}';
+    final sunHoursLeft = spot['sun_hours_left'] as int;
+    final sunUntil    = spot['sun_until'] as int?;
+    final gps         = _gpsPosition;
+    final distLabel   = gps != null
+        ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon)))
+        : null;
+
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.5));
+
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final isSaved = _savedSpots.any(
+              (s) => s['lat'] == lat && s['lon'] == lon);
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Handle bar
+                Center(
+                  child: Container(
+                    width: 36, height: 4,
+                    margin: const EdgeInsets.only(bottom: 14),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                // Address + meta
+                Text(address,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                Row(children: [
+                  if (distLabel != null) ...[
+                    Icon(Icons.directions_walk, size: 13, color: Colors.grey.shade500),
+                    const SizedBox(width: 3),
+                    Text(distLabel,
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                    const SizedBox(width: 10),
+                  ],
+                  Icon(Icons.wb_sunny_outlined, size: 13, color: Colors.orange.shade400),
+                  const SizedBox(width: 3),
+                  Text(
+                    sunUntil != null
+                        ? '$sunHoursLeft h · until ${sunUntil.toString().padLeft(2, '0')}:00'
+                        : '$sunHoursLeft h of sun',
+                    style: TextStyle(fontSize: 12, color: Colors.orange.shade700),
+                  ),
+                ]),
+                const SizedBox(height: 20),
+                // Action buttons
+                Row(children: [
+                  _sheetButton(
+                    icon: Icons.directions_walk,
+                    label: 'Navigate',
+                    color: Colors.blue,
+                    onTap: () {
+                      html.window.open(
+                        'https://www.google.com/maps/dir/?api=1'
+                        '&destination=$lat,$lon&travelmode=walking',
+                        '_blank',
+                      );
+                      Navigator.pop(ctx);
+                    },
+                  ),
+                  const SizedBox(width: 10),
+                  _sheetButton(
+                    icon: isSaved ? Icons.favorite : Icons.favorite_outline,
+                    label: isSaved ? 'Saved' : 'Save',
+                    color: Colors.red.shade400,
+                    onTap: () {
+                      setState(() {
+                        if (isSaved) {
+                          _savedSpots.removeWhere(
+                              (s) => s['lat'] == lat && s['lon'] == lon);
+                        } else {
+                          _savedSpots.add({
+                            'lat': lat,
+                            'lon': lon,
+                            'address': address,
+                            'sun_hours_left': sunHoursLeft,
+                            'sun_until': sunUntil,
+                          });
+                        }
+                        _persistSaved();
+                      });
+                      setSheet(() {});
+                    },
+                  ),
+                  const SizedBox(width: 10),
+                  _sheetButton(
+                    icon: Icons.share,
+                    label: 'Share',
+                    color: Colors.green.shade600,
+                    onTap: () async {
+                      final server = Uri.base.queryParameters['server']
+                          ?? 'https://sunspotme.duckdns.org';
+                      final link =
+                          'https://coruscating-fenglisu-505ed3.netlify.app/'
+                          '?server=${Uri.encodeComponent(server)}'
+                          '&lat=$lat&lon=$lon';
+                      await Clipboard.setData(ClipboardData(text: link));
+                      Navigator.pop(ctx);
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('Link copied to clipboard'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
+                  ),
+                ]),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _sheetButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Column(
+            children: [
+              Icon(icon, size: 22, color: color),
+              const SizedBox(height: 4),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Geolocation
   // -------------------------------------------------------------------------
 
@@ -436,8 +672,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.medium,
         ),
-      ).timeout(const Duration(seconds: 10));
+      ).timeout(const Duration(seconds: 20));
       return LatLng(pos.latitude, pos.longitude);
+    } on TimeoutException {
+      _showError('GPS: location timed out — try again');
+      return null;
     } catch (e) {
       _showError('GPS: ${e.toString().split('\n').first}');
       return null;
@@ -800,7 +1039,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       });
       fetchShadows();
       _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
-        if (!mounted) return;
+        if (!mounted || !_liveMode) return;
         setState(() {
           final now = DateTime.now();
           _selectedDate = now;
@@ -1040,7 +1279,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // GPS button — right side; Listener blocks map-click from firing underneath
         Positioned(
-          bottom: 24, right: 16,
+          bottom: 68, right: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -1062,7 +1301,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // Zoom buttons — left side
         Positioned(
-          bottom: 80, left: 16,
+          bottom: 50, left: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -1260,8 +1499,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildTimeHeader(),
               const SizedBox(height: 4),
               _buildTimeSlider(),
-              const SizedBox(height: 10),
-              _buildTimeActions(),
               const SizedBox(height: 16),
               _buildDateSection(),
               const Divider(height: 28),
@@ -1324,10 +1561,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final maxH      = _sunsetHour  ?? 22.0;
     final divisions = (maxH - minH).round().clamp(1, 23);
     final sliderVal = _hour.clamp(minH, maxH);
-    // Midpoint label — only show noon if it falls inside the daylight window
     final noonInRange = minH < 12.0 && maxH > 12.0;
 
-    return Column(
+    final sliderColumn = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SliderTheme(
@@ -1342,7 +1578,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             value: sliderVal,
             min: minH, max: maxH, divisions: divisions,
             onChangeStart: (_) {
-              setState(() => _draggingSlider = true);
+              _liveTimer?.cancel();
+              setState(() { _draggingSlider = true; _liveMode = false; });
               _setMapPointerEvents(false);
             },
             onChanged:   (v) => setState(() => _hour = v),
@@ -1378,23 +1615,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
       ],
     );
-  }
 
-  String _formatSliderHour(double hour) {
-    final h = hour.toInt().clamp(0, 23);
-    final m = ((hour - h) * 60).round();
-    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
-  }
-
-  // ---- Time action buttons (LIVE + 24h) ----
-  Widget _buildTimeActions() {
+    // LIVE left · slider · 24h right
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         // LIVE button
         GestureDetector(
           onTap: _toggleLiveMode,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
               color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
               borderRadius: BorderRadius.circular(14),
@@ -1406,9 +1636,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   Container(
                     width: 6, height: 6,
                     margin: const EdgeInsets.only(right: 4),
-                    decoration: const BoxDecoration(
-                      color: Colors.white, shape: BoxShape.circle,
-                    ),
+                    decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle),
                   ),
                 Text('LIVE', style: TextStyle(
                   fontSize: 12, fontWeight: FontWeight.w700,
@@ -1419,12 +1647,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ),
-        const SizedBox(width: 8),
-        // 24h animation button
+        // Slider in the middle
+        Expanded(child: sliderColumn),
+        // 24h button
         GestureDetector(
           onTap: _toggle24h,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
               color: _animating ? Colors.orange : Colors.grey.shade100,
               borderRadius: BorderRadius.circular(14),
@@ -1448,6 +1677,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
       ],
     );
+  }
+
+  String _formatSliderHour(double hour) {
+    final h = hour.toInt().clamp(0, 23);
+    final m = ((hour - h) * 60).round();
+    return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
   // ---- Point info popup ----
@@ -1632,16 +1867,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ? 'until ${sunUntil.toString().padLeft(2, '0')}:00'
                 : null;
 
+            final addrKey = '${spotPos.latitude.toStringAsFixed(6)},${spotPos.longitude.toStringAsFixed(6)}';
+            final address = _spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}';
+            final isSaved = _savedSpots.any(
+                (s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
+
             return Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: MouseRegion(
                 cursor: SystemMouseCursors.click,
                 child: GestureDetector(
-                  onTap: () {
-                    _mapController?.animateCamera(
-                      CameraUpdate.newLatLngZoom(spotPos, 17.5),
-                    );
-                  },
+                  onTap: () => _showSpotSheet(spot, idx),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(
@@ -1673,9 +1909,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                'Sunny spot ${idx + 1}',
+                                address,
                                 style: const TextStyle(
                                     fontSize: 13, fontWeight: FontWeight.w500),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
                               const SizedBox(height: 2),
                               Row(
@@ -1704,6 +1942,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                             ],
                           ),
                         ),
+                        if (isSaved)
+                          Icon(Icons.favorite, size: 14, color: Colors.red.shade300),
+                        const SizedBox(width: 4),
                         Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
                       ],
                     ),
@@ -1910,8 +2151,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _buildTimeHeader(),
             const SizedBox(height: 4),
             _buildTimeSlider(),
-            const SizedBox(height: 10),
-            _buildTimeActions(),
             const SizedBox(height: 16),
             _buildDateSection(),
           ],
@@ -1942,25 +2181,91 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ),
           ],
         );
-      case 3: // Saved (placeholder)
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 32),
-          child: Center(
-            child: Column(
-              children: [
-                Icon(Icons.favorite_outline, size: 44,
-                    color: Colors.grey.shade300),
-                const SizedBox(height: 10),
-                Text('No saved spots yet',
-                    style: TextStyle(fontSize: 14,
-                        color: Colors.grey.shade400)),
-                const SizedBox(height: 4),
-                Text('Coming soon',
-                    style: TextStyle(fontSize: 12,
-                        color: Colors.grey.shade300)),
-              ],
+      case 3: // Saved
+        if (_savedSpots.isEmpty) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 32),
+            child: Center(
+              child: Column(
+                children: [
+                  Icon(Icons.favorite_outline, size: 44, color: Colors.grey.shade300),
+                  const SizedBox(height: 10),
+                  Text('No saved spots yet',
+                      style: TextStyle(fontSize: 14, color: Colors.grey.shade400)),
+                  const SizedBox(height: 4),
+                  Text('Tap a spot and press Save',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade300)),
+                ],
+              ),
             ),
-          ),
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ..._savedSpots.asMap().entries.map((e) {
+              final idx  = e.key;
+              final s    = e.value;
+              final lat  = s['lat'] as double;
+              final lon  = s['lon'] as double;
+              final addr = s['address'] as String? ?? 'Saved spot ${idx + 1}';
+              final sunH = s['sun_hours_left'] as int? ?? 0;
+              final until = s['sun_until'] as int?;
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: () {
+                      _mapController?.animateCamera(
+                          CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.5));
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.red.shade100),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.favorite, size: 16, color: Colors.red.shade300),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(addr,
+                                    style: const TextStyle(
+                                        fontSize: 13, fontWeight: FontWeight.w500),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis),
+                                const SizedBox(height: 2),
+                                Text(
+                                  until != null
+                                      ? '$sunH h · until ${until.toString().padLeft(2, '0')}:00'
+                                      : '$sunH h of sun',
+                                  style: TextStyle(
+                                      fontSize: 11, color: Colors.orange.shade700),
+                                ),
+                              ],
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () => setState(() {
+                              _savedSpots.removeAt(idx);
+                              _persistSaved();
+                            }),
+                            child: Icon(Icons.close, size: 16, color: Colors.grey.shade400),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
         );
       default:
         return const SizedBox.shrink();

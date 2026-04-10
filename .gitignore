@@ -19,3 +19,6 @@ build/
 *.osm.pbf
 *.osm.bz2
 # buildings_cache.pkl is tracked via Git LFS
+
+# Contains credentials — never commit
+provision_arm.py
