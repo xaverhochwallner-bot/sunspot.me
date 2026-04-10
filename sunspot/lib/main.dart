@@ -97,6 +97,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _sunnySpotsLayerReady = false;
   bool                       _findingSunnySpots    = false;
 
+  // Weather overlay
+  Map<String, dynamic>? _weatherData;
+
   // Reverse-geocoded addresses — keyed by "lat,lon"
   Map<String, String> _spotAddresses = {};
 
@@ -192,6 +195,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _loadSaved();
     fetchShadows();
     _initGpsOnStart();
+    _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
   }
 
   void _injectAttributionCss() {
@@ -446,6 +450,85 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
+  // Weather (Open-Meteo, no API key)
+  // -------------------------------------------------------------------------
+
+  Future<void> _fetchWeather(double lat, double lon) async {
+    try {
+      final uri = Uri.parse(
+        'https://api.open-meteo.com/v1/forecast'
+        '?latitude=$lat&longitude=$lon'
+        '&current=temperature_2m,weather_code,uv_index'
+        '&timezone=auto',
+      );
+      final res = await http.get(uri);
+      if (res.statusCode == 200 && mounted) {
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        setState(() => _weatherData = data['current'] as Map<String, dynamic>?);
+      }
+    } catch (_) {}
+  }
+
+  String _weatherEmoji(int code) {
+    if (code == 0)           return '☀️';
+    if (code <= 3)           return '⛅';
+    if (code <= 48)          return '🌫️';
+    if (code <= 67)          return '🌧️';
+    if (code <= 77)          return '❄️';
+    if (code <= 82)          return '🌦️';
+    return                          '⛈️';
+  }
+
+  Color _uvColor(num uv) {
+    if (uv <= 2)  return Colors.green;
+    if (uv <= 5)  return Colors.yellow.shade700;
+    if (uv <= 7)  return Colors.orange;
+    if (uv <= 10) return Colors.red;
+    return                Colors.purple;
+  }
+
+  Widget _buildWeatherWidget() {
+    final data = _weatherData;
+    if (data == null) return const SizedBox.shrink();
+    final temp    = (data['temperature_2m'] as num?)?.round() ?? 0;
+    final code    = (data['weather_code']   as num?)?.toInt() ?? 0;
+    final uv      = (data['uv_index']       as num?) ?? 0;
+    final uvInt   = uv.round();
+    final emoji   = _weatherEmoji(code);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 8, offset: const Offset(0, 2))],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(emoji, style: const TextStyle(fontSize: 16)),
+          const SizedBox(width: 5),
+          Text('$temp°',
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 8),
+          Text('UV $uvInt',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500,
+                  color: Colors.grey.shade700)),
+          const SizedBox(width: 3),
+          Container(
+            width: 8, height: 8,
+            decoration: BoxDecoration(
+              color: _uvColor(uv),
+              shape: BoxShape.circle,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Reverse geocoding (Nominatim)
   // -------------------------------------------------------------------------
 
@@ -505,6 +588,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     showModalBottomSheet(
       context: context,
+      backgroundColor: const Color(0xFFFFF8F0),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -524,7 +608,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     width: 36, height: 4,
                     margin: const EdgeInsets.only(bottom: 14),
                     decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
+                      color: Colors.orange.shade200,
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -556,7 +640,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   _sheetButton(
                     icon: Icons.directions_walk,
                     label: 'Navigate',
-                    color: Colors.blue,
+                    color: Colors.orange.shade700,
                     onTap: () {
                       html.window.open(
                         'https://www.google.com/maps/dir/?api=1'
@@ -570,7 +654,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   _sheetButton(
                     icon: isSaved ? Icons.favorite : Icons.favorite_outline,
                     label: isSaved ? 'Saved' : 'Save',
-                    color: Colors.red.shade400,
+                    color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
                     onTap: () {
                       setState(() {
                         if (isSaved) {
@@ -594,7 +678,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   _sheetButton(
                     icon: Icons.share,
                     label: 'Share',
-                    color: Colors.green.shade600,
+                    color: Colors.orange.shade500,
                     onTap: () async {
                       final server = Uri.base.queryParameters['server']
                           ?? 'https://sunspotme.duckdns.org';
@@ -690,6 +774,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _gpsPosition   = newPos;
       _currentCenter = newPos;
     });
+    _fetchWeather(newPos.latitude, newPos.longitude);
     await _mapController?.animateCamera(
       CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
     );
@@ -1119,6 +1204,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       CameraUpdate.newCameraPosition(CameraPosition(target: target, zoom: 16.0)),
     );
     fetchShadows();
+    _fetchWeather(target.latitude, target.longitude);
   }
 
   @override
@@ -1268,6 +1354,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               color: Colors.orangeAccent,
             ),
           ),
+
+        // Weather widget — top-right, below search bar
+        Positioned(
+          top: 64, right: 12,
+          child: _buildWeatherWidget(),
+        ),
 
         // Loading pill
         AnimatedPositioned(
