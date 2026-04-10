@@ -1161,6 +1161,24 @@ def _point_in_shadow(lon, lat, elevation_deg, azimuth_deg, search_radius_deg=0.0
     return False
 
 
+@app.route("/is_sunny")
+def is_sunny():
+    try:
+        lat      = float(request.args['lat'])
+        lon      = float(request.args['lon'])
+        date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+        hour     = int(request.args.get('hour', datetime.now().hour))
+        minute   = int(request.args.get('minute', datetime.now().minute))
+        tz       = pytz.timezone('Europe/Vienna')
+        date     = datetime.strptime(date_str, '%Y-%m-%d').date()
+        t        = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
+        elevation, azimuth = get_sun_angles(lat, lon, t)
+        in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
+        return jsonify({'sunny': bool(elevation > 0 and not in_shadow)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+
 @app.route("/point_info")
 def point_info():
     try:

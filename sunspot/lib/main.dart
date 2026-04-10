@@ -118,6 +118,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Map<String, dynamic>> _tourSpots       = [];
   bool                       _tourBuilding    = false;
   bool                       _tourLayerReady  = false;
+  double?                    _pendingTourLat;
+  double?                    _pendingTourLon;
+
+  // Saved spots sunny status  key = 'lat,lon', null=loading, true=sunny, false=shadow
+  Map<String, bool?> _savedSunny = {};
 
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
@@ -208,6 +213,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _tourLayerReady       = false;
     _injectAttributionCss();
     _loadSaved();
+    Future.delayed(const Duration(milliseconds: 500), _refreshSavedSunny);
+
+    // Handle shared tour link: ?tour_lat=...&tour_lon=...&tour_duration=...
+    final params = Uri.base.queryParameters;
+    final tLat = double.tryParse(params['tour_lat'] ?? '');
+    final tLon = double.tryParse(params['tour_lon'] ?? '');
+    if (tLat != null && tLon != null) {
+      final dur = int.tryParse(params['tour_duration'] ?? '') ?? _tourDuration;
+      _currentCenter = LatLng(tLat, tLon);
+      _tourDuration  = dur;
+      _pendingTourLat = tLat;
+      _pendingTourLon = tLon;
+      await _mapController?.animateCamera(
+          CameraUpdate.newLatLngZoom(_currentCenter, 15.0));
+      if (_isMobile) setState(() => _mobileTab = 2);
+      await Future.delayed(const Duration(milliseconds: 800));
+      _buildTour();
+    }
+
     fetchShadows();
     _initGpsOnStart();
     _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
@@ -497,6 +521,27 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _persistSaved() {
     html.window.localStorage['sunspot_saved'] = jsonEncode(_savedSpots);
+  }
+
+  Future<void> _refreshSavedSunny() async {
+    if (_savedSpots.isEmpty) return;
+    final d   = _selectedDate;
+    final h   = _hour.toInt();
+    final min = ((_hour * 60).toInt() % 60);
+    final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+    for (final s in _savedSpots) {
+      final lat = s['lat'] as double;
+      final lon = s['lon'] as double;
+      final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+      if (mounted) setState(() => _savedSunny[key] = null);
+      try {
+        final uri = Uri.parse('$flaskBaseUrl/is_sunny'
+            '?lat=$lat&lon=$lon&date=$dateStr&hour=$h&minute=$min');
+        final res = await http.get(uri);
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        if (mounted) setState(() => _savedSunny[key] = data['sunny'] as bool?);
+      } catch (_) {}
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -2163,27 +2208,47 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
         ]),
         const SizedBox(height: 8),
-        Row(children: [15, 30, 60].map((min) {
-          final sel = _tourDuration == min;
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
-              onTap: () => setState(() { _tourDuration = min; _tourSpots = []; _clearTourLine(); }),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                decoration: BoxDecoration(
-                  color: sel ? Colors.orange : Colors.grey.shade100,
-                  borderRadius: BorderRadius.circular(14),
+        Row(children: [
+          ...[15, 30, 60].map((min) {
+            final sel = _tourDuration == min;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () {
+                  setState(() => _tourDuration = min);
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: sel ? Colors.orange : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text('$min min',
+                      style: TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600,
+                        color: sel ? Colors.white : Colors.black54,
+                      )),
                 ),
-                child: Text('$min min',
-                    style: TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600,
-                      color: sel ? Colors.white : Colors.black54,
-                    )),
+              ),
+            );
+          }),
+          const Spacer(),
+          if (_tourSpots.isNotEmpty || _tourBuilding)
+            GestureDetector(
+              onTap: () {
+                setState(() { _tourSpots = []; _tourMarkerScreenPos = []; });
+                _clearTourLine();
+              },
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: Colors.red.shade50,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.close, size: 16, color: Colors.red.shade400),
               ),
             ),
-          );
-        }).toList()),
+        ]),
         const SizedBox(height: 12),
 
         // Plan button
@@ -2232,6 +2297,44 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 _tourStat(Icons.timer_outlined, '~$totalMin min'),
                 _tourStat(Icons.wb_sunny_outlined, '~${totalSun}h sun'),
               ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Share button
+          MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () async {
+                final server = Uri.base.queryParameters['server']
+                    ?? 'https://sunspotme.duckdns.org';
+                final lat = _currentCenter.latitude.toStringAsFixed(6);
+                final lon = _currentCenter.longitude.toStringAsFixed(6);
+                final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
+                    '?server=${Uri.encodeComponent(server)}'
+                    '&tour_lat=$lat&tour_lon=$lon&tour_duration=$_tourDuration';
+                await Clipboard.setData(ClipboardData(text: link));
+                if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Tour link copied to clipboard'),
+                      duration: Duration(seconds: 2)));
+              },
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.orange.shade300),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.share, size: 14, color: Colors.orange.shade600),
+                    const SizedBox(width: 6),
+                    Text('Share tour',
+                        style: TextStyle(fontSize: 13, color: Colors.orange.shade700,
+                            fontWeight: FontWeight.w500)),
+                  ],
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 10),
@@ -2740,6 +2843,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       onTap: () {
                         setState(() => _mobileTab = i);
                         _mobileContentScroll.jumpTo(0);
+                        if (i == 3) _refreshSavedSunny();
                       },
                       behavior: HitTestBehavior.opaque,
                       child: Column(
@@ -2843,6 +2947,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         children: [
                           Icon(Icons.favorite, size: 16, color: Colors.red.shade300),
                           const SizedBox(width: 8),
+                          // Sunny now badge
+                          Builder(builder: (_) {
+                            final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+                            final sunny = _savedSunny[key];
+                            if (sunny == null) return const SizedBox.shrink();
+                            return Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Icon(
+                                sunny ? Icons.wb_sunny : Icons.nights_stay_outlined,
+                                size: 14,
+                                color: sunny ? Colors.orange.shade500 : Colors.blueGrey.shade300,
+                              ),
+                            );
+                          }),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
