@@ -111,6 +111,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Saved spots — persisted to localStorage
   List<Map<String, dynamic>> _savedSpots = [];
 
+  // Sunny Tour
+  int                        _tourDuration    = 30;   // minutes
+  List<Map<String, dynamic>> _tourSpots       = [];
+  bool                       _tourBuilding    = false;
+  bool                       _tourLayerReady  = false;
+
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
@@ -197,6 +203,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
     _heatmapLayerReady    = false;
+    _tourLayerReady       = false;
     _injectAttributionCss();
     _loadSaved();
     fetchShadows();
@@ -339,6 +346,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (ctrl == null || !_mapReady) return;
 
     setState(() => _findingSunnySpots = true);
+    await _clearTourLine();
     try {
       final bounds = await ctrl.getVisibleRegion();
       final zoom   = ctrl.cameraPosition?.zoom ?? 15.0;
@@ -1922,6 +1930,344 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}';
   }
 
+  // -------------------------------------------------------------------------
+  // Sunny Tour
+  // -------------------------------------------------------------------------
+
+  static const double _walkMsPerMeter = 60.0 / 80.0; // ~80 m/min walking speed
+
+  List<Map<String, dynamic>> _orderByNearestNeighbor(
+      List<Map<String, dynamic>> spots, LatLng start) {
+    final remaining = List<Map<String, dynamic>>.from(spots);
+    final ordered   = <Map<String, dynamic>>[];
+    LatLng current  = start;
+    while (remaining.isNotEmpty) {
+      int    ni = 0;
+      double nd = double.infinity;
+      for (int i = 0; i < remaining.length; i++) {
+        final d = _distanceMeters(current,
+            LatLng(remaining[i]['lat'] as double, remaining[i]['lon'] as double));
+        if (d < nd) { nd = d; ni = i; }
+      }
+      ordered.add(remaining[ni]);
+      current = LatLng(ordered.last['lat'] as double, ordered.last['lon'] as double);
+      remaining.removeAt(ni);
+    }
+    return ordered;
+  }
+
+  Future<void> _buildTour() async {
+    if (_tourBuilding) return;
+    setState(() { _tourBuilding = true; _tourSpots = []; });
+    await _clearSunnySpots();
+
+    try {
+      final date = _selectedDate;
+      final uri  = Uri.parse(
+        '$flaskBaseUrl/find_sunny_spots'
+        '?lat=${_currentCenter.latitude}'
+        '&lon=${_currentCenter.longitude}'
+        '&hour=${_hour.toInt()}'
+        '&minute=${((_hour * 60).toInt() % 60)}'
+        '&month=${date.month}&day=${date.day}'
+        '&n=8',
+      );
+      final res  = await http.get(uri).timeout(const Duration(seconds: 30));
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final raw  = (data['spots'] as List? ?? []).cast<Map<String, dynamic>>()
+          .map((s) => <String, dynamic>{
+                'lat':            (s['lat']  as num).toDouble(),
+                'lon':            (s['lon']  as num).toDouble(),
+                'sun_hours_left': (s['sun_hours_left'] as num?)?.toInt() ?? 0,
+                'sun_until':      s['sun_until'] as int?,
+              })
+          .toList();
+
+      if (raw.isEmpty) {
+        setState(() => _tourBuilding = false);
+        _showError('No sunny spots found nearby');
+        return;
+      }
+
+      // Order nearest-neighbor, then trim to walking budget
+      final start   = _gpsPosition ?? _currentCenter;
+      final ordered = _orderByNearestNeighbor(raw, start);
+      final budget  = _tourDuration * 80.0;   // meters at 80 m/min
+      double walked = 0;
+      LatLng cur    = start;
+      final kept    = <Map<String, dynamic>>[];
+      for (final s in ordered) {
+        final pos = LatLng(s['lat'] as double, s['lon'] as double);
+        final d   = _distanceMeters(cur, pos);
+        if (walked + d > budget) break;
+        walked += d;
+        kept.add({ ...s, '_dist': d.round() });
+        cur = pos;
+      }
+      if (kept.isEmpty) kept.add({ ...ordered.first, '_dist':
+          _distanceMeters(start, LatLng(ordered.first['lat'] as double,
+              ordered.first['lon'] as double)).round() });
+
+      setState(() => _tourSpots = kept);
+      _geocodeSpots(kept);
+      await _drawTourLine(start, kept);
+    } catch (e) {
+      _showError('Tour error: ${e.toString().split('\n').first}');
+    } finally {
+      if (mounted) setState(() => _tourBuilding = false);
+    }
+  }
+
+  Future<void> _drawTourLine(LatLng start, List<Map<String, dynamic>> spots) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+
+    // Line
+    final coords = [
+      [start.longitude, start.latitude],
+      ...spots.map((s) => [s['lon'] as double, s['lat'] as double]),
+    ];
+    final lineGeojson = {
+      'type': 'FeatureCollection',
+      'features': [{
+        'type': 'Feature',
+        'geometry': {'type': 'LineString', 'coordinates': coords},
+        'properties': {},
+      }],
+    };
+
+    // Markers — numbered points for each stop
+    final markerFeatures = spots.asMap().entries.map((e) => {
+      'type': 'Feature',
+      'geometry': {
+        'type': 'Point',
+        'coordinates': [e.value['lon'], e.value['lat']],
+      },
+      'properties': {'index': e.key + 1},
+    }).toList();
+    final markerGeojson = {
+      'type': 'FeatureCollection',
+      'features': markerFeatures,
+    };
+
+    if (_tourLayerReady) {
+      await ctrl.setGeoJsonSource('tour-route', lineGeojson);
+      await ctrl.setGeoJsonSource('tour-markers', markerGeojson);
+    } else {
+      // Line
+      await ctrl.addSource('tour-route', GeojsonSourceProperties(data: lineGeojson));
+      await ctrl.addLayer(
+        'tour-route', 'tour-line',
+        LineLayerProperties(lineColor: '#FF8C00', lineWidth: 3.0,
+            lineDasharray: [6.0, 4.0]),
+        enableInteraction: false,
+      );
+      // Markers
+      await ctrl.addSource('tour-markers', GeojsonSourceProperties(data: markerGeojson));
+      await ctrl.addLayer(
+        'tour-markers', 'tour-marker-glow',
+        CircleLayerProperties(
+          circleRadius: 20,
+          circleColor: '#FF8C00',
+          circleOpacity: 0.25,
+          circleStrokeWidth: 0,
+        ),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer(
+        'tour-markers', 'tour-marker-dot',
+        CircleLayerProperties(
+          circleRadius: 10,
+          circleColor: '#FF8C00',
+          circleOpacity: 1.0,
+          circleStrokeWidth: 2,
+          circleStrokeColor: '#FFFFFF',
+        ),
+        enableInteraction: false,
+      );
+      _tourLayerReady = true;
+    }
+  }
+
+  Future<void> _clearTourLine() async {
+    if (!_tourLayerReady) return;
+    final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
+    await _mapController?.setGeoJsonSource('tour-route', empty);
+    await _mapController?.setGeoJsonSource('tour-markers', empty);
+  }
+
+  Widget _buildTourTab() {
+    final totalDist = _tourSpots.fold<int>(
+        0, (sum, s) => sum + ((s['_dist'] as num?)?.toInt() ?? 0));
+    final totalMin  = (totalDist / 80).round();
+    final totalSun  = _tourSpots.fold<int>(
+        0, (sum, s) => sum + ((s['sun_hours_left'] as num?)?.toInt() ?? 0));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Duration picker
+        Row(children: [
+          Icon(Icons.directions_walk, size: 14, color: Colors.grey.shade500),
+          const SizedBox(width: 5),
+          Text('Walk duration',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [15, 30, 60].map((min) {
+          final sel = _tourDuration == min;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: GestureDetector(
+              onTap: () => setState(() { _tourDuration = min; _tourSpots = []; _clearTourLine(); }),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                decoration: BoxDecoration(
+                  color: sel ? Colors.orange : Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text('$min min',
+                    style: TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.w600,
+                      color: sel ? Colors.white : Colors.black54,
+                    )),
+              ),
+            ),
+          );
+        }).toList()),
+        const SizedBox(height: 12),
+
+        // Plan button
+        MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            onTap: _tourBuilding ? null : _buildTour,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.orange,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Center(
+                child: _tourBuilding
+                    ? const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Row(mainAxisSize: MainAxisSize.min, children: [
+                        const Icon(Icons.wb_sunny, size: 15, color: Colors.white),
+                        const SizedBox(width: 6),
+                        const Text('Plan sunny tour',
+                            style: TextStyle(fontSize: 13,
+                                fontWeight: FontWeight.w700, color: Colors.white)),
+                      ]),
+              ),
+            ),
+          ),
+        ),
+
+        // Results
+        if (_tourSpots.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          // Summary row
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.orange.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orange.shade200),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _tourStat(Icons.straighten, '${totalDist}m'),
+                _tourStat(Icons.timer_outlined, '~$totalMin min'),
+                _tourStat(Icons.wb_sunny_outlined, '~${totalSun}h sun'),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          // Spot list
+          ..._tourSpots.asMap().entries.map((e) {
+            final idx  = e.key;
+            final spot = e.value;
+            final lat  = spot['lat'] as double;
+            final lon  = spot['lon'] as double;
+            final key  = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+            final addr = _spotAddresses[key] ?? 'Spot ${idx + 1}';
+            final dist = (spot['_dist'] as num?)?.toInt() ?? 0;
+            final sunH = spot['sun_hours_left'] as int? ?? 0;
+            final until = spot['sun_until'] as int?;
+            final walkMin = (dist / 80).round();
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Walk arrow (except first)
+                if (idx > 0)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 11, top: 2, bottom: 2),
+                    child: Row(children: [
+                      Icon(Icons.arrow_downward, size: 12, color: Colors.grey.shade400),
+                      const SizedBox(width: 4),
+                      Text('$walkMin min walk · ${dist}m',
+                          style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+                    ]),
+                  ),
+                GestureDetector(
+                  onTap: () => _mapController?.animateCamera(
+                      CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.0)),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Row(children: [
+                      Container(
+                        width: 20, height: 20,
+                        decoration: const BoxDecoration(
+                            color: Color(0xFFFFD700), shape: BoxShape.circle),
+                        child: Center(child: Text('${idx + 1}',
+                            style: const TextStyle(fontSize: 10,
+                                fontWeight: FontWeight.bold, color: Colors.white))),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(addr, style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w500),
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          const SizedBox(height: 2),
+                          Text(
+                            until != null
+                                ? '$sunH h · until ${until.toString().padLeft(2,'0')}:00'
+                                : '$sunH h of sun',
+                            style: TextStyle(fontSize: 11, color: Colors.orange.shade700),
+                          ),
+                        ],
+                      )),
+                    ]),
+                  ),
+                ),
+              ],
+            );
+          }),
+        ],
+      ],
+    );
+  }
+
+  Widget _tourStat(IconData icon, String label) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, size: 13, color: Colors.orange.shade700),
+      const SizedBox(width: 4),
+      Text(label, style: TextStyle(fontSize: 12,
+          fontWeight: FontWeight.w600, color: Colors.orange.shade800)),
+    ]);
+  }
+
   // ---- Point info popup ----
   Widget _buildPointInfoCard() {
     final info = _pointInfo;
@@ -2293,7 +2639,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     const tabs = [
       (Icons.access_time,       'Time'),
       (Icons.wb_sunny_outlined, 'Spots'),
-      (Icons.info_outline,      'Info'),
+      (Icons.route,             'Tour'),
       (Icons.favorite_outline,  'Saved'),
     ];
     return SafeArea(
@@ -2390,34 +2736,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _buildTimeSlider(),
             const SizedBox(height: 16),
             _buildDateSection(),
+            const Divider(height: 28),
+            _buildSunPosition(),
           ],
         );
       case 1: // Spots
         return _buildFindSunnySpotsSection();
-      case 2: // Info
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _buildSunPosition(),
-            const Divider(height: 28),
-            if (_clickedPoint != null)
-              _buildPointInfoCard()
-            else
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    Icon(Icons.touch_app_outlined, size: 15,
-                        color: Colors.grey.shade400),
-                    const SizedBox(width: 6),
-                    Text('Tap the map to inspect a point',
-                        style: TextStyle(fontSize: 12,
-                            color: Colors.grey.shade400)),
-                  ],
-                ),
-              ),
-          ],
-        );
+      case 2: // Tour
+        return _buildTourTab();
       case 3: // Saved
         if (_savedSpots.isEmpty) {
           return Padding(
