@@ -100,6 +100,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Offset>               _sunnySpotScreenPos   = [];
   List<Offset>               _tourMarkerScreenPos  = [];
 
+  // Places (POI) mode
+  bool                       _placesMode        = false;
+  Set<String>                _poiFilters        = {'cafe', 'bar', 'restaurant'};
+  List<Map<String, dynamic>> _sunnyPois         = [];
+  bool                       _loadingPois       = false;
+  bool                       _poiMarkersReady   = false;
+
+  // Spots tab — optional park/bench overlay
+  Set<String>                _spotPoiAddons     = {}; // 'park' and/or 'bench'
+
   // Weather overlay
   Map<String, dynamic>? _weatherData;
 
@@ -212,6 +222,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _sunnySpotsLayerReady = false;
     _heatmapLayerReady    = false;
     _tourLayerReady       = false;
+    _poiMarkersReady      = false;
     _injectAttributionCss();
     _loadSaved();
     Future.delayed(const Duration(milliseconds: 500), _refreshSavedSunny);
@@ -404,9 +415,38 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               })
           .toList();
 
-      setState(() => _sunnySpots = spots);
-      _geocodeSpots(spots);
-      await _showSunnySpotMarkers(spots);
+      // Merge park/bench POIs if add-ons are toggled
+      List<Map<String, dynamic>> allSpots = spots;
+      if (_spotPoiAddons.isNotEmpty) {
+        try {
+          final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+          final poiUri = Uri.parse(
+            '$flaskBaseUrl/sunny_pois'
+            '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
+            '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
+            '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
+            '&hour=$h&minute=$min&date=$dateStr&types=${_spotPoiAddons.join(',')}',
+          );
+          final poiResp = await http.get(poiUri);
+          if (poiResp.statusCode == 200) {
+            final poiData = jsonDecode(poiResp.body);
+            if (poiData is List) {
+              final pois = poiData.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
+                'lat': p['lat'], 'lon': p['lon'],
+                'sun_hours_left': p['sun_hours'] as int? ?? 0,
+                'sun_until': null,
+                '_poi_name': p['name'] as String? ?? '',
+                '_poi_amenity': p['amenity'] as String? ?? '',
+              }).toList();
+              allSpots = [...spots, ...pois];
+            }
+          }
+        } catch (_) {}
+      }
+
+      setState(() => _sunnySpots = allSpots);
+      _geocodeSpots(allSpots);
+      await _showSunnySpotMarkers(allSpots);
       await _refreshSunnySpotPositions();
 
       if (spots.isNotEmpty) {
@@ -477,6 +517,75 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (!_sunnySpotsLayerReady) return;
     await _mapController?.setGeoJsonSource(
         'sunny-spots', {'type': 'FeatureCollection', 'features': []});
+  }
+
+  Future<void> _findSunnyPois() async {
+    final ctrl = _mapController;
+    if (ctrl == null || !_mapReady || _poiFilters.isEmpty) return;
+    setState(() { _loadingPois = true; _sunnyPois = []; });
+    try {
+      final bounds  = await ctrl.getVisibleRegion();
+      final d       = _selectedDate;
+      final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+      final h       = _hour.toInt();
+      final min     = ((_hour * 60).toInt() % 60);
+      final types   = _poiFilters.join(',');
+      final uri = Uri.parse(
+        '$flaskBaseUrl/sunny_pois'
+        '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
+        '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
+        '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
+        '&hour=$h&minute=$min&date=$dateStr&types=$types',
+      );
+      final resp = await http.get(uri);
+      if (mounted && resp.statusCode == 200) {
+        final data = jsonDecode(resp.body);
+        if (data is List) {
+          final pois = data.cast<Map<String, dynamic>>();
+          setState(() => _sunnyPois = pois);
+          await _showPoiMarkers(pois);
+        }
+      } else if (mounted) {
+        _showError('Server error ${resp.statusCode}: ${resp.body}');
+      }
+    } catch (e) {
+      _showError('Could not load places: $e');
+    } finally {
+      if (mounted) setState(() => _loadingPois = false);
+    }
+  }
+
+  Future<void> _showPoiMarkers(List<Map<String, dynamic>> pois) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    final features = pois.map((p) => {
+      'type': 'Feature',
+      'geometry': {'type': 'Point', 'coordinates': [p['lon'], p['lat']]},
+      'properties': {},
+    }).toList();
+    final geoJson = {'type': 'FeatureCollection', 'features': features};
+    if (_poiMarkersReady) {
+      await ctrl.setGeoJsonSource('poi-markers', geoJson);
+    } else {
+      await ctrl.addSource('poi-markers', GeojsonSourceProperties(data: geoJson));
+      await ctrl.addLayer('poi-markers', 'poi-marker-glow',
+        CircleLayerProperties(circleRadius: 20, circleColor: '#FF8C00', circleOpacity: 0.2,
+            circleStrokeWidth: 0),
+        enableInteraction: false,
+      );
+      await ctrl.addLayer('poi-markers', 'poi-marker-dot',
+        CircleLayerProperties(circleRadius: 9, circleColor: '#FF8C00', circleOpacity: 1.0,
+            circleStrokeWidth: 2, circleStrokeColor: '#FFFFFF'),
+        enableInteraction: false,
+      );
+      _poiMarkersReady = true;
+    }
+  }
+
+  Future<void> _clearPoiMarkers() async {
+    if (!_poiMarkersReady) return;
+    await _mapController?.setGeoJsonSource(
+        'poi-markers', {'type': 'FeatureCollection', 'features': []});
   }
 
   Future<void> _refreshSunnySpotPositions() async {
@@ -770,7 +879,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final lat         = spot['lat'] as double;
     final lon         = spot['lon'] as double;
     final key         = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-    final address     = _spotAddresses[key] ?? 'Sunny spot ${idx + 1}';
+    final poiName     = (spot['_poi_name'] as String? ?? '');
+    final address     = poiName.isNotEmpty ? poiName : (_spotAddresses[key] ?? 'Sunny spot ${idx + 1}');
     final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
     final sunUntil    = spot['sun_until'] as int?;
     final gps         = _gpsPosition;
@@ -2737,155 +2847,314 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return '${(meters / 1000).toStringAsFixed(1)} km';
   }
 
-  // ---- Find sunny spots ----
+  // ---- POI type definitions ----
+  static const _poiTypes = [
+    ('cafe',       Icons.local_cafe,   'Café'),
+    ('bar',        Icons.sports_bar,   'Bar'),
+    ('restaurant', Icons.restaurant,   'Food'),
+  ];
+
+  IconData _poiIcon(String amenity) {
+    if (amenity.contains('cafe'))        return Icons.local_cafe;
+    if (amenity.contains('park') || amenity.contains('garden')) return Icons.park;
+    if (amenity.contains('bench'))       return Icons.chair_alt;
+    if (amenity.contains('bar') || amenity.contains('pub') || amenity.contains('beer')) return Icons.sports_bar;
+    if (amenity.contains('restaurant') || amenity.contains('fast_food')) return Icons.restaurant;
+    return Icons.place;
+  }
+
+  String _poiLabel(String amenity) {
+    if (amenity.contains('cafe'))        return 'Café';
+    if (amenity.contains('park') || amenity.contains('garden')) return 'Park';
+    if (amenity.contains('bench'))       return 'Bench';
+    if (amenity.contains('beer_garden')) return 'Beer garden';
+    if (amenity.contains('bar') || amenity.contains('pub')) return 'Bar';
+    if (amenity.contains('restaurant'))  return 'Restaurant';
+    if (amenity.contains('fast_food'))   return 'Food';
+    return 'Place';
+  }
+
+  // ---- Find sunny spots / places ----
   Widget _buildFindSunnySpotsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: _findingSunnySpots ? null : _findSunnySpots,
-                icon: _findingSunnySpots
-                    ? const SizedBox(
-                        width: 14, height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.wb_sunny, size: 16),
-                label: Text(_findingSunnySpots ? 'Searching...' : 'Find sunny spots'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.orange,
-                  foregroundColor: Colors.white,
-                  disabledBackgroundColor: Colors.orange.shade200,
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    // Mode toggle
+    Widget modeToggle = Container(
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(children: [
+        _modeBtn('Spots', !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; }); _clearPoiMarkers(); }),
+        _modeBtn('Places', _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; }); _clearSunnySpots(); }),
+      ]),
+    );
+
+    if (!_placesMode) {
+      // ── Spots mode ──────────────────────────────────────────────────────────
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        modeToggle,
+        const SizedBox(height: 10),
+        // Park / Bench add-ons
+        Row(children: [
+          for (final t in [('park', Icons.park, 'Parks'), ('bench', Icons.chair_alt, 'Benches')])
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  if (_spotPoiAddons.contains(t.$1)) _spotPoiAddons.remove(t.$1);
+                  else _spotPoiAddons.add(t.$1);
+                }),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: _spotPoiAddons.contains(t.$1) ? Colors.orange : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: _spotPoiAddons.contains(t.$1)
+                        ? Colors.orange : Colors.grey.shade300),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(t.$2, size: 13,
+                        color: _spotPoiAddons.contains(t.$1) ? Colors.white : Colors.grey.shade600),
+                    const SizedBox(width: 4),
+                    Text(t.$3, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                        color: _spotPoiAddons.contains(t.$1) ? Colors.white : Colors.grey.shade600)),
+                  ]),
                 ),
               ),
             ),
-            if (_sunnySpots.isNotEmpty) ...[
-              const SizedBox(width: 8),
-              IconButton(
-                onPressed: _clearSunnySpots,
-                icon: const Icon(Icons.close, size: 16),
-                tooltip: 'Clear spots',
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.grey.shade100,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                padding: const EdgeInsets.all(10),
+        ]),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: _findingSunnySpots ? null : _findSunnySpots,
+              icon: _findingSunnySpots
+                  ? const SizedBox(width: 14, height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.wb_sunny, size: 16),
+              label: Text(_findingSunnySpots ? 'Searching...' : 'Find sunny spots'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: Colors.orange.shade200,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
               ),
-            ],
+            ),
+          ),
+          if (_sunnySpots.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            IconButton(
+              onPressed: _clearSunnySpots,
+              icon: const Icon(Icons.close, size: 16),
+              style: IconButton.styleFrom(
+                backgroundColor: Colors.grey.shade100,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              padding: const EdgeInsets.all(10),
+            ),
           ],
-        ),
+        ]),
         if (_sunnySpots.isNotEmpty) ...[
           const SizedBox(height: 10),
           ..._sunnySpots.asMap().entries.map((e) {
-            final idx          = e.key;
-            final spot         = e.value;
-            final spotPos      = LatLng(spot['lat'] as double, spot['lon'] as double);
-            final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
-            final sunUntil     = spot['sun_until'] as int?;
-
-            // Distance from GPS fix (if available)
-            final gps = _gpsPosition;
-            final distLabel = gps != null
-                ? _formatDistance(_distanceMeters(gps, spotPos))
-                : null;
-
-            // "Sun until HH:00" label
-            final sunUntilLabel = sunUntil != null
-                ? 'until ${sunUntil.toString().padLeft(2, '0')}:00'
-                : null;
-
-            final addrKey = '${spotPos.latitude.toStringAsFixed(6)},${spotPos.longitude.toStringAsFixed(6)}';
-            final address = _spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}';
-            final isSaved = _savedSpots.any(
-                (s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
-
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () => _showSpotSheet(spot, idx),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.shade200),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 22, height: 22,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFFFFD700),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Center(
-                            child: Text(
-                              '${idx + 1}',
-                              style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                address,
-                                style: const TextStyle(
-                                    fontSize: 13, fontWeight: FontWeight.w500),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              const SizedBox(height: 2),
-                              Row(
-                                children: [
-                                  if (distLabel != null) ...[
-                                    Icon(Icons.directions_walk, size: 11,
-                                        color: Colors.grey.shade500),
-                                    const SizedBox(width: 2),
-                                    Text(distLabel,
-                                        style: TextStyle(
-                                            fontSize: 11, color: Colors.grey.shade600)),
-                                    const SizedBox(width: 8),
-                                  ],
-                                  Icon(Icons.wb_sunny_outlined, size: 11,
-                                      color: Colors.orange.shade400),
-                                  const SizedBox(width: 2),
-                                  Text(
-                                    sunUntilLabel != null
-                                        ? '$sunHoursLeft h · $sunUntilLabel'
-                                        : '$sunHoursLeft h left',
-                                    style: TextStyle(
-                                        fontSize: 11, color: Colors.orange.shade700),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (isSaved)
-                          Icon(Icons.favorite, size: 14, color: Colors.red.shade300),
-                        const SizedBox(width: 4),
-                        Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
+            final idx      = e.key;
+            final spot     = e.value;
+            final spotPos  = LatLng(spot['lat'] as double, spot['lon'] as double);
+            final sunH     = (spot['sun_hours_left'] as int?) ?? 0;
+            final sunUntil = spot['sun_until'] as int?;
+            final gps      = _gpsPosition;
+            final distLbl  = gps != null ? _formatDistance(_distanceMeters(gps, spotPos)) : null;
+            final untilLbl = sunUntil != null ? 'until ${sunUntil.toString().padLeft(2,'0')}:00' : null;
+            final addrKey  = '${spotPos.latitude.toStringAsFixed(6)},${spotPos.longitude.toStringAsFixed(6)}';
+            final poiName  = (spot['_poi_name'] as String? ?? '');
+            final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
+            final isSaved  = _savedSpots.any((s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
+            return _spotCard(
+              circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+              circleColor: const Color(0xFFFFD700),
+              address: address,
+              distLabel: distLbl,
+              sunLabel: untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left',
+              isSaved: isSaved,
+              onTap: () => _showSpotSheet(spot, idx),
             );
           }),
         ],
+      ]);
+    }
+
+    // ── Places mode ─────────────────────────────────────────────────────────
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      modeToggle,
+      const SizedBox(height: 10),
+      // Filter chips
+      Wrap(spacing: 6, runSpacing: 6, children: _poiTypes.map((t) {
+        final id    = t.$1;
+        final icon  = t.$2;
+        final label = t.$3;
+        final active = _poiFilters.contains(id);
+        return GestureDetector(
+          onTap: () => setState(() {
+            if (active) _poiFilters.remove(id); else _poiFilters.add(id);
+          }),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: active ? Colors.orange : Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: active ? Colors.orange : Colors.grey.shade300),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(icon, size: 13, color: active ? Colors.white : Colors.grey.shade600),
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                  color: active ? Colors.white : Colors.grey.shade600)),
+            ]),
+          ),
+        );
+      }).toList()),
+      const SizedBox(height: 10),
+      Row(children: [
+        Expanded(
+          child: ElevatedButton.icon(
+            onPressed: (_loadingPois || _poiFilters.isEmpty) ? null : _findSunnyPois,
+            icon: _loadingPois
+                ? const SizedBox(width: 14, height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                : const Icon(Icons.place, size: 16),
+            label: Text(_loadingPois ? 'Searching...' : 'Find sunny places'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange,
+              foregroundColor: Colors.white,
+              disabledBackgroundColor: Colors.orange.shade200,
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ),
+        if (_sunnyPois.isNotEmpty) ...[
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: () { setState(() => _sunnyPois = []); _clearPoiMarkers(); },
+            icon: const Icon(Icons.close, size: 16),
+            style: IconButton.styleFrom(
+              backgroundColor: Colors.grey.shade100,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            padding: const EdgeInsets.all(10),
+          ),
+        ],
+      ]),
+      if (_sunnyPois.isNotEmpty) ...[
+        const SizedBox(height: 10),
+        ..._sunnyPois.asMap().entries.map((e) {
+          final idx  = e.key;
+          final poi  = e.value;
+          final lat  = poi['lat'] as double;
+          final lon  = poi['lon'] as double;
+          final name = (poi['name'] as String? ?? '').isNotEmpty
+              ? poi['name'] as String
+              : (poi['amenity'] as String? ?? 'Place ${idx + 1}');
+          final dist    = poi['dist'] as int? ?? 0;
+          final sunH    = poi['sun_hours'] as int? ?? 0;
+          final amenity = poi['amenity'] as String? ?? '';
+          final isSaved = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          return _spotCard(
+            circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
+            circleColor: const Color(0xFFFF8C00),
+            address: name,
+            distLabel: _formatDistance(dist.toDouble()),
+            sunLabel: '$sunH h · ${_poiLabel(amenity)}',
+            isSaved: isSaved,
+            onTap: () => _showSpotSheet({
+              'lat': lat, 'lon': lon,
+              'sun_hours_left': sunH, 'sun_until': null,
+              '_poi_name': name,
+            }, idx),
+          );
+        }),
       ],
+    ]);
+  }
+
+  Widget _modeBtn(String label, bool active, VoidCallback onTap) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 7),
+          decoration: BoxDecoration(
+            color: active ? Colors.orange : Colors.transparent,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Center(
+            child: Text(label, style: TextStyle(
+              fontSize: 13, fontWeight: FontWeight.w600,
+              color: active ? Colors.white : Colors.grey.shade500,
+            )),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _spotCard({
+    required Widget circleChild,
+    required Color circleColor,
+    required String address,
+    required String? distLabel,
+    required String sunLabel,
+    required bool isSaved,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.orange.shade50,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orange.shade200),
+            ),
+            child: Row(children: [
+              Container(
+                width: 22, height: 22,
+                decoration: BoxDecoration(color: circleColor, shape: BoxShape.circle),
+                child: Center(child: circleChild),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(address,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 2),
+                  Row(children: [
+                    if (distLabel != null) ...[
+                      Icon(Icons.directions_walk, size: 11, color: Colors.grey.shade500),
+                      const SizedBox(width: 2),
+                      Text(distLabel, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                      const SizedBox(width: 8),
+                    ],
+                    Icon(Icons.wb_sunny_outlined, size: 11, color: Colors.orange.shade400),
+                    const SizedBox(width: 2),
+                    Text(sunLabel, style: TextStyle(fontSize: 11, color: Colors.orange.shade700)),
+                  ]),
+                ]),
+              ),
+              if (isSaved) Icon(Icons.favorite, size: 14, color: Colors.red.shade300),
+              const SizedBox(width: 4),
+              Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
+            ]),
+          ),
+        ),
+      ),
     );
   }
 
