@@ -1750,11 +1750,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildLoadingPill() {
+    final visible = _showPill || _heatmapLoading;
+    final label   = _heatmapLoading ? 'Heatmap…' : (_loadingStage.isEmpty ? 'Loading…' : _loadingStage);
+    final pct     = _heatmapLoading ? null : (_loadingProgress > 0 ? _loadingProgress : null);
     return AnimatedOpacity(
-      opacity: _showPill ? 1.0 : 0.0,
+      opacity: visible ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 250),
       child: IgnorePointer(
-        ignoring: !_showPill,
+        ignoring: !visible,
         child: Container(
           padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
           decoration: BoxDecoration(
@@ -1780,18 +1783,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    _loadingStage.isEmpty ? 'Loading…' : _loadingStage,
+                    label,
                     style: const TextStyle(
                       fontSize: 12, fontWeight: FontWeight.w500, color: Colors.black87,
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Text(
-                    '${(_loadingProgress * 100).toInt()}%',
-                    style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.bold, color: Colors.orange,
+                  if (!_heatmapLoading) ...[
+                    const SizedBox(width: 10),
+                    Text(
+                      '${(_loadingProgress * 100).toInt()}%',
+                      style: const TextStyle(
+                        fontSize: 13, fontWeight: FontWeight.bold, color: Colors.orange,
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
               const SizedBox(height: 7),
@@ -1800,7 +1805,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(4),
                   child: LinearProgressIndicator(
-                    value: _loadingProgress > 0 ? _loadingProgress : null,
+                    value: pct,
                     minHeight: 5,
                     backgroundColor: Colors.orange.shade100,
                     color: Colors.orange,
