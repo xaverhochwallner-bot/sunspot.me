@@ -96,6 +96,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Map<String, dynamic>> _sunnySpots          = [];
   bool                       _sunnySpotsLayerReady = false;
   bool                       _findingSunnySpots    = false;
+  List<Offset>               _sunnySpotScreenPos   = [];
+  List<Offset>               _tourMarkerScreenPos  = [];
 
   // Weather overlay
   Map<String, dynamic>? _weatherData;
@@ -223,6 +225,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final center = _mapController!.cameraPosition?.target;
     if (center == null) return;
     _currentCenter = center;
+    if (_sunnySpots.isNotEmpty) _refreshSunnySpotPositions();
+    if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
     _debounceTimer?.cancel();
     if (_heatmapMode) {
       _debounceTimer = Timer(const Duration(milliseconds: 600), () {
@@ -382,6 +386,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() => _sunnySpots = spots);
       _geocodeSpots(spots);
       await _showSunnySpotMarkers(spots);
+      await _refreshSunnySpotPositions();
 
       if (spots.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 150));
@@ -447,10 +452,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _clearSunnySpots() async {
-    setState(() => _sunnySpots = []);
+    setState(() { _sunnySpots = []; _sunnySpotScreenPos = []; });
     if (!_sunnySpotsLayerReady) return;
     await _mapController?.setGeoJsonSource(
         'sunny-spots', {'type': 'FeatureCollection', 'features': []});
+  }
+
+  Future<void> _refreshSunnySpotPositions() async {
+    final ctrl = _mapController;
+    if (ctrl == null || _sunnySpots.isEmpty) return;
+    final pts = await Future.wait(
+      _sunnySpots.map((s) => ctrl.toScreenLocation(LatLng(s['lat'] as double, s['lon'] as double))),
+    );
+    if (mounted) setState(() {
+      _sunnySpotScreenPos = pts.map((p) => Offset(p.x.toDouble(), p.y.toDouble())).toList();
+    });
+  }
+
+  Future<void> _refreshTourMarkerPositions() async {
+    final ctrl = _mapController;
+    if (ctrl == null || _tourSpots.isEmpty) return;
+    final pts = await Future.wait(
+      _tourSpots.map((s) => ctrl.toScreenLocation(LatLng(s['lat'] as double, s['lon'] as double))),
+    );
+    if (mounted) setState(() {
+      _tourMarkerScreenPos = pts.map((p) => Offset(p.x.toDouble(), p.y.toDouble())).toList();
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1357,6 +1384,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
         ),
 
+        // Number labels overlaid on map dots
+        IgnorePointer(
+          child: Stack(children: [
+            ..._sunnySpotScreenPos.asMap().entries.map((e) => Positioned(
+              left: e.value.dx - 5,
+              top: e.value.dy - 6,
+              child: Text('${e.key + 1}',
+                style: const TextStyle(color: Colors.white, fontSize: 11,
+                    fontWeight: FontWeight.bold, height: 1)),
+            )),
+            ..._tourMarkerScreenPos.asMap().entries.map((e) => Positioned(
+              left: e.value.dx - 5,
+              top: e.value.dy - 6,
+              child: Text('${e.key + 1}',
+                style: const TextStyle(color: Colors.white, fontSize: 11,
+                    fontWeight: FontWeight.bold, height: 1)),
+            )),
+          ]),
+        ),
+
         // Search bar
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
@@ -2011,6 +2058,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() => _tourSpots = kept);
       _geocodeSpots(kept);
       await _drawTourLine(start, kept);
+      await _refreshTourMarkerPositions();
     } catch (e) {
       _showError('Tour error: ${e.toString().split('\n').first}');
     } finally {
@@ -2090,6 +2138,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _clearTourLine() async {
+    if (mounted) setState(() => _tourMarkerScreenPos = []);
     if (!_tourLayerReady) return;
     final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
     await _mapController?.setGeoJsonSource('tour-route', empty);
