@@ -85,6 +85,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                   _pointInfoLoading = false;
   Map<String, dynamic>?  _pointInfo;
   bool                   _ignoreNextMapClick = false;
+  VoidCallback?          _refreshPointSheet;
   bool                   _pinLayerReady = false;
   double                 _screenWidth = 1200;
 
@@ -276,6 +277,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() => _searchResults = []);
       return;
     }
+    // On mobile, point info is only active on the Saved tab
+    if (_isMobile && _mobileTab != 3) return;
     setState(() {
       _clickedPoint      = coordinates;
       _pointInfo         = null;
@@ -283,6 +286,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
     _showPin(coordinates);
     _fetchPointInfo(coordinates);
+    _showPointSheet(coordinates);
   }
 
   Future<void> _fetchPointInfo(LatLng point) async {
@@ -300,20 +304,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _pointInfo        = jsonDecode(resp.body) as Map<String, dynamic>;
           _pointInfoLoading = false;
         });
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_isMobile) {
-            setState(() => _mobileTab = 2);
-          } else if (_panelScroll.hasClients) {
-            _panelScroll.animateTo(
-              _panelScroll.position.maxScrollExtent,
-              duration: const Duration(milliseconds: 350),
-              curve: Curves.easeOut,
-            );
-          }
-        });
+        _refreshPointSheet?.call();
       }
     } catch (_) {
-      if (mounted) setState(() => _pointInfoLoading = false);
+      if (mounted) {
+        setState(() => _pointInfoLoading = false);
+        _refreshPointSheet?.call();
+      }
     }
   }
 
@@ -774,7 +771,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final lon         = spot['lon'] as double;
     final key         = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
     final address     = _spotAddresses[key] ?? 'Sunny spot ${idx + 1}';
-    final sunHoursLeft = spot['sun_hours_left'] as int;
+    final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
     final sunUntil    = spot['sun_until'] as int?;
     final gps         = _gpsPosition;
     final distLabel   = gps != null
@@ -902,6 +899,177 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         },
       ),
     );
+  }
+
+  void _showPointSheet(LatLng coords) {
+    final lat = coords.latitude;
+    final lon = coords.longitude;
+    final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+
+    // Start reverse geocoding in parallel
+    _reverseGeocode(lat, lon).then((_) => _refreshPointSheet?.call());
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFFFFF8F0),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      isScrollControlled: true,
+    builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          _refreshPointSheet = () { if (ctx.mounted) setSheet(() {}); };
+
+          final info      = _pointInfo;
+          final loading   = _pointInfoLoading;
+          final inShadow  = info == null ? null : (info['in_shadow'] as bool? ?? true);
+          final sunCount  = info?['sun_hours_count'] as int? ?? 0;
+          final periods   = (info?['sun_periods'] as List<dynamic>?) ?? [];
+          final address   = _spotAddresses[key] ?? '';
+          final isSaved   = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          final statusColor = inShadow == false ? const Color(0xFFFF8C00) : const Color(0xFF2d4862);
+
+          String fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
+
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Handle bar
+                Center(
+                  child: Container(
+                    width: 36, height: 4,
+                    margin: const EdgeInsets.only(bottom: 14),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade200,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                // Address
+                Text(
+                  address.isNotEmpty ? address : '${lat.toStringAsFixed(4)}°, ${lon.toStringAsFixed(4)}°',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 10),
+
+                // Sun status
+                if (loading)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Center(child: SizedBox(width: 20, height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange))),
+                  )
+                else ...[
+                  Row(children: [
+                    Icon(
+                      inShadow == false ? Icons.wb_sunny : Icons.nights_stay_outlined,
+                      color: statusColor, size: 15,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      inShadow == false ? 'In Sun' : 'In Shadow',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: statusColor),
+                    ),
+                    const SizedBox(width: 12),
+                    Icon(Icons.wb_sunny_outlined, size: 13, color: Colors.orange.shade400),
+                    const SizedBox(width: 4),
+                    Text(
+                      sunCount == 0 ? 'No direct sun today' : '$sunCount h of sun today',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    ),
+                  ]),
+                  if (periods.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 6, runSpacing: 4,
+                      children: periods.map((p) {
+                        final from = p['from'] as int;
+                        final to   = p['to']   as int;
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: Colors.orange.shade200),
+                          ),
+                          child: Text('${fmt(from)} – ${fmt(to)}',
+                              style: TextStyle(fontSize: 12, color: Colors.orange.shade700,
+                                  fontWeight: FontWeight.w500)),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ],
+
+                const SizedBox(height: 20),
+                // Action buttons
+                Row(children: [
+                  _sheetButton(
+                    icon: Icons.directions_walk,
+                    label: 'Navigate',
+                    color: Colors.orange.shade700,
+                    onTap: () {
+                      html.window.open(
+                        'https://www.google.com/maps/dir/?api=1'
+                        '&destination=$lat,$lon&travelmode=walking',
+                        '_blank',
+                      );
+                      Navigator.pop(ctx);
+                    },
+                  ),
+                  const SizedBox(width: 10),
+                  _sheetButton(
+                    icon: isSaved ? Icons.favorite : Icons.favorite_outline,
+                    label: isSaved ? 'Saved' : 'Save',
+                    color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
+                    onTap: () {
+                      setState(() {
+                        if (isSaved) {
+                          _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
+                        } else {
+                          _savedSpots.add({
+                            'lat': lat, 'lon': lon,
+                            'address': address.isNotEmpty ? address : '${lat.toStringAsFixed(4)}°N',
+                            'sun_hours_left': sunCount,
+                            'sun_until': periods.isNotEmpty ? (periods.last['to'] as int?) : null,
+                          });
+                        }
+                        _persistSaved();
+                      });
+                      setSheet(() {});
+                    },
+                  ),
+                  const SizedBox(width: 10),
+                  _sheetButton(
+                    icon: Icons.share,
+                    label: 'Share',
+                    color: Colors.orange.shade500,
+                    onTap: () async {
+                      final server = Uri.base.queryParameters['server']
+                          ?? 'https://sunspotme.duckdns.org';
+                      final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
+                          '?server=${Uri.encodeComponent(server)}&lat=$lat&lon=$lon';
+                      await Clipboard.setData(ClipboardData(text: link));
+                      Navigator.pop(ctx);
+                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Link copied to clipboard'),
+                            duration: Duration(seconds: 2)));
+                    },
+                  ),
+                ]),
+              ],
+            ),
+          );
+        },
+      ),
+    ).whenComplete(() {
+      _refreshPointSheet = null;
+      _hidePin();
+      setState(() { _clickedPoint = null; _pointInfo = null; });
+    });
   }
 
   Widget _sheetButton({
@@ -1429,6 +1597,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
         ),
 
+        // Tap-to-inspect hint badge (Saved tab only)
+        if (_isMobile && _mobileTab == 3)
+          Positioned(
+            bottom: 24, left: 0, right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 8, offset: const Offset(0, 2))],
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.touch_app_outlined, size: 14, color: Colors.orange.shade500),
+                    const SizedBox(width: 6),
+                    Text('Tap map to inspect',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade700,
+                            fontWeight: FontWeight.w500)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
+
         // Number labels overlaid on map dots
         IgnorePointer(
           child: Stack(children: [
@@ -1848,20 +2042,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               const Divider(height: 28),
               _buildFindSunnySpotsSection(),
               const Divider(height: 28),
-              if (_clickedPoint != null)
-                _buildPointInfoCard()
-              else
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 8),
-                  child: Row(
-                    children: [
-                      Icon(Icons.touch_app_outlined, size: 15, color: Colors.grey.shade400),
-                      const SizedBox(width: 6),
-                      Text('Tap the map to inspect a point',
-                          style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
-                    ],
-                  ),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.touch_app_outlined, size: 15, color: Colors.grey.shade400),
+                    const SizedBox(width: 6),
+                    Text('Tap the map to inspect a point',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+                  ],
                 ),
+              ),
             ],
           ),
         ),
@@ -2593,7 +2784,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final idx          = e.key;
             final spot         = e.value;
             final spotPos      = LatLng(spot['lat'] as double, spot['lon'] as double);
-            final sunHoursLeft = spot['sun_hours_left'] as int;
+            final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
             final sunUntil     = spot['sun_until'] as int?;
 
             // Distance from GPS fix (if available)
@@ -2916,6 +3107,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   const SizedBox(height: 4),
                   Text('Tap a spot and press Save',
                       style: TextStyle(fontSize: 12, color: Colors.grey.shade300)),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: Colors.orange.shade200),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.touch_app_outlined, size: 14, color: Colors.orange.shade400),
+                      const SizedBox(width: 6),
+                      Text('Tap the map to inspect any point',
+                          style: TextStyle(fontSize: 12, color: Colors.orange.shade700)),
+                    ]),
+                  ),
                 ],
               ),
             ),
@@ -2924,14 +3130,37 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Tap-to-inspect hint
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orange.shade100),
+              ),
+              child: Row(children: [
+                Icon(Icons.touch_app_outlined, size: 13, color: Colors.orange.shade400),
+                const SizedBox(width: 6),
+                Text('Tap the map to inspect any point',
+                    style: TextStyle(fontSize: 12, color: Colors.orange.shade600)),
+              ]),
+            ),
             ..._savedSpots.asMap().entries.map((e) {
-              final idx  = e.key;
-              final s    = e.value;
-              final lat  = s['lat'] as double;
-              final lon  = s['lon'] as double;
-              final addr = s['address'] as String? ?? 'Saved spot ${idx + 1}';
-              final sunH = s['sun_hours_left'] as int? ?? 0;
+              final idx   = e.key;
+              final s     = e.value;
+              final lat   = s['lat'] as double;
+              final lon   = s['lon'] as double;
+              final addr  = s['address'] as String? ?? 'Saved spot ${idx + 1}';
+              final sunH  = s['sun_hours_left'] as int? ?? 0;
               final until = s['sun_until'] as int?;
+              final key   = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+              final sunny = _savedSunny[key];
+              final gps   = _gpsPosition;
+              final distLabel = gps != null
+                  ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon)))
+                  : null;
+
               return Padding(
                 padding: const EdgeInsets.only(bottom: 6),
                 child: MouseRegion(
@@ -2940,32 +3169,29 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     onTap: () {
                       _mapController?.animateCamera(
                           CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.5));
+                      _showSpotSheet(s, idx);
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                       decoration: BoxDecoration(
-                        color: Colors.red.shade50,
+                        color: Colors.orange.shade50,
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.red.shade100),
+                        border: Border.all(color: Colors.orange.shade200),
                       ),
                       child: Row(
                         children: [
-                          Icon(Icons.favorite, size: 16, color: Colors.red.shade300),
+                          // Heart circle
+                          Container(
+                            width: 22, height: 22,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFFF8C00),
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Center(
+                              child: Icon(Icons.favorite, size: 11, color: Colors.white),
+                            ),
+                          ),
                           const SizedBox(width: 8),
-                          // Sunny now badge
-                          Builder(builder: (_) {
-                            final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-                            final sunny = _savedSunny[key];
-                            if (sunny == null) return const SizedBox.shrink();
-                            return Padding(
-                              padding: const EdgeInsets.only(right: 6),
-                              child: Icon(
-                                sunny ? Icons.wb_sunny : Icons.nights_stay_outlined,
-                                size: 14,
-                                color: sunny ? Colors.orange.shade500 : Colors.blueGrey.shade300,
-                              ),
-                            );
-                          }),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2976,23 +3202,40 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis),
                                 const SizedBox(height: 2),
-                                Text(
-                                  until != null
-                                      ? '$sunH h · until ${until.toString().padLeft(2, '0')}:00'
-                                      : '$sunH h of sun',
-                                  style: TextStyle(
-                                      fontSize: 11, color: Colors.orange.shade700),
-                                ),
+                                Row(children: [
+                                  if (distLabel != null) ...[
+                                    Icon(Icons.directions_walk, size: 11,
+                                        color: Colors.grey.shade500),
+                                    const SizedBox(width: 2),
+                                    Text(distLabel,
+                                        style: TextStyle(fontSize: 11,
+                                            color: Colors.grey.shade600)),
+                                    const SizedBox(width: 8),
+                                  ],
+                                  Icon(Icons.wb_sunny_outlined, size: 11,
+                                      color: Colors.orange.shade400),
+                                  const SizedBox(width: 2),
+                                  Text(
+                                    until != null
+                                        ? '$sunH h · until ${until.toString().padLeft(2, '0')}:00'
+                                        : '$sunH h of sun',
+                                    style: TextStyle(fontSize: 11,
+                                        color: Colors.orange.shade700),
+                                  ),
+                                  if (sunny != null) ...[
+                                    const SizedBox(width: 6),
+                                    Icon(
+                                      sunny ? Icons.wb_sunny : Icons.nights_stay_outlined,
+                                      size: 11,
+                                      color: sunny ? Colors.orange.shade500 : Colors.blueGrey.shade300,
+                                    ),
+                                  ],
+                                ]),
                               ],
                             ),
                           ),
-                          GestureDetector(
-                            onTap: () => setState(() {
-                              _savedSpots.removeAt(idx);
-                              _persistSaved();
-                            }),
-                            child: Icon(Icons.close, size: 16, color: Colors.grey.shade400),
-                          ),
+                          Icon(Icons.chevron_right, size: 16,
+                              color: Colors.orange.shade300),
                         ],
                       ),
                     ),
