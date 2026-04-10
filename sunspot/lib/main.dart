@@ -100,6 +100,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Weather overlay
   Map<String, dynamic>? _weatherData;
 
+  // Heatmap layer
+  bool _heatmapMode        = false;
+  bool _heatmapLoading     = false;
+  bool _heatmapLayerReady  = false;
+
   // Reverse-geocoded addresses — keyed by "lat,lon"
   Map<String, String> _spotAddresses = {};
 
@@ -191,6 +196,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
+    _heatmapLayerReady    = false;
     _injectAttributionCss();
     _loadSaved();
     fetchShadows();
@@ -211,7 +217,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (center == null) return;
     _currentCenter = center;
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
+    if (_heatmapMode) {
+      _debounceTimer = Timer(const Duration(milliseconds: 600), () {
+        setState(() => _heatmapLoading = true);
+        _fetchAndShowHeatmap().then((_) {
+          if (mounted) setState(() => _heatmapLoading = false);
+        });
+      });
+    } else {
+      _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
+    }
   }
 
   void _onMapClick(Point<double> point, LatLng coordinates) {
@@ -526,6 +541,108 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ],
       ),
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Heatmap layer
+  // -------------------------------------------------------------------------
+
+  Future<void> _setShadowLayersVisible(bool visible) async {
+    if (!_shadowLayersReady) return;
+    await _mapController?.setLayerProperties(
+        'shadow-l0-fill', FillLayerProperties(fillOpacity: visible ? 0.3 : 0.0));
+    await _mapController?.setLayerProperties(
+        'shadow-l1-fill', FillLayerProperties(fillOpacity: visible ? 0.2 : 0.0));
+    await _mapController?.setLayerProperties(
+        'shadow-l2-fill', FillLayerProperties(fillOpacity: visible ? 0.1 : 0.0));
+    // Trigger a full shadow refresh when re-enabling so correct opacities are restored
+    if (visible) fetchShadows();
+  }
+
+  Future<void> _toggleHeatmap() async {
+    if (_heatmapLoading) return;
+    if (_heatmapMode) {
+      // Switch back to shadow
+      setState(() => _heatmapMode = false);
+      await _clearHeatmapLayers();
+      await _setShadowLayersVisible(true);
+    } else {
+      // Switch to heatmap
+      await _setShadowLayersVisible(false);
+      setState(() { _heatmapMode = true; _heatmapLoading = true; });
+      await _fetchAndShowHeatmap();
+      setState(() => _heatmapLoading = false);
+    }
+  }
+
+  Future<void> _fetchAndShowHeatmap() async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    try {
+      final bounds = await ctrl.getVisibleRegion();
+      final zoom   = (ctrl.cameraPosition?.zoom ?? 12.0).clamp(1.0, 13.0);
+      final date   = _selectedDate;
+      final uri    = Uri.parse(
+        '$flaskBaseUrl/heatmap'
+        '?minLat=${bounds.southwest.latitude}'
+        '&minLon=${bounds.southwest.longitude}'
+        '&maxLat=${bounds.northeast.latitude}'
+        '&maxLon=${bounds.northeast.longitude}'
+        '&month=${date.month}&day=${date.day}'
+        '&zoom=${zoom.round()}',
+      );
+      final res = await http.get(uri).timeout(const Duration(seconds: 30));
+      if (res.statusCode != 200 || !mounted || !_heatmapMode) return;
+      final geojson = jsonDecode(res.body) as Map<String, dynamic>;
+      await _showHeatmapLayers(geojson);
+    } catch (e) {
+      if (mounted) {
+        _showError('Heatmap error: ${e.toString().split('\n').first}');
+        setState(() => _heatmapMode = false);
+      }
+    }
+  }
+
+  Future<void> _showHeatmapLayers(Map<String, dynamic> geojson) async {
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+
+    final features = (geojson['features'] as List? ?? [])
+        .cast<Map<String, dynamic>>();
+
+    // Split tiers into separate GeoJSON — avoids MapLibre expression filters
+    Map<String, dynamic> tier(String t) => {
+      'type': 'FeatureCollection',
+      'features': features
+          .where((f) => (f['properties'] as Map?)?['tier'] == t)
+          .toList(),
+    };
+    final always    = tier('always');
+    final sometimes = tier('sometimes');
+
+    if (!_heatmapLayerReady) {
+      await ctrl.addGeoJsonSource('heatmap-sometimes-src', sometimes);
+      await ctrl.addFillLayer(
+        'heatmap-sometimes-src', 'heatmap-sometimes',
+        FillLayerProperties(fillColor: '#FFEB3B', fillOpacity: 0.35),
+      );
+      await ctrl.addGeoJsonSource('heatmap-always-src', always);
+      await ctrl.addFillLayer(
+        'heatmap-always-src', 'heatmap-always',
+        FillLayerProperties(fillColor: '#FF8C00', fillOpacity: 0.55),
+      );
+      _heatmapLayerReady = true;
+    } else {
+      await ctrl.setGeoJsonSource('heatmap-sometimes-src', sometimes);
+      await ctrl.setGeoJsonSource('heatmap-always-src', always);
+    }
+  }
+
+  Future<void> _clearHeatmapLayers() async {
+    if (!_heatmapLayerReady) return;
+    final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
+    await _mapController?.setGeoJsonSource('heatmap-sometimes-src', empty);
+    await _mapController?.setGeoJsonSource('heatmap-always-src', empty);
   }
 
   // -------------------------------------------------------------------------
@@ -862,6 +979,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> fetchShadows() async {
     if (!_mapReady || _mapController == null) return;
+    if (_heatmapMode) return; // heatmap is shown — don't touch shadow layers
 
     _activeEventSource?.close();
     _activeEventSource = null;
@@ -1367,6 +1485,33 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           curve: Curves.easeInOut,
           bottom: 24, left: 0, right: panelRightPad.toDouble(),
           child: Center(child: _buildLoadingPill()),
+        ),
+
+        // Heatmap toggle — above GPS button
+        Positioned(
+          bottom: 120, right: 16,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _ignoreNextMapClick = true,
+            child: FloatingActionButton.small(
+              heroTag: 'heatmap',
+              onPressed: _toggleHeatmap,
+              backgroundColor: _heatmapMode ? Colors.orange : Colors.white,
+              foregroundColor: _heatmapMode ? Colors.white : Colors.black87,
+              elevation: 2,
+              child: _heatmapLoading
+                  ? SizedBox(
+                      width: 16, height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: _heatmapMode ? Colors.white : Colors.orange,
+                      ),
+                    )
+                  : Icon(Icons.wb_sunny,
+                      size: 20,
+                      color: _heatmapMode ? Colors.white : Colors.orange),
+            ),
+          ),
         ),
 
         // GPS button — right side; Listener blocks map-click from firing underneath
