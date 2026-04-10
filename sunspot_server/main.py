@@ -1510,14 +1510,16 @@ def _download_pbf(path):
     urllib.request.urlretrieve(url, path)
     print("Download complete.")
 
+# Startup — runs on both direct execution and Gunicorn import
+if os.path.exists(CACHE_PATH):
+    _resolve_lfs_pointer(CACHE_PATH)
+_pbf = PBF_PATH if os.path.exists(PBF_PATH) else None
+if not os.path.exists(CACHE_PATH) and _pbf is None:
+    _download_pbf(PBF_PATH)
+    _pbf = PBF_PATH
+load_buildings(_pbf)
+
 if __name__ == "__main__":
-    if os.path.exists(CACHE_PATH):
-        _resolve_lfs_pointer(CACHE_PATH)
-    pbf = PBF_PATH if os.path.exists(PBF_PATH) else None
-    if not os.path.exists(CACHE_PATH) and pbf is None:
-        _download_pbf(PBF_PATH)
-        pbf = PBF_PATH
-    load_buildings(pbf)
     port = int(os.environ.get("PORT", 5000))
     print(f"Starting Flask server on http://0.0.0.0:{port} ...")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
