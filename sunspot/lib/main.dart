@@ -897,6 +897,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFFFFF8F0),
+      barrierColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -1041,6 +1042,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFFFFF8F0),
+      barrierColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
