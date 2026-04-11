@@ -1196,13 +1196,13 @@ def _fetch_pois_overpass(min_lat, min_lon, max_lat, max_lon, types):
                 f'node["amenity"="fast_food"]({min_lat},{min_lon},{max_lat},{max_lon});',
                 f'node["amenity"="food_court"]({min_lat},{min_lon},{max_lat},{max_lon});',
             ]
-    query = '[out:json][timeout:15];\n(\n' + '\n'.join(type_queries) + '\n);\nout center;'
+    query = '[out:json][timeout:25];\n(\n' + '\n'.join(type_queries) + '\n);\nout center;'
     import urllib.request, urllib.parse
     url = 'https://overpass-api.de/api/interpreter'
     data = urllib.parse.urlencode({'data': query}).encode()
     req = urllib.request.Request(url, data=data,
           headers={'User-Agent': 'Sunspot.me/1.0'})
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         result = json.loads(resp.read())
     pois = []
     for el in result.get('elements', []):

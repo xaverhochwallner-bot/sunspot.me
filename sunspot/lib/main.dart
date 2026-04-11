@@ -435,7 +435,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 'lat': p['lat'], 'lon': p['lon'],
                 'sun_hours_left': p['sun_hours'] as int? ?? 0,
                 'sun_until': null,
-                '_poi_name': p['name'] as String? ?? '',
+                '_poi_name': (p['name'] as String? ?? '').isNotEmpty
+                    ? p['name'] as String
+                    : _poiTypeLabel(p['amenity'] as String? ?? ''),
                 '_poi_amenity': p['amenity'] as String? ?? '',
               }).toList();
               allSpots = [...spots, ...pois];
@@ -1758,7 +1760,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeInOut,
           top: 12, left: 12, right: isMobile ? 12 : (_panelOpen ? 292 : 12),
-          child: Column(
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _ignoreNextMapClick = true,
+            child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
@@ -1860,6 +1865,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                 ),
             ],
+            ),
           ),
         ),
 
@@ -1889,38 +1895,42 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           child: Center(child: _buildLoadingPill()),
         ),
 
-        // Heatmap legend — bottom-left, visible when heatmap is active
-        if (_heatmapMode)
-          Positioned(
-            bottom: 50, right: 60,
-            child: IgnorePointer(
+        // Legend — bottom-left, always visible but subtle
+        Positioned(
+          bottom: 50, left: 60,
+          child: IgnorePointer(
+            child: AnimatedOpacity(
+              opacity: _heatmapMode ? 1.0 : 0.7,
+              duration: const Duration(milliseconds: 200),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.90),
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.10), blurRadius: 4)],
+                  color: Colors.white.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Row(children: [
-                      Container(width: 10, height: 10, decoration: BoxDecoration(color: Colors.orange.shade600, shape: BoxShape.circle)),
-                      const SizedBox(width: 6),
-                      const Text('Always sunny', style: TextStyle(fontSize: 11)),
-                    ]),
-                    const SizedBox(height: 4),
-                    Row(children: [
-                      Container(width: 10, height: 10, decoration: BoxDecoration(color: Colors.orange.shade200, shape: BoxShape.circle)),
-                      const SizedBox(width: 6),
-                      const Text('Sometimes sunny', style: TextStyle(fontSize: 11)),
-                    ]),
-                  ],
-                ),
+                child: _heatmapMode
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _legendDot(Colors.orange.shade600, 'Always sunny'),
+                          const SizedBox(height: 3),
+                          _legendDot(Colors.orange.shade200, 'Sometimes sunny'),
+                        ],
+                      )
+                    : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _legendDot(Colors.white, 'Sunny'),
+                          const SizedBox(height: 3),
+                          _legendDot(Colors.blueGrey.shade200, 'Shadow'),
+                        ],
+                      ),
               ),
             ),
           ),
+        ),
 
         // Heatmap toggle — above GPS button
         Positioned(
@@ -2703,6 +2713,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
+  Widget _legendDot(Color color, String label) {
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      Container(
+        width: 8, height: 8,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.black.withValues(alpha: 0.15), width: 0.5),
+        ),
+      ),
+      const SizedBox(width: 5),
+      Text(label, style: const TextStyle(fontSize: 10, color: Colors.black87)),
+    ]);
+  }
+
   Widget _tourStat(IconData icon, String label) {
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(icon, size: 13, color: Colors.orange.shade700),
@@ -2849,6 +2874,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Icons.place;
   }
 
+  // Human-readable type name used as display name fallback when OSM name is absent
+  String _poiTypeLabel(String amenity) {
+    if (amenity.contains('cafe'))        return 'Café';
+    if (amenity.contains('park'))        return 'Park';
+    if (amenity.contains('garden'))      return 'Garden';
+    if (amenity.contains('bench'))       return 'Bench';
+    if (amenity.contains('beer_garden')) return 'Beer Garden';
+    if (amenity.contains('bar') || amenity.contains('pub')) return 'Bar';
+    if (amenity.contains('restaurant'))  return 'Restaurant';
+    if (amenity.contains('fast_food'))   return 'Food';
+    return 'Place';
+  }
+
   String _poiLabel(String amenity) {
     if (amenity.contains('cafe'))        return 'Café';
     if (amenity.contains('park') || amenity.contains('garden')) return 'Park';
@@ -2956,12 +2994,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final poiName  = (spot['_poi_name'] as String? ?? '');
             final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
             final isSaved  = _savedSpots.any((s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
+            final poiAmenity = spot['_poi_amenity'] as String? ?? '';
+            final typeTag = poiAmenity.isNotEmpty ? ' · ${_poiTypeLabel(poiAmenity)}' : '';
             return _spotCard(
               circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
               circleColor: const Color(0xFFFFD700),
               address: address,
               distLabel: distLbl,
-              sunLabel: untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left',
+              sunLabel: untilLbl != null ? '$sunH h · $untilLbl$typeTag' : '$sunH h left$typeTag',
               isSaved: isSaved,
               onTap: () => _showSpotSheet(spot, idx),
             );
