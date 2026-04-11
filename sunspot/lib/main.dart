@@ -839,6 +839,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _geocodeSpots(List<Map<String, dynamic>> spots) async {
     for (final spot in spots) {
+      // Skip POI add-ons — they already have a name from OSM
+      if ((spot['_poi_name'] as String? ?? '').isNotEmpty) continue;
       final lat = spot['lat'] as double;
       final lon = spot['lon'] as double;
       await _reverseGeocode(lat, lon);
@@ -908,16 +910,31 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Handle bar
-                Center(
-                  child: Container(
-                    width: 36, height: 4,
-                    margin: const EdgeInsets.only(bottom: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade200,
-                      borderRadius: BorderRadius.circular(2),
+                // Handle bar + close button
+                Row(
+                  children: [
+                    const Spacer(),
+                    Container(
+                      width: 36, height: 4,
+                      margin: const EdgeInsets.only(bottom: 14),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade200,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
-                  ),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: GestureDetector(
+                          onTap: () => Navigator.of(ctx).pop(),
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 10, left: 8),
+                            child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 // Address + meta
                 Text(address,
@@ -1049,16 +1066,31 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Handle bar
-                Center(
-                  child: Container(
-                    width: 36, height: 4,
-                    margin: const EdgeInsets.only(bottom: 14),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade200,
-                      borderRadius: BorderRadius.circular(2),
+                // Handle bar + close button
+                Row(
+                  children: [
+                    const Spacer(),
+                    Container(
+                      width: 36, height: 4,
+                      margin: const EdgeInsets.only(bottom: 14),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade200,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
-                  ),
+                    Expanded(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: GestureDetector(
+                          onTap: () => Navigator.of(ctx).pop(),
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 10, left: 8),
+                            child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 // Address
                 Text(

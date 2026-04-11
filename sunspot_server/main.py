@@ -600,9 +600,9 @@ def _min_sunlit_area(zoom):
     base = 2e-8   # ~200 m² at z16
     if zoom >= 14:
         return max(1e-10, base * (3 ** (16 - zoom)))
-    # Steeper 5× curve below z14
+    # Steep 8× curve below z14 — only large open areas stay sunny
     z14_val = base * (3 ** 2)  # 1.8e-7 ≈ 1,500 m²
-    return max(1e-10, z14_val * (5 ** (14 - zoom)))
+    return max(1e-10, z14_val * (8 ** (14 - zoom)))
 
 
 def _simplify_tolerance(zoom):
@@ -656,9 +656,9 @@ def _gap_fill(zoom):
     if zoom == 16: return 0.000033
     if zoom == 15: return 0.000072
     if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000320
-    if zoom == 12: return 0.000600
-    return                0.001200
+    if zoom == 13: return 0.000500   # ~56m — fills across most streets
+    if zoom == 12: return 0.000900   # ~100m — fills across wide roads/squares
+    return                0.001800   # ~200m — city-block scale merging
 
 
 def _shadow_erosion_steps(zoom):
