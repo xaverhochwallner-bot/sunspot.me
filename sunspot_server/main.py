@@ -583,21 +583,26 @@ def _min_building_area(zoom):
 
 
 def _min_sunlit_area(zoom):
-    """Minimum sunlit patch area (deg²) — smooth LOD: 3× per zoom step.
-    Reduced multiplier (was 5×) to keep more small sunspots visible at lower zoom.
-      zoom 19  → ~0.8 m²      — individual sunlit slivers
+    """Minimum sunlit patch area (deg²).
+    z15+ uses 3× per zoom step (fine detail preserved).
+    z13 and below uses a steeper 5× curve so only large open areas stay sunny.
+      zoom 19  → ~0.8 m²
       zoom 18  → ~2 m²
       zoom 17  → ~7 m²
       zoom 16  → ~200 m²      — small courtyards visible
       zoom 15  → ~600 m²
-      zoom 14  → ~1,800 m²
-      zoom 13  → ~5,400 m²
-      zoom 12  → ~16,000 m²
-      zoom 11  → ~49,000 m²
-      zoom 10  → ~145,000 m²
+      zoom 14  → ~1,500 m²
+      zoom 13  → ~7,500 m²    — small squares disappear
+      zoom 12  → ~37,000 m²   — only medium+ parks stay sunny
+      zoom 11  → ~187,000 m²  — large parks only
+      zoom 10  → ~930,000 m²  — major open areas only
     """
     base = 2e-8   # ~200 m² at z16
-    return max(1e-10, base * (3 ** (16 - zoom)))
+    if zoom >= 14:
+        return max(1e-10, base * (3 ** (16 - zoom)))
+    # Steeper 5× curve below z14
+    z14_val = base * (3 ** 2)  # 1.8e-7 ≈ 1,500 m²
+    return max(1e-10, z14_val * (5 ** (14 - zoom)))
 
 
 def _simplify_tolerance(zoom):
@@ -643,17 +648,17 @@ def _gap_fill(zoom):
       zoom 16  → ~3.6 m  — individual building shadows
       zoom 15  → ~8 m    — fine street detail
       zoom 14  → ~11 m   — main streets visible
-      zoom 13  → ~17 m   — neighbourhood scale
-      zoom 12  → ~30 m   — district scale
-      zoom ≤11 → ~55 m   — city scale
+      zoom 13  → ~35 m   — merge across typical street widths
+      zoom 12  → ~67 m   — district-scale merging
+      zoom ≤11 → ~134 m  — city-scale merging
     """
     if zoom >= 17: return 0.000014
     if zoom == 16: return 0.000033
     if zoom == 15: return 0.000072
     if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000160
-    if zoom == 12: return 0.000280
-    return                0.000500
+    if zoom == 13: return 0.000320
+    if zoom == 12: return 0.000600
+    return                0.001200
 
 
 def _shadow_erosion_steps(zoom):
