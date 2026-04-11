@@ -22,3 +22,6 @@ build/
 
 # Contains credentials — never commit
 provision_arm.py
+
+# Local Netlify folder
+.netlify
