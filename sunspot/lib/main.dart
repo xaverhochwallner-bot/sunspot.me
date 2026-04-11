@@ -1778,6 +1778,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         controller: _searchController,
                         focusNode: _searchFocus,
                         onChanged: _onSearchChanged,
+                        onSubmitted: (v) { if (v.trim().isNotEmpty) _runSearch(v.trim()); },
+                        textInputAction: TextInputAction.search,
+                        keyboardType: TextInputType.text,
                         style: const TextStyle(fontSize: 14),
                         decoration: InputDecoration(
                           hintText: 'Search address or place…',
@@ -1828,13 +1831,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
-                          InkWell(
+                          GestureDetector(
                             onTap: () => _selectSearchResult(result),
-                            mouseCursor: SystemMouseCursors.click,
-                            borderRadius: BorderRadius.vertical(
-                              top:    i == 0 ? const Radius.circular(12) : Radius.zero,
-                              bottom: i == _searchResults.length - 1 ? const Radius.circular(12) : Radius.zero,
-                            ),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               child: Row(
@@ -1891,6 +1889,39 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           child: Center(child: _buildLoadingPill()),
         ),
 
+        // Heatmap legend — bottom-left, visible when heatmap is active
+        if (_heatmapMode)
+          Positioned(
+            bottom: 50, right: 60,
+            child: IgnorePointer(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.90),
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.10), blurRadius: 4)],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(children: [
+                      Container(width: 10, height: 10, decoration: BoxDecoration(color: Colors.orange.shade600, shape: BoxShape.circle)),
+                      const SizedBox(width: 6),
+                      const Text('Always sunny', style: TextStyle(fontSize: 11)),
+                    ]),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      Container(width: 10, height: 10, decoration: BoxDecoration(color: Colors.orange.shade200, shape: BoxShape.circle)),
+                      const SizedBox(width: 6),
+                      const Text('Sometimes sunny', style: TextStyle(fontSize: 11)),
+                    ]),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
         // Heatmap toggle — above GPS button
         Positioned(
           bottom: 120, right: 16,
@@ -1911,7 +1942,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         color: _heatmapMode ? Colors.white : Colors.orange,
                       ),
                     )
-                  : Icon(Icons.wb_sunny,
+                  : Icon(Icons.layers,
                       size: 20,
                       color: _heatmapMode ? Colors.white : Colors.orange),
             ),
@@ -1929,13 +1960,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               backgroundColor: Colors.white,
               foregroundColor: Colors.black87,
               elevation: 2,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: _loading
-                    ? RotationTransition(key: const ValueKey('spin'), turns: _sunSpinCtrl,
-                        child: const Icon(Icons.wb_sunny, size: 20, color: Colors.orange))
-                    : const Icon(Icons.my_location, size: 20, key: ValueKey('loc')),
-              ),
+              child: const Icon(Icons.my_location, size: 20),
             ),
           ),
         ),
@@ -2038,17 +2063,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildZoomButton(IconData icon, VoidCallback onTap) {
-    return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(8),
-      elevation: 2,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: SizedBox(
-          width: 36, height: 36,
-          child: Icon(icon, size: 20, color: Colors.black87),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 36, height: 36,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4, offset: const Offset(0, 1))],
         ),
+        child: Icon(icon, size: 20, color: Colors.black87),
       ),
     );
   }
@@ -2603,44 +2627,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 _tourStat(Icons.timer_outlined, '~$totalMin min'),
                 _tourStat(Icons.wb_sunny_outlined, '~${totalSun}h sun'),
               ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          // Share button
-          MouseRegion(
-            cursor: SystemMouseCursors.click,
-            child: GestureDetector(
-              onTap: () async {
-                final server = Uri.base.queryParameters['server']
-                    ?? 'https://sunspotme.duckdns.org';
-                final lat = _currentCenter.latitude.toStringAsFixed(6);
-                final lon = _currentCenter.longitude.toStringAsFixed(6);
-                final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
-                    '?server=${Uri.encodeComponent(server)}'
-                    '&tour_lat=$lat&tour_lon=$lon&tour_duration=$_tourDuration';
-                await Clipboard.setData(ClipboardData(text: link));
-                if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Tour link copied to clipboard'),
-                      duration: Duration(seconds: 2)));
-              },
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.orange.shade300),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.share, size: 14, color: Colors.orange.shade600),
-                    const SizedBox(width: 6),
-                    Text('Share tour',
-                        style: TextStyle(fontSize: 13, color: Colors.orange.shade700,
-                            fontWeight: FontWeight.w500)),
-                  ],
-                ),
-              ),
             ),
           ),
           const SizedBox(height: 10),
@@ -3503,8 +3489,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                               ],
                             ),
                           ),
-                          Icon(Icons.chevron_right, size: 16,
-                              color: Colors.orange.shade300),
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                _savedSpots.removeAt(idx);
+                                _persistSaved();
+                              });
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 4),
+                              child: Icon(Icons.close, size: 16,
+                                  color: Colors.grey.shade400),
+                            ),
+                          ),
                         ],
                       ),
                     ),
