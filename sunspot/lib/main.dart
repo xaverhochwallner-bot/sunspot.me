@@ -418,7 +418,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           .toList();
 
       // Merge park/bench POIs if add-ons are toggled
-      List<Map<String, dynamic>> allSpots = spots;
+      // When addons active, always show only POI results (never grid spots)
+      List<Map<String, dynamic>> allSpots = _spotPoiAddons.isEmpty ? spots : [];
       if (_spotPoiAddons.isNotEmpty) {
         try {
           final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
@@ -430,20 +431,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             '&hour=$h&minute=$min&date=$dateStr&types=${_spotPoiAddons.join(',')}',
           );
           final poiResp = await http.get(poiUri);
-          if (poiResp.statusCode == 200) {
-            final poiData = jsonDecode(poiResp.body);
-            if (poiData is List) {
-              final pois = poiData.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
-                'lat': p['lat'], 'lon': p['lon'],
-                'sun_hours_left': p['sun_hours'] as int? ?? 0,
-                'sun_until': null,
-                '_poi_name': (p['name'] as String? ?? '').isNotEmpty
-                    ? p['name'] as String
-                    : _poiTypeLabel(p['amenity'] as String? ?? ''),
-                '_poi_amenity': p['amenity'] as String? ?? '',
-              }).toList();
-              allSpots = [...spots, ...pois];
-            }
+          final poiData = jsonDecode(poiResp.body);
+          if (poiData is List) {
+            allSpots = poiData.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
+              'lat': p['lat'], 'lon': p['lon'],
+              'sun_hours_left': p['sun_hours'] as int? ?? 0,
+              'sun_until': null,
+              '_poi_name': p['name'] as String? ?? '',
+              '_poi_amenity': p['amenity'] as String? ?? '',
+            }).toList();
           }
         } catch (_) {}
       }
@@ -588,6 +584,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _clearPoiMarkers() async {
+    if (mounted) setState(() => _poiScreenPos = []);
     if (!_poiMarkersReady) return;
     await _mapController?.setGeoJsonSource(
         'poi-markers', {'type': 'FeatureCollection', 'features': []});
@@ -2931,15 +2928,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Human-readable type name used as display name fallback when OSM name is absent
   String _poiTypeLabel(String amenity) {
-    if (amenity.contains('cafe'))        return 'Café';
-    if (amenity.contains('park'))        return 'Park';
-    if (amenity.contains('garden'))      return 'Garden';
-    if (amenity.contains('bench'))       return 'Bench';
-    if (amenity.contains('beer_garden')) return 'Beer Garden';
-    if (amenity.contains('bar') || amenity.contains('pub')) return 'Bar';
-    if (amenity.contains('restaurant'))  return 'Restaurant';
-    if (amenity.contains('fast_food'))   return 'Food';
-    return 'Place';
+    if (amenity.contains('cafe'))        return '☕ Café';
+    if (amenity.contains('beer_garden')) return '🌿 Beer Garden';
+    if (amenity.contains('playground'))  return '🛝 Playground';
+    if (amenity.contains('park'))        return '🌳 Park';
+    if (amenity.contains('garden'))      return '🌳 Garden';
+    if (amenity.contains('square') || amenity.contains('pedestrian')) return '⛲ Square';
+    if (amenity.contains('bench'))       return '🪑 Bench';
+    if (amenity.contains('bar') || amenity.contains('pub')) return '🍺 Bar';
+    if (amenity.contains('restaurant'))  return '🍽️ Restaurant';
+    if (amenity.contains('fast_food'))   return '🍔 Food';
+    return '☀️ Spot';
   }
 
   String _poiLabel(String amenity) {
@@ -2950,7 +2949,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (amenity.contains('bar') || amenity.contains('pub')) return 'Bar';
     if (amenity.contains('restaurant'))  return 'Restaurant';
     if (amenity.contains('fast_food'))   return 'Food';
-    return 'Place';
+    return 'Spot';
   }
 
   // ---- Find sunny spots / places ----
@@ -2978,10 +2977,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             Padding(
               padding: const EdgeInsets.only(right: 6),
               child: GestureDetector(
-                onTap: () => setState(() {
-                  if (_spotPoiAddons.contains(t.$1)) _spotPoiAddons.remove(t.$1);
-                  else _spotPoiAddons.add(t.$1);
-                }),
+                onTap: () {
+                  setState(() {
+                    if (_spotPoiAddons.contains(t.$1)) _spotPoiAddons.remove(t.$1);
+                    else _spotPoiAddons.add(t.$1);
+                  });
+                  _clearSunnySpots();
+                },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
@@ -3050,7 +3052,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
             final isSaved  = _savedSpots.any((s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
             final poiAmenity = spot['_poi_amenity'] as String? ?? '';
-            final typeTag = poiAmenity.isNotEmpty ? ' · ${_poiTypeLabel(poiAmenity)}' : '';
+            final typeTag = poiAmenity.isNotEmpty ? ' · ${_poiTypeLabel(poiAmenity)}' : ' · ☀️ Spot';
             return _spotCard(
               circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
               circleColor: const Color(0xFFFFD700),
@@ -3071,14 +3073,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       const SizedBox(height: 10),
       // Filter chips
       Wrap(spacing: 6, runSpacing: 6, children: _poiTypes.map((t) {
-        final id    = t.$1;
-        final icon  = t.$2;
-        final label = t.$3;
+        final id     = t.$1;
+        final icon   = t.$2;
+        final label  = t.$3;
         final active = _poiFilters.contains(id);
         return GestureDetector(
-          onTap: () => setState(() {
-            if (active) _poiFilters.remove(id); else _poiFilters.add(id);
-          }),
+          onTap: () {
+            setState(() {
+              if (active) _poiFilters.remove(id); else _poiFilters.add(id);
+              _sunnyPois = [];
+            });
+            _clearPoiMarkers();
+          },
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
             decoration: BoxDecoration(
@@ -3139,7 +3145,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ? poi['name'] as String
               : (poi['amenity'] as String? ?? 'Place ${idx + 1}');
           final dist    = poi['dist'] as int? ?? 0;
-          final sunH    = poi['sun_hours'] as int? ?? 0;
           final amenity = poi['amenity'] as String? ?? '';
           final isSaved = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
           return _spotCard(
@@ -3147,11 +3152,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             circleColor: const Color(0xFFFF8C00),
             address: name,
             distLabel: _formatDistance(dist.toDouble()),
-            sunLabel: '$sunH h · ${_poiLabel(amenity)}',
+            sunLabel: _poiLabel(amenity),
             isSaved: isSaved,
             onTap: () => _showSpotSheet({
               'lat': lat, 'lon': lon,
-              'sun_hours_left': sunH, 'sun_until': null,
+              'sun_hours_left': 0, 'sun_until': null,
               '_poi_name': name,
             }, idx),
           );
@@ -3387,6 +3392,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   return Expanded(
                     child: GestureDetector(
                       onTap: () {
+                        if (_mobileTab == 1 && i != 1) {
+                          setState(() { _sunnyPois = []; });
+                          _clearPoiMarkers();
+                        }
                         setState(() => _mobileTab = i);
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();

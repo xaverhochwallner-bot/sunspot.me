@@ -1166,61 +1166,141 @@ def _point_in_shadow(lon, lat, elevation_deg, azimuth_deg, search_radius_deg=0.0
     return False
 
 
-_poi_cache = {}  # (bbox_key, types_key) -> list[dict]
+# ---------------------------------------------------------------------------
+# City-wide POI database (loaded once at startup, covers all of Vienna)
+# ---------------------------------------------------------------------------
+_CITY_BBOX       = (48.08, 16.10, 48.35, 16.62)  # Vienna bounds
+_CITY_POI_AMENITY_TO_TYPE = {
+    'cafe': 'cafe', 'bar': 'bar', 'pub': 'bar', 'beer_garden': 'bar',
+    'restaurant': 'restaurant', 'fast_food': 'restaurant',
+    'bench': 'bench',
+    'park': 'park', 'garden': 'park', 'nature_reserve': 'park',
+    'playground': 'playground', 'pitch': 'playground',
+    'square': 'square', 'pedestrian': 'square',
+}
+_city_pois: list[dict] = []   # [{lat, lon, name, amenity, poi_type}]
+_city_pois_ready = False
 
-def _fetch_pois_overpass(min_lat, min_lon, max_lat, max_lon, types):
-    """Query Overpass API for POIs of the requested types within bbox."""
+def _overpass_fetch(query, timeout=25):
+    import urllib.request, urllib.parse
+    data = urllib.parse.urlencode({'data': query}).encode()
+    for url in [
+        'https://overpass-api.de/api/interpreter',
+        'https://overpass.kumi.systems/api/interpreter',
+        'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+    ]:
+        try:
+            req = urllib.request.Request(url, data=data,
+                  headers={'User-Agent': 'Sunspot.me/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            continue
+    raise RuntimeError('All Overpass endpoints failed')
+
+def _load_city_pois():
+    global _city_pois, _city_pois_ready
+    min_lat, min_lon, max_lat, max_lon = _CITY_BBOX
+    bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
+
+    # Three parallel queries — benches capped at 2000 to stay within Overpass limits
+    q_amenity = (
+        '[out:json][timeout:60];\n(\n'
+        f'  node["amenity"~"^(cafe|bar|pub|restaurant|fast_food)$"]({bbox});\n'
+        f'  node["leisure"="beer_garden"]({bbox});\n'
+        ');\nout;'
+    )
+    q_parks = (
+        '[out:json][timeout:60];\n(\n'
+        f'  node["leisure"~"^(park|garden|nature_reserve|playground|pitch)$"]({bbox});\n'
+        f'  way["leisure"~"^(park|garden|nature_reserve|playground|pitch)$"]({bbox});\n'
+        ');\nout center;'
+    )
+    q_benches = (
+        '[out:json][timeout:60];\n(\n'
+        f'  node["amenity"="bench"]({bbox});\n'
+        ');\nout 2000;'
+    )
+
+    print('[poi] Loading city-wide POI database...')
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f1 = ex.submit(_overpass_fetch, q_amenity, 70)
+            f2 = ex.submit(_overpass_fetch, q_parks, 70)
+            f3 = ex.submit(_overpass_fetch, q_benches, 70)
+            r1, r2, r3 = f1.result(), f2.result(), f3.result()
+    except Exception as e:
+        print(f'[poi] Failed to load city POIs: {e}')
+        return
+
+    pois = []
+    for result in (r1, r2, r3):
+        for el in result.get('elements', []):
+            plat = el.get('lat') or (el.get('center') or {}).get('lat')
+            plon = el.get('lon') or (el.get('center') or {}).get('lon')
+            if plat is None or plon is None:
+                continue
+            tags     = el.get('tags', {})
+            amenity  = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
+            poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity)
+            if poi_type is None:
+                continue
+            pois.append({
+                'lat': plat, 'lon': plon,
+                'name': tags.get('name', ''),
+                'amenity': amenity, 'poi_type': poi_type,
+            })
+    _city_pois = pois
+    _city_pois_ready = True
+    print(f'[poi] City POI database ready: {len(pois)} entries')
+
+threading.Thread(target=_load_city_pois, daemon=True).start()
+
+# Fallback: small-radius Overpass fetch for locations outside the city DB
+def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
+    ar = f'around:{radius},{center_lat},{center_lon}'
     type_queries = []
     for t in types:
         if t == 'cafe':
-            type_queries += [
-                f'node["amenity"="cafe"]({min_lat},{min_lon},{max_lat},{max_lon});',
-            ]
-        elif t == 'park':
-            type_queries += [
-                f'node["leisure"="park"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'way["leisure"="park"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'relation["leisure"="park"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'node["leisure"="garden"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'way["leisure"="garden"]({min_lat},{min_lon},{max_lat},{max_lon});',
-            ]
-        elif t == 'bench':
-            type_queries += [
-                f'node["amenity"="bench"]({min_lat},{min_lon},{max_lat},{max_lon});',
-            ]
+            type_queries += [f'node["amenity"="cafe"]({ar});']
         elif t == 'bar':
             type_queries += [
-                f'node["amenity"="bar"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'node["amenity"="pub"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'node["leisure"="beer_garden"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'way["leisure"="beer_garden"]({min_lat},{min_lon},{max_lat},{max_lon});',
+                f'node["amenity"="bar"]({ar});',
+                f'node["amenity"="pub"]({ar});',
+                f'node["leisure"="beer_garden"]({ar});',
             ]
         elif t == 'restaurant':
             type_queries += [
-                f'node["amenity"="restaurant"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'node["amenity"="fast_food"]({min_lat},{min_lon},{max_lat},{max_lon});',
-                f'node["amenity"="food_court"]({min_lat},{min_lon},{max_lat},{max_lon});',
+                f'node["amenity"="restaurant"]({ar});',
+                f'node["amenity"="fast_food"]({ar});',
             ]
-    query = '[out:json][timeout:25];\n(\n' + '\n'.join(type_queries) + '\n);\nout center;'
-    import urllib.request, urllib.parse
-    url = 'https://overpass-api.de/api/interpreter'
-    data = urllib.parse.urlencode({'data': query}).encode()
-    req = urllib.request.Request(url, data=data,
-          headers={'User-Agent': 'Sunspot.me/1.0'})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        result = json.loads(resp.read())
+        elif t == 'playground':
+            type_queries += [
+                f'node["leisure"="playground"]({ar});',
+                f'way["leisure"="playground"]({ar});',
+            ]
+        elif t == 'square':
+            type_queries += [
+                f'node["place"="square"]({ar});',
+                f'node["place"="pedestrian"]({ar});',
+            ]
+    query = '[out:json][timeout:15];\n(\n' + '\n'.join(type_queries) + '\n);\nout center 100;'
+    result = _overpass_fetch(query, timeout=20)
     pois = []
     for el in result.get('elements', []):
-        # nodes have lat/lon directly; ways have center
         plat = el.get('lat') or (el.get('center') or {}).get('lat')
         plon = el.get('lon') or (el.get('center') or {}).get('lon')
         if plat is None or plon is None:
             continue
-        tags = el.get('tags', {})
-        name = tags.get('name', '')
-        amenity = tags.get('amenity') or tags.get('leisure') or ''
-        pois.append({'lat': plat, 'lon': plon, 'name': name, 'amenity': amenity})
+        tags    = el.get('tags', {})
+        amenity = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
+        poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity, amenity)
+        pois.append({'lat': plat, 'lon': plon, 'name': tags.get('name', ''),
+                     'amenity': amenity, 'poi_type': poi_type})
     return pois
+
+_poi_cache = {}  # fallback cache for non-city locations
 
 
 @app.route("/sunny_pois")
@@ -1228,58 +1308,78 @@ def sunny_pois():
     try:
         center_lat = float(request.args['lat'])
         center_lon = float(request.args['lon'])
-        min_lat    = float(request.args['minLat'])
-        min_lon    = float(request.args['minLon'])
-        max_lat    = float(request.args['maxLat'])
-        max_lon    = float(request.args['maxLon'])
         hour       = int(request.args.get('hour', 12))
         minute     = int(request.args.get('minute', 0))
         date_str   = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
-        types      = request.args.get('types', 'cafe,park,bench,bar,restaurant').split(',')
+        types      = request.args.get('types', 'cafe,bar,restaurant').split(',')
 
-        tz   = pytz.timezone('Europe/Vienna')
-        date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        t    = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
+        tz        = pytz.timezone('Europe/Vienna')
+        date      = datetime.strptime(date_str, '%Y-%m-%d').date()
+        t         = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
         elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
 
-        # Cache key — round bbox to ~200m grid
-        def _r(v): return round(v, 2)
-        cache_key = (_r(min_lat), _r(min_lon), _r(max_lat), _r(max_lon), tuple(sorted(types)))
-        if cache_key not in _poi_cache:
-            _poi_cache[cache_key] = _fetch_pois_overpass(min_lat, min_lon, max_lat, max_lon, types)
-            # Keep cache small
-            if len(_poi_cache) > 50:
-                _poi_cache.pop(next(iter(_poi_cache)))
+        # Types covered by city DB vs. must use Overpass (bench = too many for city-wide)
+        _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'bench'}
+        min_lat, min_lon, max_lat, max_lon = _CITY_BBOX
+        in_city = (min_lat <= center_lat <= max_lat and min_lon <= center_lon <= max_lon)
 
-        pois = _poi_cache[cache_key]
+        type_set = set(types)
+        city_types     = type_set & _CITY_DB_TYPES
+        overpass_types = type_set - _CITY_DB_TYPES  # e.g. bench
 
-        # Sort by distance first, cap at 100 candidates to keep response fast
-        pois_with_dist = sorted(
-            pois,
+        candidates = []
+
+        # City DB path for supported types
+        if _city_pois_ready and in_city and city_types:
+            R    = 650 / 111320
+            Rlon = R / max(0.3, math.cos(math.radians(center_lat)))
+            candidates += [
+                p for p in _city_pois
+                if p['poi_type'] in city_types
+                and abs(p['lat'] - center_lat) < R
+                and abs(p['lon'] - center_lon) < Rlon
+            ]
+        elif city_types:
+            cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
+            if cache_key not in _poi_cache:
+                _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
+                if len(_poi_cache) > 50:
+                    _poi_cache.pop(next(iter(_poi_cache)))
+            candidates += _poi_cache[cache_key]
+
+        # Overpass path for bench (and any other non-city types)
+        if overpass_types:
+            cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(overpass_types)))
+            if cache_key not in _poi_cache:
+                _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
+                if len(_poi_cache) > 50:
+                    _poi_cache.pop(next(iter(_poi_cache)))
+            candidates += _poi_cache[cache_key]
+
+        # Sort by distance, shadow-check each, return first 20 sunny ones
+        candidates = sorted(
+            candidates,
             key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2
-        )[:100]
+        )[:150]
 
         results = []
-        for p in pois_with_dist:
-            in_shadow = _point_in_shadow(p['lon'], p['lat'], elevation, azimuth)
-            if in_shadow or elevation <= 0:
+        for p in candidates:
+            if elevation <= 0 or _point_in_shadow(p['lon'], p['lat'], elevation, azimuth):
                 continue
             dist = int(((p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)**0.5 * 111320)
-            # Rough sun hours: check each hour of the day
-            sun_hours = 0
-            for h in range(24):
-                th = tz.localize(datetime(date.year, date.month, date.day, h, 0))
-                el, az = get_sun_angles(p['lat'], p['lon'], th)
-                if el > 0 and not _point_in_shadow(p['lon'], p['lat'], el, az):
-                    sun_hours += 1
             results.append({
                 'lat': p['lat'], 'lon': p['lon'],
                 'name': p['name'], 'amenity': p['amenity'],
-                'dist': dist, 'sun_hours': sun_hours,
+                'dist': dist,
             })
+            if len(results) == 20:
+                break
 
-        results.sort(key=lambda x: x['dist'])
-        return jsonify(results[:20])
+        return jsonify(results)
+    except RuntimeError as e:
+        # Overpass failure — return empty list so client shows "no results" gracefully
+        print(f'[sunny_pois] {e}')
+        return jsonify([])
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 
