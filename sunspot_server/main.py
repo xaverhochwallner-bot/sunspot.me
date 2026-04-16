@@ -31,7 +31,7 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 # Stores sunlit_filtered geometry; viewport overlay is recomputed cheaply on hit
 # ---------------------------------------------------------------------------
 _shadow_cache = {}
-MAX_CACHE     = 2000
+MAX_CACHE     = 10000
 
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
@@ -1756,6 +1756,20 @@ if not os.path.exists(CACHE_PATH) and _pbf is None:
     _download_pbf(PBF_PATH)
     _pbf = PBF_PATH
 load_buildings(_pbf)
+
+def _startup_prewarm():
+    tz  = pytz.timezone("Europe/Vienna")
+    now = datetime.now(tz)
+    if now.hour < 6 or now.hour > 20:
+        print("[startup] Nighttime — skipping pre-warm.")
+        return
+    lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
+    print(f"[startup] Pre-warming Vienna center z12-14 for hour {now.hour} ...")
+    for zoom, vp_w, vp_h in [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04)]:
+        _compute_shadow_cached(now.hour, now.month, now.day, lat, lon, zoom, vp_w, vp_h)
+    print("[startup] Pre-warm complete.")
+
+threading.Thread(target=_startup_prewarm, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
