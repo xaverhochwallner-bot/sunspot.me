@@ -99,6 +99,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _findingSunnySpots    = false;
   List<Offset>               _sunnySpotScreenPos   = [];
   List<Offset>               _tourMarkerScreenPos  = [];
+  List<Offset>               _poiScreenPos         = [];
 
   // Places (POI) mode
   bool                       _placesMode        = false;
@@ -263,6 +264,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentCenter = center;
     if (_sunnySpots.isNotEmpty) _refreshSunnySpotPositions();
     if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
+    if (_sunnyPois.isNotEmpty) _refreshPoiPositions();
     _debounceTimer?.cancel();
     if (_heatmapMode) {
       _debounceTimer = Timer(const Duration(milliseconds: 600), () {
@@ -524,7 +526,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _findSunnyPois() async {
     final ctrl = _mapController;
     if (ctrl == null || !_mapReady || _poiFilters.isEmpty) return;
-    setState(() { _loadingPois = true; _sunnyPois = []; });
+    setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; });
     try {
       final bounds  = await ctrl.getVisibleRegion();
       final d       = _selectedDate;
@@ -546,6 +548,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final pois = data.cast<Map<String, dynamic>>();
           setState(() => _sunnyPois = pois);
           await _showPoiMarkers(pois);
+          await _refreshPoiPositions();
         }
       } else if (mounted) {
         _showError('Server error ${resp.statusCode}: ${resp.body}');
@@ -609,6 +612,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
     if (mounted) setState(() {
       _tourMarkerScreenPos = pts.map((p) => Offset(p.x.toDouble(), p.y.toDouble())).toList();
+    });
+  }
+
+  Future<void> _refreshPoiPositions() async {
+    final ctrl = _mapController;
+    if (ctrl == null || _sunnyPois.isEmpty) return;
+    final pts = await Future.wait(
+      _sunnyPois.map((s) => ctrl.toScreenLocation(LatLng(s['lat'] as double, s['lon'] as double))),
+    );
+    if (mounted) setState(() {
+      _poiScreenPos = pts.map((p) => Offset(p.x.toDouble(), p.y.toDouble())).toList();
     });
   }
 
@@ -1780,6 +1794,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     fontWeight: FontWeight.bold, height: 1)),
             )),
             ..._tourMarkerScreenPos.asMap().entries.map((e) => Positioned(
+              left: e.value.dx - 5,
+              top: e.value.dy - 6,
+              child: Text('${e.key + 1}',
+                style: const TextStyle(color: Colors.white, fontSize: 11,
+                    fontWeight: FontWeight.bold, height: 1)),
+            )),
+            ..._poiScreenPos.asMap().entries.map((e) => Positioned(
               left: e.value.dx - 5,
               top: e.value.dy - 6,
               child: Text('${e.key + 1}',
