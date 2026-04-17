@@ -104,13 +104,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Places (POI) mode
   bool                       _placesMode        = false;
-  String                     _poiFilter         = 'cafe'; // single active: 'cafe', 'bar', 'restaurant'
   List<Map<String, dynamic>> _sunnyPois         = [];
   bool                       _loadingPois       = false;
   bool                       _poiMarkersReady   = false;
 
-  // Spots tab — optional park/square overlay
-  String                     _spotMode          = 'spots'; // 'spots', 'park', 'square'
   bool                       _spotsZoomHint     = false;
 
   // Weather overlay
@@ -394,62 +391,66 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final min    = ((_hour * 60).toInt() % 60);
       final date   = _selectedDate;
 
-      final uri = Uri.parse(
-        '$flaskBaseUrl/find_sunny_spots'
-        '?lat=${_currentCenter.latitude}'
-        '&lon=${_currentCenter.longitude}'
-        '&hour=$h&minute=$min'
-        '&month=${date.month}&day=${date.day}'
-        '&zoom=${zoom.round()}'
-        '&minLat=${bounds.southwest.latitude}'
-        '&minLon=${bounds.southwest.longitude}'
-        '&maxLat=${bounds.northeast.latitude}'
-        '&maxLon=${bounds.northeast.longitude}'
-        '&n=8',
-      );
+      final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+      final vpParams =
+          '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
+          '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
+          '&zoom=${zoom.round()}';
+      final centerParams =
+          '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}';
 
-      final response = await http.get(uri).timeout(const Duration(seconds: 30));
-      final data     = jsonDecode(response.body) as Map<String, dynamic>;
-      final spots    = (data['spots'] as List<dynamic>? ?? [])
-          .map((s) => <String, dynamic>{
-                'lat':            (s['lat']  as num).toDouble(),
-                'lon':            (s['lon']  as num).toDouble(),
-                'sun_hours_left': (s['sun_hours_left'] as num?)?.toInt() ?? 0,
-                'sun_until':      s['sun_until'] as int?,
-              })
-          .toList();
+      // Run grid spots + parks + squares in parallel
+      final spotsUri  = Uri.parse('$flaskBaseUrl/find_sunny_spots$centerParams'
+          '&hour=$h&minute=$min&month=${date.month}&day=${date.day}'
+          '&zoom=${zoom.round()}$vpParams&n=3');
+      final parksUri  = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
+          '&hour=$h&minute=$min&date=$dateStr&types=park');
+      final squaresUri = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
+          '&hour=$h&minute=$min&date=$dateStr&types=square');
 
-      // Show POI results for park/square modes, grid spots for 'spots' mode
-      List<Map<String, dynamic>> allSpots = _spotMode == 'spots' ? spots : [];
-      if (_spotMode != 'spots') {
+      final results = await Future.wait([
+        http.get(spotsUri).timeout(const Duration(seconds: 30)),
+        http.get(parksUri).timeout(const Duration(seconds: 30)),
+        http.get(squaresUri).timeout(const Duration(seconds: 30)),
+      ]);
+
+      List<Map<String, dynamic>> parsePois(http.Response resp, String category) {
         try {
-          final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-          final poiUri = Uri.parse(
-            '$flaskBaseUrl/sunny_pois'
-            '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
-            '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
-            '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-            '&hour=$h&minute=$min&date=$dateStr&types=$_spotMode'
-            '&zoom=${zoom.round()}',
-          );
-          final poiResp = await http.get(poiUri);
-          final poiData = jsonDecode(poiResp.body) as Map<String, dynamic>;
-          final reason  = poiData['reason'] as String?;
-          if (reason == 'zoom_in') {
-            setState(() => _spotsZoomHint = true);
-          } else {
-            setState(() => _spotsZoomHint = false);
-            final list = poiData['spots'] as List<dynamic>? ?? [];
-            allSpots = list.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
-              'lat': p['lat'], 'lon': p['lon'],
-              'sun_hours_left': p['sun_hours'] as int? ?? 0,
-              'sun_until': p['sun_until'] as int?,
-              '_poi_name': p['name'] as String? ?? '',
-              '_poi_amenity': p['amenity'] as String? ?? '',
-            }).toList();
-          }
-        } catch (_) {}
+          final d = jsonDecode(resp.body) as Map<String, dynamic>;
+          if (d['reason'] == 'zoom_in') return [];
+          return (d['spots'] as List<dynamic>? ?? []).cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
+            'lat': (p['lat'] as num).toDouble(),
+            'lon': (p['lon'] as num).toDouble(),
+            'sun_hours_left': p['sun_hours'] as int? ?? (p['sun_hours_left'] as int? ?? 0),
+            'sun_until': p['sun_until'] as int?,
+            '_poi_name': p['name'] as String? ?? '',
+            '_poi_amenity': p['amenity'] as String? ?? '',
+            '_category': category,
+          }).take(3).toList();
+        } catch (_) { return []; }
       }
+
+      final gridData = jsonDecode(results[0].body) as Map<String, dynamic>;
+      final gridSpots = (gridData['spots'] as List<dynamic>? ?? []).map((s) => <String, dynamic>{
+        'lat':            (s['lat']  as num).toDouble(),
+        'lon':            (s['lon']  as num).toDouble(),
+        'sun_hours_left': (s['sun_hours_left'] as num?)?.toInt() ?? 0,
+        'sun_until':      s['sun_until'] as int?,
+        '_category':      'spot',
+      }).take(3).toList();
+
+      final parks   = parsePois(results[1], 'park');
+      final squares = parsePois(results[2], 'square');
+
+      final zoomIn = parks.isEmpty && squares.isEmpty &&
+          (jsonDecode(results[1].body) as Map<String, dynamic>)['reason'] == 'zoom_in';
+      setState(() => _spotsZoomHint = zoomIn);
+
+      // Merge all, sort by sun hours desc, cap at 8
+      final merged = [...gridSpots, ...parks, ...squares];
+      merged.sort((a, b) => ((b['sun_hours_left'] as int?) ?? 0)
+          .compareTo((a['sun_hours_left'] as int?) ?? 0));
+      final allSpots = merged.take(8).toList();
 
       setState(() => _sunnySpots = allSpots);
       _geocodeSpots(allSpots);
@@ -536,7 +537,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
       final h       = _hour.toInt();
       final min     = ((_hour * 60).toInt() % 60);
-      final types   = _poiFilter;
+      final types   = 'terrace';
       final zoom    = ctrl.cameraPosition?.zoom ?? 15.0;
       final uri = Uri.parse(
         '$flaskBaseUrl/sunny_pois'
@@ -2933,12 +2934,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return '${(meters / 1000).toStringAsFixed(1)} km';
   }
 
-  // ---- POI type definitions ----
-  static const _poiTypes = [
-    ('cafe',       Icons.local_cafe,   'Café'),
-    ('bar',        Icons.sports_bar,   'Bar'),
-    ('restaurant', Icons.restaurant,   'Food'),
-  ];
 
   IconData _poiIcon(String amenity) {
     if (amenity.contains('cafe'))        return Icons.local_cafe;
@@ -2994,41 +2989,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         modeToggle,
         const SizedBox(height: 10),
-        // Spot mode chips — radio style (exactly one selected)
-        Row(children: [
-          for (final t in [
-            ('spots', Icons.wb_sunny, 'Spots'),
-            ('park',  Icons.park,     'Parks'),
-            ('square', Icons.location_city, 'Squares'),
-          ])
-            Padding(
-              padding: const EdgeInsets.only(right: 6),
-              child: GestureDetector(
-                onTap: () {
-                  if (_spotMode == t.$1) return;
-                  setState(() { _spotMode = t.$1; _spotsZoomHint = false; });
-                  _clearSunnySpots();
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: _spotMode == t.$1 ? Colors.orange : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: _spotMode == t.$1
-                        ? Colors.orange : Colors.grey.shade300),
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(t.$2, size: 13,
-                        color: _spotMode == t.$1 ? Colors.white : Colors.grey.shade600),
-                    const SizedBox(width: 4),
-                    Text(t.$3, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                        color: _spotMode == t.$1 ? Colors.white : Colors.grey.shade600)),
-                  ]),
-                ),
-              ),
-            ),
-        ]),
-        const SizedBox(height: 8),
         Row(children: [
           Expanded(
             child: ElevatedButton.icon(
@@ -3084,14 +3044,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final poiName  = (spot['_poi_name'] as String? ?? '');
             final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
             final isSaved  = _savedSpots.any((s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
-            final poiAmenity = spot['_poi_amenity'] as String? ?? '';
-            final typeTag = poiAmenity.isNotEmpty ? ' · ${_poiTypeLabel(poiAmenity)}' : ' · ☀️ Spot';
+            final category = spot['_category'] as String? ?? 'spot';
+            final (catIcon, catLabel, catColor) = switch (category) {
+              'park'   => (Icons.park,          'Park',   const Color(0xFF4CAF50)),
+              'square' => (Icons.location_city, 'Square', const Color(0xFF7B61FF)),
+              _        => (Icons.wb_sunny,      'Spot',   const Color(0xFFFF9800)),
+            };
             return _spotCard(
               circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
               circleColor: const Color(0xFFFFD700),
               address: address,
               distLabel: distLbl,
-              sunLabel: untilLbl != null ? '$sunH h · $untilLbl$typeTag' : '$sunH h left$typeTag',
+              sunLabel: untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left',
+              categoryIcon: catIcon,
+              categoryLabel: catLabel,
+              categoryColor: catColor,
               isSaved: isSaved,
               onTap: () => _showSpotSheet(spot, idx),
             );
@@ -3104,35 +3071,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       modeToggle,
       const SizedBox(height: 10),
-      // Filter chips — radio style (one active at a time)
-      Wrap(spacing: 6, runSpacing: 6, children: _poiTypes.map((t) {
-        final id     = t.$1;
-        final icon   = t.$2;
-        final label  = t.$3;
-        final active = _poiFilter == id;
-        return GestureDetector(
-          onTap: () {
-            if (_poiFilter == id) return;
-            setState(() { _poiFilter = id; _sunnyPois = []; });
-            _clearPoiMarkers();
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: active ? Colors.orange : Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: active ? Colors.orange : Colors.grey.shade300),
-            ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(icon, size: 13, color: active ? Colors.white : Colors.grey.shade600),
-              const SizedBox(width: 4),
-              Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                  color: active ? Colors.white : Colors.grey.shade600)),
-            ]),
-          ),
-        );
-      }).toList()),
-      const SizedBox(height: 10),
       Row(children: [
         Expanded(
           child: ElevatedButton.icon(
@@ -3140,8 +3078,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             icon: _loadingPois
                 ? const SizedBox(width: 14, height: 14,
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                : const Icon(Icons.place, size: 16),
-            label: Text(_loadingPois ? 'Searching...' : 'Find sunny places'),
+                : const Icon(Icons.wb_sunny, size: 16),
+            label: Text(_loadingPois ? 'Searching...' : 'Find sunny terraces'),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.orange,
               foregroundColor: Colors.white,
@@ -3225,6 +3163,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     required String sunLabel,
     required bool isSaved,
     required VoidCallback onTap,
+    IconData? categoryIcon,
+    String? categoryLabel,
+    Color? categoryColor,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -3265,7 +3206,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ]),
                 ]),
               ),
-              if (isSaved) Icon(Icons.favorite, size: 14, color: Colors.red.shade300),
+              if (categoryIcon != null) ...[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: (categoryColor ?? Colors.orange).withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(categoryIcon, size: 10, color: categoryColor ?? Colors.orange),
+                    const SizedBox(width: 3),
+                    Text(categoryLabel ?? '', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: categoryColor ?? Colors.orange)),
+                  ]),
+                ),
+              ],
+              if (isSaved) ...[const SizedBox(width: 4), Icon(Icons.favorite, size: 14, color: Colors.red.shade300)],
               const SizedBox(width: 4),
               Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
             ]),

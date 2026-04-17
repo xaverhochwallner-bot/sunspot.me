@@ -1173,7 +1173,7 @@ _CITY_BBOX       = (48.08, 16.10, 48.35, 16.62)  # Vienna bounds
 _CITY_POI_AMENITY_TO_TYPE = {
     'cafe': 'cafe', 'bar': 'bar', 'pub': 'bar', 'beer_garden': 'bar',
     'restaurant': 'restaurant', 'fast_food': 'restaurant',
-    'bench': 'bench',
+    'terrace': 'terrace',
     'park': 'park', 'garden': 'park', 'nature_reserve': 'park',
     'playground': 'playground', 'pitch': 'playground',
     'square': 'square', 'pedestrian': 'square',
@@ -1222,21 +1222,27 @@ def _load_city_pois():
         f'  way["place"="square"]({bbox});\n'
         ');\nout center;'
     )
+    q_terraces = (
+        '[out:json][timeout:60];\n(\n'
+        f'  node["amenity"~"^(cafe|bar|pub|restaurant|fast_food|beer_garden)$"]["outdoor_seating"="yes"]({bbox});\n'
+        ');\nout;'
+    )
 
     print('[poi] Loading city-wide POI database...')
     from concurrent.futures import ThreadPoolExecutor
     try:
-        with ThreadPoolExecutor(max_workers=3) as ex:
+        with ThreadPoolExecutor(max_workers=4) as ex:
             f1 = ex.submit(_overpass_fetch, q_amenity, 70)
             f2 = ex.submit(_overpass_fetch, q_parks, 70)
             f3 = ex.submit(_overpass_fetch, q_squares, 70)
-            r1, r2, r3 = f1.result(), f2.result(), f3.result()
+            f4 = ex.submit(_overpass_fetch, q_terraces, 70)
+            r1, r2, r3, r4 = f1.result(), f2.result(), f3.result(), f4.result()
     except Exception as e:
         print(f'[poi] Failed to load city POIs: {e}')
         return
 
     pois = []
-    for result in (r1, r2, r3):
+    for result in (r1, r2, r3, r4):
         for el in result.get('elements', []):
             plat = el.get('lat') or (el.get('center') or {}).get('lat')
             plon = el.get('lon') or (el.get('center') or {}).get('lon')
@@ -1244,7 +1250,12 @@ def _load_city_pois():
                 continue
             tags     = el.get('tags', {})
             amenity  = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
-            poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity)
+            # outdoor_seating=yes overrides poi_type to 'terrace' regardless of amenity
+            if tags.get('outdoor_seating') == 'yes' and amenity in (
+                    'cafe', 'bar', 'pub', 'restaurant', 'fast_food', 'beer_garden'):
+                poi_type = 'terrace'
+            else:
+                poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity)
             if poi_type is None:
                 continue
             pois.append({
@@ -1285,6 +1296,10 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
             type_queries += [
                 f'node["place"="square"]({ar});',
                 f'way["place"="square"]({ar});',
+            ]
+        elif t == 'terrace':
+            type_queries += [
+                f'node["amenity"~"^(cafe|bar|pub|restaurant|fast_food|beer_garden)$"]["outdoor_seating"="yes"]({ar});',
             ]
     query = '[out:json][timeout:15];\n(\n' + '\n'.join(type_queries) + '\n);\nout center 100;'
     result = _overpass_fetch(query, timeout=20)
@@ -1344,7 +1359,7 @@ def sunny_pois():
         s_min_lon = max(vp_min_lon, center_lon - Rlon) if vp_min_lon is not None else center_lon - Rlon
         s_max_lon = min(vp_max_lon, center_lon + Rlon) if vp_max_lon is not None else center_lon + Rlon
 
-        _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square'}
+        _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square', 'terrace'}
         cb_min_lat, cb_min_lon, cb_max_lat, cb_max_lon = _CITY_BBOX
         in_city = (cb_min_lat <= center_lat <= cb_max_lat and cb_min_lon <= center_lon <= cb_max_lon)
 
