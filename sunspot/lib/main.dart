@@ -480,13 +480,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null) return;
 
-    final features = spots.asMap().entries.map((e) => {
-      'type': 'Feature',
-      'geometry': {
-        'type': 'Point',
-        'coordinates': [e.value['lon'], e.value['lat']],
-      },
-      'properties': {'index': e.key + 1},
+    final features = spots.asMap().entries.map((e) {
+      final s = e.value;
+      final currentlySunny = (s['sun_until'] != null) ? 1 : 0;
+      return {
+        'type': 'Feature',
+        'geometry': {'type': 'Point', 'coordinates': [s['lon'], s['lat']]},
+        'properties': {'index': e.key + 1, 'currently_sunny': currentlySunny},
+      };
     }).toList();
 
     final geoJson = {'type': 'FeatureCollection', 'features': features};
@@ -499,8 +500,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         'sunny-spots', 'sunny-spots-glow',
         CircleLayerProperties(
           circleRadius: 20,
-          circleColor: '#FFD700',
-          circleOpacity: 0.25,
+          circleColor: ['case', ['==', ['get', 'currently_sunny'], 1], '#FFD700', '#999999'],
+          circleOpacity: 0.2,
           circleStrokeWidth: 0,
         ),
         enableInteraction: false,
@@ -509,7 +510,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         'sunny-spots', 'sunny-spots-dot',
         CircleLayerProperties(
           circleRadius: 8,
-          circleColor: '#FFD700',
+          circleColor: ['case', ['==', ['get', 'currently_sunny'], 1], '#FFD700', '#AAAAAA'],
           circleOpacity: 1.0,
           circleStrokeWidth: 2,
           circleStrokeColor: '#FFFFFF',
@@ -969,10 +970,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     ),
                   ),
                 ]),
-                // Name
-                Text(address,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                // Number circle + name
+                Row(children: [
+                  Container(
+                    width: 26, height: 26,
+                    margin: const EdgeInsets.only(right: 10),
+                    decoration: const BoxDecoration(color: Color(0xFFFFD700), shape: BoxShape.circle),
+                    child: Center(
+                      child: Text('${idx + 1}',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(address,
+                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ),
+                ]),
                 const SizedBox(height: 4),
                 // Subtitle: distance · sun · category
                 Row(children: [
