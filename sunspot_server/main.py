@@ -1182,19 +1182,22 @@ _city_pois: list[dict] = []   # [{lat, lon, name, amenity, poi_type}]
 _city_pois_ready = False
 
 def _overpass_fetch(query, timeout=25):
-    import urllib.request, urllib.parse
+    import urllib.request, urllib.parse, time as _time
     data = urllib.parse.urlencode({'data': query}).encode()
-    for url in [
+    endpoints = [
         'https://overpass-api.de/api/interpreter',
         'https://overpass.kumi.systems/api/interpreter',
         'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
-    ]:
+    ]
+    for attempt, url in enumerate(endpoints):
         try:
             req = urllib.request.Request(url, data=data,
                   headers={'User-Agent': 'Sunspot.me/1.0'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
         except Exception:
+            if attempt < len(endpoints) - 1:
+                _time.sleep(3)  # brief pause before trying next endpoint
             continue
     raise RuntimeError('All Overpass endpoints failed')
 
@@ -1229,17 +1232,24 @@ def _load_city_pois():
     )
 
     print('[poi] Loading city-wide POI database...')
-    from concurrent.futures import ThreadPoolExecutor
-    try:
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            f1 = ex.submit(_overpass_fetch, q_amenity, 70)
-            f2 = ex.submit(_overpass_fetch, q_parks, 70)
-            f3 = ex.submit(_overpass_fetch, q_squares, 70)
-            f4 = ex.submit(_overpass_fetch, q_terraces, 70)
-            r1, r2, r3, r4 = f1.result(), f2.result(), f3.result(), f4.result()
-    except Exception as e:
-        print(f'[poi] Failed to load city POIs: {e}')
-        return
+    import time
+    results = []
+    for i, (label, q) in enumerate([
+        ('amenity', q_amenity),
+        ('parks',   q_parks),
+        ('squares', q_squares),
+        ('terraces', q_terraces),
+    ]):
+        if i > 0:
+            time.sleep(2)  # avoid rate-limiting consecutive requests
+        try:
+            results.append(_overpass_fetch(q, 70))
+            print(f'[poi]   {label}: ok')
+        except Exception as e:
+            print(f'[poi]   {label}: failed ({e}), skipping')
+            results.append({'elements': []})
+
+    r1, r2, r3, r4 = results
 
     pois = []
     for result in (r1, r2, r3, r4):
