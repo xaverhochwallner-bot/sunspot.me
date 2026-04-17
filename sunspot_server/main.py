@@ -1837,8 +1837,8 @@ def heatmap():
         max_lon = float(request.args['maxLon'])
         month   = int(request.args['month'])
         day     = int(request.args['day'])
-        # Cap zoom at 13 — heatmap is a day-wide view, fine detail not needed
-        zoom    = min(int(request.args.get('zoom', 12)), 13)
+        # Cap zoom at 12 — fewer buildings, faster computation
+        zoom    = min(int(request.args.get('zoom', 12)), 12)
     except (KeyError, ValueError) as e:
         return jsonify({'error': str(e)}), 400
 
@@ -1851,10 +1851,11 @@ def heatmap():
     if sr is None or ss is None:
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
-    # Sample every 2 hours through the day
-    hours = [h for h in range(int(sr) + 1, int(ss) + 1, 2)]
+    # Fixed 3 sample hours: morning / noon / afternoon — fast enough for a single request
+    candidate_hours = [9, 12, 15]
+    hours = [h for h in candidate_hours if sr < h < ss]
     if not hours:
-        return jsonify({'type': 'FeatureCollection', 'features': []})
+        hours = [int((sr + ss) / 2)]  # fallback: solar noon
 
     compute_bbox  = shapely_box(min_lon, min_lat, max_lon, max_lat)
     min_bld_area  = _min_building_area(zoom)

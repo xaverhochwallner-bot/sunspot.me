@@ -856,7 +856,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&month=${date.month}&day=${date.day}'
         '&zoom=${zoom.round()}',
       );
-      final res = await http.get(uri).timeout(const Duration(seconds: 30));
+      final res = await http.get(uri).timeout(const Duration(seconds: 90));
       if (res.statusCode != 200 || !mounted || !_heatmapMode) return;
       final geojson = jsonDecode(res.body) as Map<String, dynamic>;
       await _showHeatmapLayers(geojson);
@@ -889,12 +889,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await ctrl.addGeoJsonSource('heatmap-sometimes-src', sometimes);
       await ctrl.addFillLayer(
         'heatmap-sometimes-src', 'heatmap-sometimes',
-        FillLayerProperties(fillColor: '#FFEB3B', fillOpacity: 0.35),
+        FillLayerProperties(fillColor: '#FFD700', fillOpacity: 0.55),
       );
       await ctrl.addGeoJsonSource('heatmap-always-src', always);
       await ctrl.addFillLayer(
         'heatmap-always-src', 'heatmap-always',
-        FillLayerProperties(fillColor: '#FF8C00', fillOpacity: 0.55),
+        FillLayerProperties(fillColor: '#FF8C00', fillOpacity: 0.75),
       );
       _heatmapLayerReady = true;
     } else {
