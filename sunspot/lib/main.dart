@@ -3209,15 +3209,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               if (categoryIcon != null) ...[
                 const SizedBox(width: 6),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                   decoration: BoxDecoration(
-                    color: (categoryColor ?? Colors.orange).withOpacity(0.12),
-                    borderRadius: BorderRadius.circular(10),
+                    color: categoryColor ?? Colors.orange,
+                    borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(categoryIcon, size: 10, color: categoryColor ?? Colors.orange),
+                    Icon(categoryIcon, size: 11, color: Colors.white),
                     const SizedBox(width: 3),
-                    Text(categoryLabel ?? '', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: categoryColor ?? Colors.orange)),
+                    Text(categoryLabel ?? '', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.white)),
                   ]),
                 ),
               ],

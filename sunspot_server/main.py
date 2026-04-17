@@ -1201,12 +1201,50 @@ def _overpass_fetch(query, timeout=25):
             continue
     raise RuntimeError('All Overpass endpoints failed')
 
+_CITY_POI_CACHE_FILE = os.path.join(os.path.dirname(__file__), 'city_pois_cache.json')
+
+def _parse_overpass_pois(results):
+    pois = []
+    for result in results:
+        for el in result.get('elements', []):
+            plat = el.get('lat') or (el.get('center') or {}).get('lat')
+            plon = el.get('lon') or (el.get('center') or {}).get('lon')
+            if plat is None or plon is None:
+                continue
+            tags    = el.get('tags', {})
+            amenity = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
+            if tags.get('outdoor_seating') == 'yes' and amenity in (
+                    'cafe', 'bar', 'pub', 'restaurant', 'fast_food', 'beer_garden'):
+                poi_type = 'terrace'
+            else:
+                poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity)
+            if poi_type is None:
+                continue
+            pois.append({
+                'lat': plat, 'lon': plon,
+                'name': tags.get('name', ''),
+                'amenity': amenity, 'poi_type': poi_type,
+            })
+    return pois
+
 def _load_city_pois():
     global _city_pois, _city_pois_ready
+
+    # Fast path: load from disk cache
+    if os.path.exists(_CITY_POI_CACHE_FILE):
+        try:
+            with open(_CITY_POI_CACHE_FILE, 'r', encoding='utf-8') as f:
+                cached = json.load(f)
+            _city_pois = cached
+            _city_pois_ready = True
+            print(f'[poi] City POI database loaded from cache: {len(_city_pois)} entries')
+            return
+        except Exception as e:
+            print(f'[poi] Cache load failed ({e}), fetching from Overpass...')
+
     min_lat, min_lon, max_lat, max_lon = _CITY_BBOX
     bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
 
-    # Three parallel queries covering all POI categories
     q_amenity = (
         '[out:json][timeout:60];\n(\n'
         f'  node["amenity"~"^(cafe|bar|pub|restaurant|fast_food)$"]({bbox});\n'
@@ -1231,7 +1269,7 @@ def _load_city_pois():
         ');\nout;'
     )
 
-    print('[poi] Loading city-wide POI database...')
+    print('[poi] Loading city-wide POI database from Overpass...')
     import time
     results = []
     for i, (label, q) in enumerate([
@@ -1241,7 +1279,7 @@ def _load_city_pois():
         ('terraces', q_terraces),
     ]):
         if i > 0:
-            time.sleep(2)  # avoid rate-limiting consecutive requests
+            time.sleep(2)
         try:
             results.append(_overpass_fetch(q, 70))
             print(f'[poi]   {label}: ok')
@@ -1249,30 +1287,16 @@ def _load_city_pois():
             print(f'[poi]   {label}: failed ({e}), skipping')
             results.append({'elements': []})
 
-    r1, r2, r3, r4 = results
+    pois = _parse_overpass_pois(results)
 
-    pois = []
-    for result in (r1, r2, r3, r4):
-        for el in result.get('elements', []):
-            plat = el.get('lat') or (el.get('center') or {}).get('lat')
-            plon = el.get('lon') or (el.get('center') or {}).get('lon')
-            if plat is None or plon is None:
-                continue
-            tags     = el.get('tags', {})
-            amenity  = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
-            # outdoor_seating=yes overrides poi_type to 'terrace' regardless of amenity
-            if tags.get('outdoor_seating') == 'yes' and amenity in (
-                    'cafe', 'bar', 'pub', 'restaurant', 'fast_food', 'beer_garden'):
-                poi_type = 'terrace'
-            else:
-                poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity)
-            if poi_type is None:
-                continue
-            pois.append({
-                'lat': plat, 'lon': plon,
-                'name': tags.get('name', ''),
-                'amenity': amenity, 'poi_type': poi_type,
-            })
+    # Save to disk cache for next startup
+    try:
+        with open(_CITY_POI_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(pois, f)
+        print(f'[poi] Cache saved ({len(pois)} entries → {_CITY_POI_CACHE_FILE})')
+    except Exception as e:
+        print(f'[poi] Cache save failed: {e}')
+
     _city_pois = pois
     _city_pois_ready = True
     print(f'[poi] City POI database ready: {len(pois)} entries')
@@ -1380,12 +1404,20 @@ def sunny_pois():
         candidates = []
 
         if _city_pois_ready and in_city and city_types:
-            candidates += [
+            from_db = [
                 p for p in _city_pois
                 if p['poi_type'] in city_types
                 and s_min_lat <= p['lat'] <= s_max_lat
                 and s_min_lon <= p['lon'] <= s_max_lon
             ]
+            candidates += from_db
+            # If city DB has 0 for this type (e.g. query failed at startup), fall through to Overpass
+            if not from_db:
+                try:
+                    candidates += [p for p in _fetch_pois_overpass(center_lat, center_lon, list(city_types))
+                                   if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
+                except Exception:
+                    pass
         elif city_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
             if cache_key not in _poi_cache:
