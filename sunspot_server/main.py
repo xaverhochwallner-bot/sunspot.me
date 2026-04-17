@@ -1356,23 +1356,57 @@ def sunny_pois():
                     _poi_cache.pop(next(iter(_poi_cache)))
             candidates += _poi_cache[cache_key]
 
-        # Sort by distance, shadow-check each, return first 20 sunny ones
+        # Sort by distance, shadow-check each, return first 8 sunny ones
         candidates = sorted(
             candidates,
             key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2
         )[:150]
+
+        def _poi_sun_hours(plat, plon):
+            from shapely.geometry import Point as SPoint
+            current_hour = t.hour
+            sun_hours = []
+            for h in range(current_hour, 24):
+                ck_h = _cache_key(h, date.month, date.day, center_lat, center_lon, 15)
+                if ck_h in _shadow_cache:
+                    try:
+                        in_sun = _shadow_cache[ck_h].contains(SPoint(plon, plat))
+                    except Exception:
+                        in_sun = False
+                else:
+                    th = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
+                    el, az = get_sun_angles(plat, plon, th)
+                    in_sun = el > 0 and not _point_in_shadow(plon, plat, el, az)
+                if in_sun:
+                    sun_hours.append(h)
+            sun_hours_left = len(sun_hours)
+            sun_until = None
+            if sun_hours and current_hour in sun_hours:
+                last_h = current_hour
+                for h in sun_hours:
+                    if h <= last_h + 1:
+                        last_h = h
+                    else:
+                        break
+                sun_until = last_h + 1
+            return sun_hours_left, sun_until
 
         results = []
         for p in candidates:
             if elevation <= 0 or _point_in_shadow(p['lon'], p['lat'], elevation, azimuth):
                 continue
             dist = int(((p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)**0.5 * 111320)
-            results.append({
+            sun_hours_left, sun_until = _poi_sun_hours(p['lat'], p['lon'])
+            entry = {
                 'lat': p['lat'], 'lon': p['lon'],
                 'name': p['name'], 'amenity': p['amenity'],
                 'dist': dist,
-            })
-            if len(results) == 20:
+                'sun_hours': sun_hours_left,
+            }
+            if sun_until is not None:
+                entry['sun_until'] = sun_until
+            results.append(entry)
+            if len(results) == 8:
                 break
 
         return jsonify(results)

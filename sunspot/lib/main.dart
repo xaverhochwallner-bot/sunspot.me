@@ -71,6 +71,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Panel
   bool _panelOpen = true;
+  bool _panelExpanded = false;
 
   // Live mode
   bool   _liveMode  = false;
@@ -103,13 +104,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Places (POI) mode
   bool                       _placesMode        = false;
-  Set<String>                _poiFilters        = {'cafe', 'bar', 'restaurant'};
+  String                     _poiFilter         = 'cafe'; // single active: 'cafe', 'bar', 'restaurant'
   List<Map<String, dynamic>> _sunnyPois         = [];
   bool                       _loadingPois       = false;
   bool                       _poiMarkersReady   = false;
 
   // Spots tab — optional park/bench overlay
-  Set<String>                _spotPoiAddons     = {}; // 'park' and/or 'bench'
+  String                     _spotMode          = 'spots'; // 'spots', 'park', 'bench'
 
   // Weather overlay
   Map<String, dynamic>? _weatherData;
@@ -417,10 +418,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               })
           .toList();
 
-      // Merge park/bench POIs if add-ons are toggled
-      // When addons active, always show only POI results (never grid spots)
-      List<Map<String, dynamic>> allSpots = _spotPoiAddons.isEmpty ? spots : [];
-      if (_spotPoiAddons.isNotEmpty) {
+      // Show POI results for park/bench modes, grid spots for 'spots' mode
+      List<Map<String, dynamic>> allSpots = _spotMode == 'spots' ? spots : [];
+      if (_spotMode != 'spots') {
         try {
           final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
           final poiUri = Uri.parse(
@@ -428,7 +428,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
             '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
             '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-            '&hour=$h&minute=$min&date=$dateStr&types=${_spotPoiAddons.join(',')}',
+            '&hour=$h&minute=$min&date=$dateStr&types=$_spotMode',
           );
           final poiResp = await http.get(poiUri);
           final poiData = jsonDecode(poiResp.body);
@@ -436,7 +436,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             allSpots = poiData.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
               'lat': p['lat'], 'lon': p['lon'],
               'sun_hours_left': p['sun_hours'] as int? ?? 0,
-              'sun_until': null,
+              'sun_until': p['sun_until'] as int?,
               '_poi_name': p['name'] as String? ?? '',
               '_poi_amenity': p['amenity'] as String? ?? '',
             }).toList();
@@ -521,7 +521,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _findSunnyPois() async {
     final ctrl = _mapController;
-    if (ctrl == null || !_mapReady || _poiFilters.isEmpty) return;
+    if (ctrl == null || !_mapReady) return;
     setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; });
     try {
       final bounds  = await ctrl.getVisibleRegion();
@@ -529,7 +529,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
       final h       = _hour.toInt();
       final min     = ((_hour * 60).toInt() % 60);
-      final types   = _poiFilters.join(',');
+      final types   = _poiFilter;
       final uri = Uri.parse(
         '$flaskBaseUrl/sunny_pois'
         '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
@@ -903,7 +903,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon)))
         : null;
 
-    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.5));
+    if (_panelExpanded) setState(() => _panelExpanded = false);
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
 
     showModalBottomSheet(
       context: context,
@@ -2114,12 +2115,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     return Scaffold(
       body: isMobile
-          ? Column(
-              children: [
-                Expanded(child: mapArea),
-                _buildMobileBottom(),
-              ],
-            )
+          ? LayoutBuilder(builder: (ctx, constraints) {
+              final totalH    = constraints.maxHeight;
+              const collapsedH = 230.0;
+              final bottomH   = _panelExpanded ? totalH : collapsedH;
+              final mapH      = totalH - bottomH;
+              return Column(children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOut,
+                  height: mapH,
+                  child: mapArea,
+                ),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOut,
+                  height: bottomH,
+                  child: _buildMobileBottom(),
+                ),
+              ]);
+            })
           : mapArea,
     );
   }
@@ -2971,33 +2986,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         modeToggle,
         const SizedBox(height: 10),
-        // Park / Bench add-ons
+        // Spot mode chips — radio style (exactly one selected)
         Row(children: [
-          for (final t in [('park', Icons.park, 'Parks'), ('bench', Icons.chair_alt, 'Benches')])
+          for (final t in [
+            ('spots', Icons.wb_sunny, 'Spots'),
+            ('park',  Icons.park,     'Parks'),
+            ('bench', Icons.chair_alt,'Benches'),
+          ])
             Padding(
               padding: const EdgeInsets.only(right: 6),
               child: GestureDetector(
                 onTap: () {
-                  setState(() {
-                    if (_spotPoiAddons.contains(t.$1)) _spotPoiAddons.remove(t.$1);
-                    else _spotPoiAddons.add(t.$1);
-                  });
+                  if (_spotMode == t.$1) return;
+                  setState(() { _spotMode = t.$1; });
                   _clearSunnySpots();
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                   decoration: BoxDecoration(
-                    color: _spotPoiAddons.contains(t.$1) ? Colors.orange : Colors.grey.shade100,
+                    color: _spotMode == t.$1 ? Colors.orange : Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: _spotPoiAddons.contains(t.$1)
+                    border: Border.all(color: _spotMode == t.$1
                         ? Colors.orange : Colors.grey.shade300),
                   ),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(t.$2, size: 13,
-                        color: _spotPoiAddons.contains(t.$1) ? Colors.white : Colors.grey.shade600),
+                        color: _spotMode == t.$1 ? Colors.white : Colors.grey.shade600),
                     const SizedBox(width: 4),
                     Text(t.$3, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                        color: _spotPoiAddons.contains(t.$1) ? Colors.white : Colors.grey.shade600)),
+                        color: _spotMode == t.$1 ? Colors.white : Colors.grey.shade600)),
                   ]),
                 ),
               ),
@@ -3071,18 +3088,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       modeToggle,
       const SizedBox(height: 10),
-      // Filter chips
+      // Filter chips — radio style (one active at a time)
       Wrap(spacing: 6, runSpacing: 6, children: _poiTypes.map((t) {
         final id     = t.$1;
         final icon   = t.$2;
         final label  = t.$3;
-        final active = _poiFilters.contains(id);
+        final active = _poiFilter == id;
         return GestureDetector(
           onTap: () {
-            setState(() {
-              if (active) _poiFilters.remove(id); else _poiFilters.add(id);
-              _sunnyPois = [];
-            });
+            if (_poiFilter == id) return;
+            setState(() { _poiFilter = id; _sunnyPois = []; });
             _clearPoiMarkers();
           },
           child: Container(
@@ -3105,7 +3120,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       Row(children: [
         Expanded(
           child: ElevatedButton.icon(
-            onPressed: (_loadingPois || _poiFilters.isEmpty) ? null : _findSunnyPois,
+            onPressed: _loadingPois ? null : _findSunnyPois,
             icon: _loadingPois
                 ? const SizedBox(width: 14, height: 14,
                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
@@ -3359,11 +3374,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ],
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           children: [
-            // Content area — fade at bottom signals more content below
-            SizedBox(
-              height: (_screenHeight * 0.30 - 56).clamp(160.0, 260.0),
+            // Expand/collapse handle
+            GestureDetector(
+              onTap: () => setState(() => _panelExpanded = !_panelExpanded),
+              behavior: HitTestBehavior.opaque,
+              child: SizedBox(
+                height: 24,
+                child: Center(
+                  child: Container(
+                    width: 36, height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Content area
+            Expanded(
               child: ShaderMask(
                 shaderCallback: (bounds) => LinearGradient(
                   begin: Alignment.topCenter,
@@ -3396,7 +3426,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           setState(() { _sunnyPois = []; });
                           _clearPoiMarkers();
                         }
-                        setState(() => _mobileTab = i);
+                        setState(() { _mobileTab = i; _panelExpanded = false; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -3526,8 +3556,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(
                     onTap: () {
+                      if (_panelExpanded) setState(() => _panelExpanded = false);
+                      _showPin(LatLng(lat, lon));
                       _mapController?.animateCamera(
-                          CameraUpdate.newLatLngZoom(LatLng(lat, lon), 17.5));
+                          CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
                       _showSpotSheet(s, idx);
                     },
                     child: Container(
