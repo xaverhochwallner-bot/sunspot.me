@@ -111,6 +111,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _loadingPois       = false;
   bool                       _poiMarkersReady   = false;
 
+
   bool                       _spotsZoomHint     = false;
 
   // Weather overlay
@@ -952,25 +953,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
-  // Spot bottom sheet
+  // Spot popup
   // -------------------------------------------------------------------------
 
-  Future<void> _showSpotSheet(Map<String, dynamic> spot, int idx) async {
-    final lat          = spot['lat'] as double;
-    final lon          = spot['lon'] as double;
+  void _selectSpot(Map<String, dynamic> spot, int idx) {
+    final returnCenter = _lastSearchCenter ?? _currentCenter;
+    final returnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
+    final lat = spot['lat'] as double;
+    final lon = spot['lon'] as double;
+    if (_panelExpanded) setState(() => _panelExpanded = false);
+    _suppressResultClear = true;
+    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
     final key          = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-    final poiName      = (spot['_poi_name'] as String? ?? '');
+    final poiName      = spot['_poi_name'] as String? ?? '';
     final address      = poiName.isNotEmpty ? poiName : (_spotAddresses[key] ?? 'Sunny spot ${idx + 1}');
     final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
     final sunUntil     = spot['sun_until'] as int?;
+    final openingHours   = spot['_opening_hours'] as String? ?? '';
+    final outdoorSeating = spot['_outdoor_seating'] as String? ?? '';
     final gps          = _gpsPosition;
-    final distLabel    = gps != null
-        ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon)))
-        : null;
-
-    // Determine category
-    final category   = spot['_category'] as String? ?? '';
-    final poiAmenity = spot['_poi_amenity'] as String? ?? '';
+    final distLabel    = gps != null ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon))) : null;
+    final category     = spot['_category'] as String? ?? '';
+    final poiAmenity   = spot['_poi_amenity'] as String? ?? '';
     final (catIcon, catLabel) = category == 'park'
         ? (Icons.park, 'Park')
         : category == 'square'
@@ -978,77 +982,51 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             : poiAmenity.isNotEmpty
                 ? (_poiIcon(poiAmenity), _poiLabel(poiAmenity))
                 : (Icons.wb_sunny, 'Spot');
+    final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
 
-    // Save overview position so we can return after popup closes
-    final returnCenter = _lastSearchCenter ?? _currentCenter;
-    final returnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
-
-    if (_panelExpanded) setState(() => _panelExpanded = false);
-    _suppressResultClear = true;
-    _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
-
-    await showModalBottomSheet<void>(
+    showModalBottomSheet<void>(
       context: context,
-      backgroundColor: const Color(0xFFFFF8F0),
+      backgroundColor: Colors.white,
       barrierColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) {
-          final isSaved = _savedSpots.any(
-              (s) => s['lat'] == lat && s['lon'] == lon);
+          final isSaved = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
           return SizedBox(
-            height: 260,
+            height: 230,
             child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Handle bar + close button
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                // handle + close
                 Row(children: [
                   const Spacer(),
-                  Container(
-                    width: 36, height: 4,
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade200,
-                      borderRadius: BorderRadius.circular(2),
+                  Container(width: 36, height: 4,
+                      decoration: BoxDecoration(color: Colors.grey.shade200,
+                          borderRadius: BorderRadius.circular(2))),
+                  Expanded(child: Align(alignment: Alignment.centerRight,
+                    child: GestureDetector(
+                      onTap: () => Navigator.of(ctx).pop(),
+                      child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
                     ),
-                  ),
-                  Expanded(
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: GestureDetector(
-                        onTap: () => Navigator.of(ctx).pop(),
-                        child: Padding(
-                          padding: const EdgeInsets.only(bottom: 8, left: 8),
-                          child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
-                        ),
-                      ),
-                    ),
-                  ),
+                  )),
                 ]),
-                // Number circle + name
+                const SizedBox(height: 8),
+                // number + name
                 Row(children: [
-                  Container(
-                    width: 26, height: 26,
+                  Container(width: 26, height: 26,
                     margin: const EdgeInsets.only(right: 10),
-                    decoration: const BoxDecoration(color: Color(0xFFFFD700), shape: BoxShape.circle),
-                    child: Center(
-                      child: Text('${idx + 1}',
-                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white)),
-                    ),
+                    decoration: BoxDecoration(color: circColor, shape: BoxShape.circle),
+                    child: Center(child: Text('${idx + 1}',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white))),
                   ),
-                  Expanded(
-                    child: Text(address,
-                        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                  ),
+                  Expanded(child: Text(address,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                      maxLines: 1, overflow: TextOverflow.ellipsis)),
                 ]),
                 const SizedBox(height: 4),
-                // Subtitle: distance · sun · category
+                // subtitle
                 Row(children: [
                   if (distLabel != null) ...[
                     Icon(Icons.directions_walk, size: 12, color: Colors.grey.shade500),
@@ -1058,41 +1036,64 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     Text('·', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
                     const SizedBox(width: 6),
                   ],
-                  Icon(Icons.wb_sunny_outlined, size: 12, color: Colors.orange.shade400),
+                  Icon(sunUntil != null ? Icons.wb_sunny_outlined : Icons.nights_stay_outlined,
+                      size: 12, color: sunUntil != null ? Colors.orange.shade400 : Colors.grey.shade400),
                   const SizedBox(width: 3),
                   Text(
                     sunUntil != null
-                        ? '$sunHoursLeft h · until ${sunUntil.toString().padLeft(2, '0')}:00'
-                        : '$sunHoursLeft h of sun',
-                    style: TextStyle(fontSize: 12, color: Colors.orange.shade700),
+                        ? (sunHoursLeft == 0
+                            ? '< 1h · until ${sunUntil.toString().padLeft(2, '0')}:00'
+                            : '$sunHoursLeft h · until ${sunUntil.toString().padLeft(2, '0')}:00')
+                        : 'In shadow',
+                    style: TextStyle(fontSize: 12,
+                        color: sunUntil != null ? Colors.orange.shade700 : Colors.grey.shade500),
                   ),
                   const SizedBox(width: 6),
                   Text('·', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
                   const SizedBox(width: 6),
-                  Icon(catIcon, size: 12, color: Colors.orange.shade500),
+                  Icon(catIcon, size: 12, color: Colors.grey.shade400),
                   const SizedBox(width: 3),
-                  Text(catLabel, style: TextStyle(fontSize: 12, color: Colors.orange.shade700)),
+                  Text(catLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
                 ]),
-                const SizedBox(height: 12),
-                // Sun timeline bar
-                _buildSunTimeline(sunHoursLeft, sunUntil),
-                const SizedBox(height: 16),
-                // Action buttons
+                // opening hours (POIs only)
+                if (openingHours.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    Icon(Icons.schedule, size: 12, color: Colors.grey.shade400),
+                    const SizedBox(width: 5),
+                    Expanded(child: Text(openingHours,
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                        maxLines: 1, overflow: TextOverflow.ellipsis)),
+                    if (outdoorSeating == 'yes') ...[
+                      const SizedBox(width: 10),
+                      Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
+                      const SizedBox(width: 4),
+                      Text('Terrace', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+                    ],
+                  ]),
+                ] else if (outdoorSeating == 'yes') ...[
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
+                    const SizedBox(width: 5),
+                    Text('Outdoor seating available',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+                  ]),
+                ],
+                const Spacer(),
+                // action buttons
                 Row(children: [
                   _sheetButton(
-                    icon: Icons.directions_walk,
-                    label: 'Navigate',
+                    icon: Icons.directions_walk, label: 'Navigate',
                     color: Colors.orange.shade700,
                     onTap: () {
                       html.window.open(
-                        'https://www.google.com/maps/dir/?api=1'
-                        '&destination=$lat,$lon&travelmode=walking',
-                        '_blank',
-                      );
+                        'https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=walking',
+                        '_blank');
                       Navigator.pop(ctx);
                     },
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   _sheetButton(
                     icon: isSaved ? Icons.favorite : Icons.favorite_outline,
                     label: isSaved ? 'Saved' : 'Save',
@@ -1100,60 +1101,45 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     onTap: () {
                       setState(() {
                         if (isSaved) {
-                          _savedSpots.removeWhere(
-                              (s) => s['lat'] == lat && s['lon'] == lon);
+                          _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
                         } else {
-                          _savedSpots.add({
-                            'lat': lat,
-                            'lon': lon,
-                            'address': address,
-                            'sun_hours_left': sunHoursLeft,
-                            'sun_until': sunUntil,
-                          });
+                          _savedSpots.add({'lat': lat, 'lon': lon, 'address': address,
+                              'sun_hours_left': sunHoursLeft, 'sun_until': sunUntil});
                         }
                         _persistSaved();
                       });
                       setSheet(() {});
                     },
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   _sheetButton(
-                    icon: Icons.share,
-                    label: 'Share',
+                    icon: Icons.share, label: 'Share',
                     color: Colors.orange.shade500,
                     onTap: () async {
-                      final server = Uri.base.queryParameters['server']
-                          ?? 'https://sunspotme.duckdns.org';
-                      final link =
-                          'https://coruscating-fenglisu-505ed3.netlify.app/'
-                          '?server=${Uri.encodeComponent(server)}'
-                          '&lat=$lat&lon=$lon';
+                      final server = Uri.base.queryParameters['server'] ?? 'https://sunspotme.duckdns.org';
+                      final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
+                          '?server=${Uri.encodeComponent(server)}&lat=$lat&lon=$lon';
                       await Clipboard.setData(ClipboardData(text: link));
                       Navigator.pop(ctx);
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text('Link copied to clipboard'),
-                            duration: Duration(seconds: 2),
-                          ),
-                        );
+                          const SnackBar(content: Text('Link copied to clipboard'),
+                              duration: Duration(seconds: 2)));
                       }
                     },
                   ),
                 ]),
-              ],
+              ]),
             ),
-          ));
+          );
         },
       ),
-    );
-
-    // After popup closes, zoom back to the search overview so all dots are visible
-    if (mounted && (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty)) {
-      _suppressResultClear = true;
-      _mapController?.animateCamera(
-          CameraUpdate.newLatLngZoom(returnCenter, returnZoom));
-    }
+    ).then((_) {
+      if (mounted && (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty)) {
+        _suppressResultClear = true;
+        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(returnCenter, returnZoom));
+      }
+    });
   }
 
   Widget _buildSunTimeline(int sunHoursLeft, int? sunUntil) {
@@ -1223,7 +1209,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFFFFF8F0),
+      backgroundColor: Colors.white,
       barrierColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -1258,7 +1244,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       width: 36, height: 4,
                       margin: const EdgeInsets.only(bottom: 14),
                       decoration: BoxDecoration(
-                        color: Colors.orange.shade200,
+                        color: Colors.grey.shade200,
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
@@ -1302,7 +1288,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: statusColor),
                     ),
                     const SizedBox(width: 12),
-                    Icon(Icons.wb_sunny_outlined, size: 13, color: Colors.orange.shade400),
+                    Icon(Icons.wb_sunny_outlined, size: 13, color: Colors.grey.shade400),
                     const SizedBox(width: 4),
                     Text(
                       sunCount == 0 ? 'No direct sun today' : '$sunCount h of sun today',
@@ -1319,12 +1305,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         return Container(
                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                           decoration: BoxDecoration(
-                            color: Colors.orange.shade50,
+                            color: Colors.grey.shade100,
                             borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: Colors.orange.shade200),
                           ),
                           child: Text('${fmt(from)} – ${fmt(to)}',
-                              style: TextStyle(fontSize: 12, color: Colors.orange.shade700,
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600,
                                   fontWeight: FontWeight.w500)),
                         );
                       }).toList(),
@@ -1410,19 +1395,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       child: GestureDetector(
         onTap: onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
+          padding: const EdgeInsets.symmetric(vertical: 8),
           decoration: BoxDecoration(
             color: color.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(color: color.withValues(alpha: 0.3)),
           ),
           child: Column(
             children: [
-              Icon(icon, size: 22, color: color),
-              const SizedBox(height: 4),
+              Icon(icon, size: 18, color: color),
+              const SizedBox(height: 3),
               Text(label,
                   style: TextStyle(
-                      fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+                      fontSize: 11, fontWeight: FontWeight.w600, color: color)),
             ],
           ),
         ),
@@ -2863,9 +2848,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.orange.shade50,
+              color: Colors.grey.shade50,
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.orange.shade200),
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -2910,9 +2894,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                     decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
+                      color: Colors.grey.shade50,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.shade200),
                     ),
                     child: Row(children: [
                       Container(
@@ -2928,14 +2911,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(addr, style: const TextStyle(
-                              fontSize: 13, fontWeight: FontWeight.w500),
+                              fontSize: 13, fontWeight: FontWeight.w500,
+                              color: Color(0xFF1A1A1A)),
                               maxLines: 1, overflow: TextOverflow.ellipsis),
                           const SizedBox(height: 2),
                           Text(
                             until != null
                                 ? '$sunH h · until ${until.toString().padLeft(2,'0')}:00'
                                 : '$sunH h of sun',
-                            style: TextStyle(fontSize: 11, color: Colors.orange.shade700),
+                            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
                           ),
                         ],
                       )),
@@ -2967,10 +2951,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Widget _tourStat(IconData icon, String label) {
     return Row(mainAxisSize: MainAxisSize.min, children: [
-      Icon(icon, size: 13, color: Colors.orange.shade700),
+      Icon(icon, size: 13, color: Colors.grey.shade500),
       const SizedBox(width: 4),
       Text(label, style: TextStyle(fontSize: 12,
-          fontWeight: FontWeight.w600, color: Colors.orange.shade800)),
+          fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
     ]);
   }
 
@@ -3134,16 +3118,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // ---- Find sunny spots / places ----
   Widget _buildFindSunnySpotsSection() {
     // Mode toggle
-    Widget modeToggle = Container(
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(children: [
-        _modeBtn('Spots', !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; }); _clearPoiMarkers(); }),
-        _modeBtn('Places', _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; }); _clearSunnySpots(); }),
-      ]),
-    );
+    Widget modeToggle = Row(children: [
+      _modeBtn('Spots', Icons.wb_sunny_outlined, !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; }); _clearPoiMarkers(); }),
+      const SizedBox(width: 8),
+      _modeBtn('Places', Icons.storefront_outlined, _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; }); _clearSunnySpots(); }),
+    ]);
 
     if (!_placesMode) {
       // ── Spots mode ──────────────────────────────────────────────────────────
@@ -3152,20 +3131,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         const SizedBox(height: 10),
         Row(children: [
           Expanded(
-            child: ElevatedButton.icon(
-              onPressed: _findingSunnySpots ? null : _findSunnySpots,
-              icon: _findingSunnySpots
-                  ? const SizedBox(width: 14, height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.wb_sunny, size: 16),
-              label: Text(_findingSunnySpots ? 'Searching...' : 'Find sunny spots'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: Colors.orange.shade200,
+            child: GestureDetector(
+              onTap: _findingSunnySpots ? null : _findSunnySpots,
+              child: Container(
+                width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 10),
-                textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(
+                  color: _findingSunnySpots ? Colors.orange : Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  _findingSunnySpots
+                      ? SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : Icon(Icons.wb_sunny_outlined, size: 15,
+                          color: _findingSunnySpots ? Colors.white : Colors.black54),
+                  const SizedBox(width: 6),
+                  Text(_findingSunnySpots ? 'Searching...' : 'Find sunny spots',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: _findingSunnySpots ? Colors.white : Colors.black54)),
+                ]),
               ),
             ),
           ),
@@ -3176,7 +3161,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               icon: const Icon(Icons.close, size: 16),
               style: IconButton.styleFrom(
                 backgroundColor: Colors.grey.shade100,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
               ),
               padding: const EdgeInsets.all(10),
             ),
@@ -3226,7 +3211,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               categoryLabel: catLabel,
               isSaved: isSaved,
               inShadow: inShadow,
-              onTap: () => _showSpotSheet(spot, idx),
+              onTap: () => _selectSpot(spot, idx),
             );
           }),
         ],
@@ -3239,20 +3224,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       const SizedBox(height: 10),
       Row(children: [
         Expanded(
-          child: ElevatedButton.icon(
-            onPressed: _loadingPois ? null : _findSunnyPois,
-            icon: _loadingPois
-                ? const SizedBox(width: 14, height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                : const Icon(Icons.wb_sunny, size: 16),
-            label: Text(_loadingPois ? 'Searching...' : 'Find sunny terraces'),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.orange,
-              foregroundColor: Colors.white,
-              disabledBackgroundColor: Colors.orange.shade200,
+          child: GestureDetector(
+            onTap: _loadingPois ? null : _findSunnyPois,
+            child: Container(
+              width: double.infinity,
               padding: const EdgeInsets.symmetric(vertical: 10),
-              textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              decoration: BoxDecoration(
+                color: _loadingPois ? Colors.orange : Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                _loadingPois
+                    ? SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : Icon(Icons.storefront_outlined, size: 15, color: Colors.black54),
+                const SizedBox(width: 6),
+                Text(_loadingPois ? 'Searching...' : 'Find sunny places',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                        color: _loadingPois ? Colors.white : Colors.black54)),
+              ]),
             ),
           ),
         ),
@@ -3279,10 +3269,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final name    = (poi['name'] as String? ?? '').isNotEmpty
               ? poi['name'] as String
               : (poi['amenity'] as String? ?? 'Place ${idx + 1}');
-          final dist     = poi['dist'] as int? ?? 0;
-          final amenity  = poi['amenity'] as String? ?? '';
-          final sunH     = (poi['sun_hours_left'] as int?) ?? 0;
-          final sunUntil = poi['sun_until'] as int?;
+          final dist          = poi['dist'] as int? ?? 0;
+          final amenity       = poi['amenity'] as String? ?? '';
+          final sunH          = (poi['sun_hours_left'] as int?) ?? 0;
+          final sunUntil      = poi['sun_until'] as int?;
+          final openingHours  = poi['opening_hours'] as String? ?? '';
+          final outdoorSeating = poi['outdoor_seating'] as String? ?? '';
           final isSaved  = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
           final catLabel = _poiLabel(amenity);
           final catIcon  = _poiIcon(amenity);
@@ -3302,10 +3294,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             categoryLabel: catLabel,
             isSaved: isSaved,
             inShadow: inShadow,
-            onTap: () => _showSpotSheet({
+            onTap: () => _selectSpot({
               'lat': lat, 'lon': lon,
               'sun_hours_left': sunH, 'sun_until': sunUntil,
               '_poi_name': name, '_poi_amenity': amenity,
+              '_opening_hours': openingHours,
+              '_outdoor_seating': outdoorSeating,
             }, idx),
           );
         }),
@@ -3313,23 +3307,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     ]);
   }
 
-  Widget _modeBtn(String label, bool active, VoidCallback onTap) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 7),
-          decoration: BoxDecoration(
-            color: active ? Colors.orange : Colors.transparent,
-            borderRadius: BorderRadius.circular(7),
-          ),
-          child: Center(
-            child: Text(label, style: TextStyle(
-              fontSize: 13, fontWeight: FontWeight.w600,
-              color: active ? Colors.white : Colors.grey.shade500,
-            )),
-          ),
+  Widget _modeBtn(String label, IconData icon, bool active, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? Colors.orange : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(14),
         ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 14,
+              color: active ? Colors.white : Colors.black54),
+          const SizedBox(width: 5),
+          Text(label, style: TextStyle(
+            fontSize: 13, fontWeight: FontWeight.w600,
+            color: active ? Colors.white : Colors.black54,
+          )),
+        ]),
       ),
     );
   }
@@ -3353,53 +3349,53 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         child: GestureDetector(
           onTap: onTap,
           child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: BoxDecoration(
-              color: Colors.orange.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.orange.shade200),
+              color: Colors.grey.shade50,
+              borderRadius: BorderRadius.circular(10),
             ),
             child: Row(children: [
               Container(
-                width: 22, height: 22,
+                width: 26, height: 26,
                 decoration: BoxDecoration(color: circleColor, shape: BoxShape.circle),
                 child: Center(child: circleChild),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(address,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                          color: Color(0xFF1A1A1A)),
                       maxLines: 1, overflow: TextOverflow.ellipsis),
-                  const SizedBox(height: 2),
+                  const SizedBox(height: 3),
                   Row(children: [
                     if (distLabel != null) ...[
-                      Icon(Icons.directions_walk, size: 11, color: Colors.grey.shade500),
+                      Icon(Icons.directions_walk, size: 11, color: Colors.grey.shade400),
                       const SizedBox(width: 2),
-                      Text(distLabel, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-                      const SizedBox(width: 6),
-                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
-                      const SizedBox(width: 6),
+                      Text(distLabel, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                      const SizedBox(width: 5),
+                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade300)),
+                      const SizedBox(width: 5),
                     ],
                     Icon(inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny_outlined,
                         size: 11, color: inShadow ? Colors.grey.shade400 : Colors.orange.shade400),
                     const SizedBox(width: 2),
                     Text(sunLabel, style: TextStyle(fontSize: 11,
-                        color: inShadow ? Colors.grey.shade500 : Colors.orange.shade700)),
+                        color: inShadow ? Colors.grey.shade400 : Colors.orange.shade600)),
                     if (categoryIcon != null) ...[
-                      const SizedBox(width: 6),
-                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
-                      const SizedBox(width: 6),
-                      Icon(categoryIcon, size: 11, color: Colors.orange.shade500),
+                      const SizedBox(width: 5),
+                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade300)),
+                      const SizedBox(width: 5),
+                      Icon(categoryIcon, size: 11, color: Colors.grey.shade400),
                       const SizedBox(width: 2),
-                      Text(categoryLabel ?? '', style: TextStyle(fontSize: 11, color: Colors.orange.shade700)),
+                      Text(categoryLabel ?? '', style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
                     ],
                   ]),
                 ]),
               ),
               if (isSaved) ...[const SizedBox(width: 4), Icon(Icons.favorite, size: 14, color: Colors.red.shade300)],
               const SizedBox(width: 4),
-              Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
+              Icon(Icons.chevron_right, size: 16, color: Colors.grey.shade300),
             ]),
           ),
         ),
@@ -3651,15 +3647,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
+                      color: Colors.grey.shade100,
                       borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.orange.shade200),
                     ),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      Icon(Icons.touch_app_outlined, size: 14, color: Colors.orange.shade400),
+                      Icon(Icons.touch_app_outlined, size: 14, color: Colors.grey.shade400),
                       const SizedBox(width: 6),
                       Text('Tap the map to inspect any point',
-                          style: TextStyle(fontSize: 12, color: Colors.orange.shade700)),
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
                     ]),
                   ),
                 ],
@@ -3675,15 +3670,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               margin: const EdgeInsets.only(bottom: 10),
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.orange.shade50,
+                color: Colors.grey.shade50,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.orange.shade100),
               ),
               child: Row(children: [
-                Icon(Icons.touch_app_outlined, size: 13, color: Colors.orange.shade400),
+                Icon(Icons.touch_app_outlined, size: 13, color: Colors.grey.shade400),
                 const SizedBox(width: 6),
                 Text('Tap the map to inspect any point',
-                    style: TextStyle(fontSize: 12, color: Colors.orange.shade600)),
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
               ]),
             ),
             ..._savedSpots.asMap().entries.map((e) {
@@ -3707,18 +3701,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   cursor: SystemMouseCursors.click,
                   child: GestureDetector(
                     onTap: () {
-                      if (_panelExpanded) setState(() => _panelExpanded = false);
                       _showPin(LatLng(lat, lon));
-                      _mapController?.animateCamera(
-                          CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
-                      _showSpotSheet(s, idx);
+                      _selectSpot(s, idx);
                     },
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                       decoration: BoxDecoration(
-                        color: Colors.orange.shade50,
+                        color: Colors.grey.shade50,
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.orange.shade200),
                       ),
                       child: Row(
                         children: [
@@ -3755,14 +3745,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                                     const SizedBox(width: 8),
                                   ],
                                   Icon(Icons.wb_sunny_outlined, size: 11,
-                                      color: Colors.orange.shade400),
+                                      color: Colors.grey.shade400),
                                   const SizedBox(width: 2),
                                   Text(
                                     until != null
                                         ? '$sunH h · until ${until.toString().padLeft(2, '0')}:00'
                                         : '$sunH h of sun',
                                     style: TextStyle(fontSize: 11,
-                                        color: Colors.orange.shade700),
+                                        color: Colors.grey.shade500),
                                   ),
                                   if (sunny != null) ...[
                                     const SizedBox(width: 6),

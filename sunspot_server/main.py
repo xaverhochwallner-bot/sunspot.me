@@ -1224,6 +1224,8 @@ def _parse_overpass_pois(results):
                 'lat': plat, 'lon': plon,
                 'name': tags.get('name', ''),
                 'amenity': amenity, 'poi_type': poi_type,
+                'opening_hours': tags.get('opening_hours', ''),
+                'outdoor_seating': tags.get('outdoor_seating', ''),
             })
     return pois
 
@@ -1347,7 +1349,9 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
         amenity = tags.get('amenity') or tags.get('leisure') or tags.get('place') or ''
         poi_type = _CITY_POI_AMENITY_TO_TYPE.get(amenity, amenity)
         pois.append({'lat': plat, 'lon': plon, 'name': tags.get('name', ''),
-                     'amenity': amenity, 'poi_type': poi_type})
+                     'amenity': amenity, 'poi_type': poi_type,
+                     'opening_hours': tags.get('opening_hours', ''),
+                     'outdoor_seating': tags.get('outdoor_seating', '')})
     return pois
 
 _poi_cache = {}  # fallback cache for non-city locations
@@ -1471,6 +1475,8 @@ def sunny_pois():
                 'dist': dist,
                 'sun_hours': sun_hours_left,
                 'sun_until': sun_until,
+                'opening_hours': p.get('opening_hours', ''),
+                'outdoor_seating': p.get('outdoor_seating', ''),
             })
 
         # Sort: most sun hours remaining first, nearest as tiebreaker
@@ -1493,6 +1499,10 @@ def sunny_pois():
             entry = {k: p[k] for k in ('lat', 'lon', 'name', 'amenity', 'dist', 'sun_hours')}
             if p['sun_until'] is not None:
                 entry['sun_until'] = p['sun_until']
+            if p.get('opening_hours'):
+                entry['opening_hours'] = p['opening_hours']
+            if p.get('outdoor_seating'):
+                entry['outdoor_seating'] = p['outdoor_seating']
             spots.append(entry)
 
         return jsonify({'spots': spots})
