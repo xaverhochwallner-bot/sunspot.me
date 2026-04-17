@@ -1752,43 +1752,36 @@ def find_sunny_spots():
             if len(candidate_pts) >= n:
                 break
 
-        # Compute remaining sun hours for each candidate (cache-first, then projection fallback)
+        # Compute remaining sun hours — cache-first, stop at first uncached hour
         def _sun_remaining(pt):
             from shapely.geometry import Point as SPoint
             spot_lat, spot_lon = pt.y, pt.x
             current_hour = now.hour
-            sun_hours = []
+            # Grid candidates are from sunlit patches → current hour always sunny
+            sun_hours = [current_hour]
 
-            for h in range(current_hour, 24):
+            for h in range(current_hour + 1, 24):
                 ck_h = _cache_key(h, now.month, now.day, lat, lon, zoom)
                 if ck_h in _shadow_cache:
-                    # Fast path: point-in-polygon against cached sunlit geometry
                     try:
                         in_sun = _shadow_cache[ck_h].contains(SPoint(spot_lon, spot_lat))
                     except Exception:
                         in_sun = False
+                    if in_sun:
+                        sun_hours.append(h)
+                    else:
+                        break  # shadow reached — stop counting
                 else:
-                    # Slow path: full shadow projection
-                    t  = tz.localize(datetime(now.year, now.month, now.day, h, 0, 0))
-                    el, az = get_sun_angles(spot_lat, spot_lon, t)
-                    in_sun = el > 0 and not _point_in_shadow(spot_lon, spot_lat, el, az)
-
-                if in_sun:
-                    sun_hours.append(h)
+                    # No cache for this hour — do ONE projection then stop
+                    t_h = tz.localize(datetime(now.year, now.month, now.day, h, 0, 0))
+                    el, az = get_sun_angles(spot_lat, spot_lon, t_h)
+                    if el > 0 and not _point_in_shadow(spot_lon, spot_lat, el, az):
+                        sun_hours.append(h)
+                    break  # don't scan further uncached hours
 
             sun_hours_left = len(sun_hours)
-
-            # sun_until = end of the current/next consecutive sunny block
-            sun_until = None
-            if sun_hours and current_hour in sun_hours:
-                last_h = current_hour
-                for h in sun_hours:
-                    if h <= last_h + 1:
-                        last_h = h
-                    else:
-                        break
-                sun_until = last_h + 1  # exclusive end hour
-
+            last_h = sun_hours[-1] if sun_hours else current_hour
+            sun_until = last_h + 1 if sun_hours else None
             return sun_hours_left, sun_until
 
         with ThreadPoolExecutor(max_workers=min(len(candidate_pts), 5)) as ex:
