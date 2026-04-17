@@ -266,29 +266,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (center == null) return;
     _currentCenter = center;
 
-    // Clear stale results when the map moves or zoom changes significantly
     final zoom = pos?.zoom ?? 0;
     if (_suppressResultClear) {
-      // Navigation to a result — update anchor so future moves are relative to here
       _lastSearchCenter = center;
       _lastSearchZoom   = zoom;
       _suppressResultClear = false;
-    } else {
-      final sc = _lastSearchCenter;
-      final sz = _lastSearchZoom;
-      if (sc != null && sz != null) {
-        final zoomChanged = (zoom - sz).abs() > 0.5;
-        final movedFar    = _distanceMeters(sc, center) > 300;
-        if (zoomChanged || movedFar) {
-          if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
-            setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
-            _clearSunnySpots();
-            _clearPoiMarkers();
-            _lastSearchCenter = null;
-            _lastSearchZoom   = null;
-          }
-        }
-      }
     }
 
     if (_sunnySpots.isNotEmpty) _refreshSunnySpotPositions();
@@ -973,7 +955,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Spot bottom sheet
   // -------------------------------------------------------------------------
 
-  void _showSpotSheet(Map<String, dynamic> spot, int idx) {
+  Future<void> _showSpotSheet(Map<String, dynamic> spot, int idx) async {
     final lat          = spot['lat'] as double;
     final lon          = spot['lon'] as double;
     final key          = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
@@ -997,11 +979,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ? (_poiIcon(poiAmenity), _poiLabel(poiAmenity))
                 : (Icons.wb_sunny, 'Spot');
 
+    // Save overview position so we can return after popup closes
+    final returnCenter = _lastSearchCenter ?? _currentCenter;
+    final returnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
+
     if (_panelExpanded) setState(() => _panelExpanded = false);
     _suppressResultClear = true;
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
 
-    showModalBottomSheet(
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFFFFF8F0),
       barrierColor: Colors.transparent,
@@ -1161,6 +1147,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         },
       ),
     );
+
+    // After popup closes, zoom back to the search overview so all dots are visible
+    if (mounted && (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty)) {
+      _suppressResultClear = true;
+      _mapController?.animateCamera(
+          CameraUpdate.newLatLngZoom(returnCenter, returnZoom));
+    }
   }
 
   Widget _buildSunTimeline(int sunHoursLeft, int? sunUntil) {
@@ -3207,7 +3200,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final sunUntil = spot['sun_until'] as int?;
             final gps      = _gpsPosition;
             final distLbl  = gps != null ? _formatDistance(_distanceMeters(gps, spotPos)) : null;
-            final untilLbl = sunUntil != null ? 'until ${sunUntil.toString().padLeft(2,'0')}:00' : null;
             final addrKey  = '${spotPos.latitude.toStringAsFixed(6)},${spotPos.longitude.toStringAsFixed(6)}';
             final poiName  = (spot['_poi_name'] as String? ?? '');
             final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
@@ -3218,15 +3210,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               'square' => (Icons.location_city, 'Square', const Color(0xFF7B61FF)),
               _        => (Icons.wb_sunny,      'Spot',   const Color(0xFFFF9800)),
             };
+            final inShadow = sunUntil == null;
+            final sunLbl = inShadow
+                ? 'In shadow'
+                : sunH == 0
+                    ? '< 1h · until ${sunUntil.toString().padLeft(2,'0')}:00'
+                    : '$sunH h · until ${sunUntil.toString().padLeft(2,'0')}:00';
             return _spotCard(
               circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
-              circleColor: const Color(0xFFFFD700),
+              circleColor: inShadow ? Colors.grey.shade400 : const Color(0xFFFFD700),
               address: address,
               distLabel: distLbl,
-              sunLabel: untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left',
+              sunLabel: sunLbl,
               categoryIcon: catIcon,
               categoryLabel: catLabel,
               isSaved: isSaved,
+              inShadow: inShadow,
               onTap: () => _showSpotSheet(spot, idx),
             );
           }),
@@ -3284,20 +3283,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final amenity  = poi['amenity'] as String? ?? '';
           final sunH     = (poi['sun_hours_left'] as int?) ?? 0;
           final sunUntil = poi['sun_until'] as int?;
-          final untilLbl = sunUntil != null ? 'until ${sunUntil.toString().padLeft(2,'0')}:00' : null;
           final isSaved  = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
           final catLabel = _poiLabel(amenity);
           final catIcon  = _poiIcon(amenity);
-          final sunLbl   = untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left';
+          final inShadow = sunUntil == null;
+          final sunLbl = inShadow
+              ? 'In shadow'
+              : sunH == 0
+                  ? '< 1h · until ${sunUntil.toString().padLeft(2,'0')}:00'
+                  : '$sunH h · until ${sunUntil.toString().padLeft(2,'0')}:00';
           return _spotCard(
             circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
-            circleColor: const Color(0xFFFF8C00),
+            circleColor: inShadow ? Colors.grey.shade400 : const Color(0xFFFF8C00),
             address: name,
             distLabel: _formatDistance(dist.toDouble()),
             sunLabel: sunLbl,
             categoryIcon: catIcon,
             categoryLabel: catLabel,
             isSaved: isSaved,
+            inShadow: inShadow,
             onTap: () => _showSpotSheet({
               'lat': lat, 'lon': lon,
               'sun_hours_left': sunH, 'sun_until': sunUntil,
@@ -3340,6 +3344,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     required VoidCallback onTap,
     IconData? categoryIcon,
     String? categoryLabel,
+    bool inShadow = false,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -3376,9 +3381,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
                       const SizedBox(width: 6),
                     ],
-                    Icon(Icons.wb_sunny_outlined, size: 11, color: Colors.orange.shade400),
+                    Icon(inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny_outlined,
+                        size: 11, color: inShadow ? Colors.grey.shade400 : Colors.orange.shade400),
                     const SizedBox(width: 2),
-                    Text(sunLabel, style: TextStyle(fontSize: 11, color: Colors.orange.shade700)),
+                    Text(sunLabel, style: TextStyle(fontSize: 11,
+                        color: inShadow ? Colors.grey.shade500 : Colors.orange.shade700)),
                     if (categoryIcon != null) ...[
                       const SizedBox(width: 6),
                       Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
@@ -3563,9 +3570,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   return Expanded(
                     child: GestureDetector(
                       onTap: () {
-                        if (_mobileTab == 1 && i != 1) {
-                          setState(() { _sunnyPois = []; });
+                        if (i != 1) {
+                          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
+                          _clearSunnySpots();
                           _clearPoiMarkers();
+                          _lastSearchCenter = null;
+                          _lastSearchZoom   = null;
                         }
                         setState(() { _mobileTab = i; _panelExpanded = false; });
                         _mobileContentScroll.jumpTo(0);

@@ -1613,8 +1613,8 @@ def find_sunny_spots():
             # Try nearest cached entry for same hour/date (avoids recompute on tiny center offset)
             best_ck, best_dist = None, float('inf')
             for k in list(_shadow_cache.keys()):
-                if k[0] == now.hour and k[1] == now.month and k[2] == now.day:
-                    d = (k[3] - lat) ** 2 + (k[4] - lon) ** 2
+                if k[0] == now.hour and k[1] == now.month and k[2] == now.day and k[3] == zoom:
+                    d = (k[4] - lat) ** 2 + (k[5] - lon) ** 2
                     if d < best_dist:
                         best_dist, best_ck = d, k
             if best_ck is not None and best_dist < 0.01:  # ~1 km tolerance
