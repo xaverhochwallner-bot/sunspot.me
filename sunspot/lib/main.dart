@@ -49,6 +49,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
   LatLng? _lastSearchCenter;
   double? _lastSearchZoom;
+  bool    _suppressResultClear = false;
   Timer? _debounceTimer;
 
   double   _hour          = DateTime.now().hour.toDouble();
@@ -267,19 +268,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     // Clear stale results when the map moves or zoom changes significantly
     final zoom = pos?.zoom ?? 0;
-    final sc   = _lastSearchCenter;
-    final sz   = _lastSearchZoom;
-    if (sc != null && sz != null) {
-      final zoomChanged = (zoom - sz).abs() > 0.5;
-      final dist = _distanceMeters(sc, center);
-      final movedFar = dist > 300;
-      if (zoomChanged || movedFar) {
-        if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
-          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
-          _clearSunnySpots();
-          _clearPoiMarkers();
-          _lastSearchCenter = null;
-          _lastSearchZoom   = null;
+    if (_suppressResultClear) {
+      // Navigation to a result — update anchor so future moves are relative to here
+      _lastSearchCenter = center;
+      _lastSearchZoom   = zoom;
+      _suppressResultClear = false;
+    } else {
+      final sc = _lastSearchCenter;
+      final sz = _lastSearchZoom;
+      if (sc != null && sz != null) {
+        final zoomChanged = (zoom - sz).abs() > 0.5;
+        final movedFar    = _distanceMeters(sc, center) > 300;
+        if (zoomChanged || movedFar) {
+          if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
+            setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
+            _clearSunnySpots();
+            _clearPoiMarkers();
+            _lastSearchCenter = null;
+            _lastSearchZoom   = null;
+          }
         }
       }
     }
@@ -991,6 +998,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 : (Icons.wb_sunny, 'Spot');
 
     if (_panelExpanded) setState(() => _panelExpanded = false);
+    _suppressResultClear = true;
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
 
     showModalBottomSheet(
