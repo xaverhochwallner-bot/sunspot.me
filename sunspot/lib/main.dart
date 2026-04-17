@@ -457,7 +457,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _showSunnySpotMarkers(allSpots);
       await _refreshSunnySpotPositions();
 
-      if (spots.isNotEmpty) {
+      if (allSpots.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 150));
         if (_isMobile) {
           setState(() => _mobileTab = 1);
