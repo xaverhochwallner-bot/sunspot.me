@@ -569,10 +569,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _showPoiMarkers(List<Map<String, dynamic>> pois) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
-    final features = pois.map((p) => {
-      'type': 'Feature',
-      'geometry': {'type': 'Point', 'coordinates': [p['lon'], p['lat']]},
-      'properties': {},
+    final features = pois.asMap().entries.map((e) {
+      final p = e.value;
+      final currentlySunny = (p['sun_until'] != null) ? 1 : 0;
+      return {
+        'type': 'Feature',
+        'geometry': {'type': 'Point', 'coordinates': [p['lon'], p['lat']]},
+        'properties': {'index': e.key + 1, 'currently_sunny': currentlySunny},
+      };
     }).toList();
     final geoJson = {'type': 'FeatureCollection', 'features': features};
     if (_poiMarkersReady) {
@@ -580,13 +584,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } else {
       await ctrl.addSource('poi-markers', GeojsonSourceProperties(data: geoJson));
       await ctrl.addLayer('poi-markers', 'poi-marker-glow',
-        CircleLayerProperties(circleRadius: 20, circleColor: '#FF8C00', circleOpacity: 0.2,
-            circleStrokeWidth: 0),
+        CircleLayerProperties(
+          circleRadius: 20,
+          circleColor: ['case', ['==', ['get', 'currently_sunny'], 1], '#FF8C00', '#999999'],
+          circleOpacity: 0.2, circleStrokeWidth: 0),
         enableInteraction: false,
       );
       await ctrl.addLayer('poi-markers', 'poi-marker-dot',
-        CircleLayerProperties(circleRadius: 9, circleColor: '#FF8C00', circleOpacity: 1.0,
-            circleStrokeWidth: 2, circleStrokeColor: '#FFFFFF'),
+        CircleLayerProperties(
+          circleRadius: 9,
+          circleColor: ['case', ['==', ['get', 'currently_sunny'], 1], '#FF8C00', '#AAAAAA'],
+          circleOpacity: 1.0, circleStrokeWidth: 2, circleStrokeColor: '#FFFFFF'),
         enableInteraction: false,
       );
       _poiMarkersReady = true;
@@ -3227,7 +3235,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             onTap: () => _showSpotSheet({
               'lat': lat, 'lon': lon,
               'sun_hours_left': sunH, 'sun_until': sunUntil,
-              '_poi_name': name,
+              '_poi_name': name, '_poi_amenity': amenity,
             }, idx),
           );
         }),
