@@ -474,13 +474,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final parks   = parsePois(results[1], 'park');
       final squares = parsePois(results[2], 'square');
 
-      final gridReason = gridData['reason'] as String? ?? '';
-      final zoomIn = gridSpots.isEmpty && parks.isEmpty && squares.isEmpty
-          && (gridReason == 'zoom_in' || parks.isEmpty);
-      setState(() => _spotsZoomHint = zoomIn && merged.isEmpty);
-
       // Merge all, sort by sun hours desc, cap at 8
       final merged = [...gridSpots, ...parks, ...squares];
+      final gridReason = gridData['reason'] as String? ?? '';
+      final zoomIn = merged.isEmpty && (gridReason == 'zoom_in' || gridSpots.isEmpty);
+      setState(() => _spotsZoomHint = zoomIn);
       merged.sort((a, b) => ((b['sun_hours_left'] as int?) ?? 0)
           .compareTo((a['sun_hours_left'] as int?) ?? 0));
       final allSpots = merged.take(8).toList();
