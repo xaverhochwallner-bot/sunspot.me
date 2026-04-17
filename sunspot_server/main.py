@@ -1483,8 +1483,10 @@ def sunny_pois():
                 sun_until = last_h + 1
             return sun_hours_left, sun_until
 
-        # Compute sun hours for all candidates — no hard shadow filter so user
-        # always gets results even when everything nearby is currently in shadow
+        # Cap candidates before the expensive sun-hours loop (sort nearest first)
+        candidates.sort(key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)
+        candidates = candidates[:40]
+
         sunny = []
         for p in candidates:
             dist = int(((p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)**0.5 * 111320)

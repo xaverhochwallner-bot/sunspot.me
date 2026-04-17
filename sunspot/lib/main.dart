@@ -405,7 +405,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null || !_mapReady) return;
 
-    setState(() => _findingSunnySpots = true);
+    final zoom = ctrl.cameraPosition?.zoom ?? 0;
+    if (zoom < 13) {
+      setState(() { _spotsZoomHint = true; _sunnySpots = []; });
+      _clearSunnySpots();
+      return;
+    }
+
+    setState(() { _findingSunnySpots = true; _spotsZoomHint = false; });
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     await _clearTourLine();
@@ -467,9 +474,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final parks   = parsePois(results[1], 'park');
       final squares = parsePois(results[2], 'square');
 
-      final zoomIn = parks.isEmpty && squares.isEmpty &&
-          (jsonDecode(results[1].body) as Map<String, dynamic>)['reason'] == 'zoom_in';
-      setState(() => _spotsZoomHint = zoomIn);
+      final gridReason = gridData['reason'] as String? ?? '';
+      final zoomIn = gridSpots.isEmpty && parks.isEmpty && squares.isEmpty
+          && (gridReason == 'zoom_in' || parks.isEmpty);
+      setState(() => _spotsZoomHint = zoomIn && merged.isEmpty);
 
       // Merge all, sort by sun hours desc, cap at 8
       final merged = [...gridSpots, ...parks, ...squares];
@@ -556,6 +564,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _findSunnyPois() async {
     final ctrl = _mapController;
     if (ctrl == null || !_mapReady) return;
+
+    final zoom = ctrl.cameraPosition?.zoom ?? 0;
+    if (zoom < 13) {
+      setState(() => _sunnyPois = []);
+      _clearPoiMarkers();
+      _showError('Zoom in to see places');
+      return;
+    }
+
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; });
@@ -575,7 +592,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&hour=$h&minute=$min&date=$dateStr&types=$types'
         '&zoom=${zoom.round()}',
       );
-      final resp = await http.get(uri);
+      final resp = await http.get(uri).timeout(const Duration(seconds: 15));
       if (mounted && resp.statusCode == 200) {
         final data = jsonDecode(resp.body) as Map<String, dynamic>;
         final list = data['spots'] as List<dynamic>? ?? [];
