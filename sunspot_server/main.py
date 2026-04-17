@@ -1610,60 +1610,69 @@ def find_sunny_spots():
         if ck in _shadow_cache:
             sunlit_filtered = _shadow_cache[ck]
         else:
-            # Compute shadow inline (same logic as /shadow endpoint)
-            VIEWPORT_PAD = 0.15
-            if None not in (min_lat, min_lon, max_lat, max_lon):
-                _vw = max_lon - min_lon
-                _vh = max_lat - min_lat
-                q_min_lat = min_lat - _vh * VIEWPORT_PAD
-                q_min_lon = min_lon - _vw * VIEWPORT_PAD
-                q_max_lat = max_lat + _vh * VIEWPORT_PAD
-                q_max_lon = max_lon + _vw * VIEWPORT_PAD
+            # Try nearest cached entry for same hour/date (avoids recompute on tiny center offset)
+            best_ck, best_dist = None, float('inf')
+            for k in list(_shadow_cache.keys()):
+                if k[0] == now.hour and k[1] == now.month and k[2] == now.day:
+                    d = (k[3] - lat) ** 2 + (k[4] - lon) ** 2
+                    if d < best_dist:
+                        best_dist, best_ck = d, k
+            if best_ck is not None and best_dist < 0.01:  # ~1 km tolerance
+                sunlit_filtered = _shadow_cache[best_ck]
             else:
-                q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
-                q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
+                # Compute shadow inline (same logic as /shadow endpoint)
+                VIEWPORT_PAD = 0.15
+                if None not in (min_lat, min_lon, max_lat, max_lon):
+                    _vw = max_lon - min_lon
+                    _vh = max_lat - min_lat
+                    q_min_lat = min_lat - _vh * VIEWPORT_PAD
+                    q_min_lon = min_lon - _vw * VIEWPORT_PAD
+                    q_max_lat = max_lat + _vh * VIEWPORT_PAD
+                    q_max_lon = max_lon + _vw * VIEWPORT_PAD
+                else:
+                    q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
+                    q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
 
-            compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-            min_bld_area = _min_building_area(zoom)
-            buildings    = [(p, h) for p, h in
-                            get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                            if p.area >= min_bld_area]
+                compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+                min_bld_area = _min_building_area(zoom)
+                buildings    = [(p, h) for p, h in
+                                get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+                                if p.area >= min_bld_area]
 
-            def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                all_shadows = list(ex.map(_proj, buildings))
+                def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    all_shadows = list(ex.map(_proj, buildings))
 
-            if zoom >= 14:
-                tall = [sh for (_, h), sh in zip(buildings, all_shadows)
-                        if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
-                occluder_union = parallel_union(tall) if tall else None
-            else:
-                occluder_union = None
+                if zoom >= 14:
+                    tall = [sh for (_, h), sh in zip(buildings, all_shadows)
+                            if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
+                    occluder_union = parallel_union(tall) if tall else None
+                else:
+                    occluder_union = None
 
-            shadow_parts = []
-            for (poly, h), sh in zip(buildings, all_shadows):
-                if sh is None or sh.is_empty: continue
-                if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
-                shadow_parts.append(sh)
+                shadow_parts = []
+                for (poly, h), sh in zip(buildings, all_shadows):
+                    if sh is None or sh.is_empty: continue
+                    if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
+                    shadow_parts.append(sh)
 
-            all_parts = [p for p, _ in buildings] + shadow_parts
-            if all_parts:
-                merged = parallel_union(all_parts)
-                gfill  = _gap_fill(zoom)
-                stol   = _simplify_tolerance(zoom)
-                merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-                merged = merged.simplify(stol, preserve_topology=True)
-                sunlit = compute_bbox.difference(merged)
-            else:
-                sunlit = compute_bbox
+                all_parts = [p for p, _ in buildings] + shadow_parts
+                if all_parts:
+                    merged = parallel_union(all_parts)
+                    gfill  = _gap_fill(zoom)
+                    stol   = _simplify_tolerance(zoom)
+                    merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                    merged = merged.simplify(stol, preserve_topology=True)
+                    sunlit = compute_bbox.difference(merged)
+                else:
+                    sunlit = compute_bbox
 
-            stol            = _simplify_tolerance(zoom)
-            sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
-            sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
-
-            _shadow_cache[ck] = sunlit_filtered
-            if len(_shadow_cache) > MAX_CACHE:
-                _shadow_cache.pop(next(iter(_shadow_cache)))
+                stol            = _simplify_tolerance(zoom)
+                sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+                sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+                _shadow_cache[ck] = sunlit_filtered
+                if len(_shadow_cache) > MAX_CACHE:
+                    _shadow_cache.pop(next(iter(_shadow_cache)))
 
         # Clip sunlit geometry to the actual visible viewport
         if None not in (min_lat, min_lon, max_lat, max_lon):
