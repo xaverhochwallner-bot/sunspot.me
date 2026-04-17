@@ -599,7 +599,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&hour=$h&minute=$min&date=$dateStr&types=$types'
         '&zoom=${zoom.round()}',
       );
-      final resp = await http.get(uri).timeout(const Duration(seconds: 15));
+      final resp = await http.get(uri).timeout(const Duration(seconds: 20));
       if (mounted && resp.statusCode == 200) {
         final data   = jsonDecode(resp.body) as Map<String, dynamic>;
         final reason = data['reason'] as String? ?? '';

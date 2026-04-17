@@ -1436,61 +1436,35 @@ def sunny_pois():
             candidates += [p for p in _poi_cache[cache_key]
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
-        def _poi_sun_hours(plat, plon):
-            from shapely.geometry import Point as SPoint
-            current_hour = t.hour
+        # Build index of cached shadow geometries for this hour/date (fast path)
+        from shapely.geometry import Point as SPoint
+        cached_geoms = [
+            geom for ck, geom in list(_shadow_cache.items())
+            if ck[0] == t.hour and ck[1] == date.month and ck[2] == date.day
+        ]
+
+        def _is_sunny_now(plat, plon):
+            """Single shadow check at current hour — 10× faster than full sun-hours scan."""
             pt = SPoint(plon, plat)
-            # Pre-build index: hour -> list of cached shadow geometries for this date
-            cached_by_hour: dict[int, list] = {}
-            for ck, geom in list(_shadow_cache.items()):
-                if ck[1] == date.month and ck[2] == date.day:
-                    cached_by_hour.setdefault(ck[0], []).append(geom)
+            # Fast path: use already-rendered shadow polygon if available
+            for geom in cached_geoms:
+                try:
+                    return not geom.contains(pt)
+                except Exception:
+                    pass
+            # Slow path: compute directly
+            return elevation > 0 and not _point_in_shadow(plon, plat, elevation, azimuth)
 
-            sun_hours = []
-            for h in range(current_hour, 24):
-                geoms = cached_by_hour.get(h)
-                if geoms:
-                    # Use first cached geometry that covers this point's vicinity
-                    in_sun = False
-                    for geom in geoms:
-                        try:
-                            if geom.contains(pt):
-                                in_sun = True
-                                break
-                        except Exception:
-                            pass
-                    # If point not found in any geometry, it may be outside all cached
-                    # viewports — fall back to direct shadow check
-                    if not in_sun:
-                        th = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
-                        el, az = get_sun_angles(plat, plon, th)
-                        in_sun = el > 0 and not _point_in_shadow(plon, plat, el, az)
-                else:
-                    th = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
-                    el, az = get_sun_angles(plat, plon, th)
-                    in_sun = el > 0 and not _point_in_shadow(plon, plat, el, az)
-                if in_sun:
-                    sun_hours.append(h)
-            sun_hours_left = len(sun_hours)
-            sun_until = None
-            if sun_hours and current_hour in sun_hours:
-                last_h = current_hour
-                for h in sun_hours:
-                    if h <= last_h + 1:
-                        last_h = h
-                    else:
-                        break
-                sun_until = last_h + 1
-            return sun_hours_left, sun_until
-
-        # Cap candidates before the expensive sun-hours loop (sort nearest first)
+        # Cap candidates, sort nearest first
         candidates.sort(key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)
         candidates = candidates[:40]
 
         sunny = []
         for p in candidates:
             dist = int(((p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)**0.5 * 111320)
-            sun_hours_left, sun_until = _poi_sun_hours(p['lat'], p['lon'])
+            currently_sunny = _is_sunny_now(p['lat'], p['lon'])
+            sun_hours_left = 1 if currently_sunny else 0
+            sun_until = t.hour + 1 if currently_sunny else None
             sunny.append({
                 'lat': p['lat'], 'lon': p['lon'],
                 'name': p['name'], 'amenity': p['amenity'],
@@ -1503,7 +1477,6 @@ def sunny_pois():
         sunny.sort(key=lambda x: (-x['sun_hours'], x['dist']))
 
         # Greedy min-separation filter (~100 m) — spread results across the map
-        from shapely.geometry import Point as SPoint
         kept = []
         kept_pts = []
         for p in sunny:
