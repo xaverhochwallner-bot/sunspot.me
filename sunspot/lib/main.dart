@@ -47,6 +47,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   MapLibreMapController? _mapController;
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
+  LatLng? _lastSearchCenter;
+  double? _lastSearchZoom;
   Timer? _debounceTimer;
 
   double   _hour          = DateTime.now().hour.toDouble();
@@ -258,9 +260,30 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _onCameraIdle() {
     if (_mapController == null) return;
-    final center = _mapController!.cameraPosition?.target;
+    final pos    = _mapController!.cameraPosition;
+    final center = pos?.target;
     if (center == null) return;
     _currentCenter = center;
+
+    // Clear stale results when the map moves or zoom changes significantly
+    final zoom = pos?.zoom ?? 0;
+    final sc   = _lastSearchCenter;
+    final sz   = _lastSearchZoom;
+    if (sc != null && sz != null) {
+      final zoomChanged = (zoom - sz).abs() > 0.5;
+      final dist = _distanceMeters(sc, center);
+      final movedFar = dist > 300;
+      if (zoomChanged || movedFar) {
+        if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
+          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
+          _clearSunnySpots();
+          _clearPoiMarkers();
+          _lastSearchCenter = null;
+          _lastSearchZoom   = null;
+        }
+      }
+    }
+
     if (_sunnySpots.isNotEmpty) _refreshSunnySpotPositions();
     if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
     if (_sunnyPois.isNotEmpty) _refreshPoiPositions();
@@ -383,6 +406,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (ctrl == null || !_mapReady) return;
 
     setState(() => _findingSunnySpots = true);
+    _lastSearchCenter = ctrl.cameraPosition?.target;
+    _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     await _clearTourLine();
     try {
       final bounds = await ctrl.getVisibleRegion();
@@ -531,6 +556,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _findSunnyPois() async {
     final ctrl = _mapController;
     if (ctrl == null || !_mapReady) return;
+    _lastSearchCenter = ctrl.cameraPosition?.target;
+    _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; });
     try {
       final bounds  = await ctrl.getVisibleRegion();
