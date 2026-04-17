@@ -462,7 +462,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         } catch (_) { return []; }
       }
 
-      final gridData = jsonDecode(results[0].body) as Map<String, dynamic>;
+      final gridData   = jsonDecode(results[0].body) as Map<String, dynamic>;
+      final gridReason = gridData['reason'] as String? ?? '';
+
+      if (gridReason == 'night') {
+        setState(() { _sunnySpots = []; _spotsZoomHint = false; });
+        _showError('No sun at this hour — move the time slider');
+        return;
+      }
+
       final gridSpots = (gridData['spots'] as List<dynamic>? ?? []).map((s) => <String, dynamic>{
         'lat':            (s['lat']  as num).toDouble(),
         'lon':            (s['lon']  as num).toDouble(),
@@ -476,8 +484,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       // Merge all, sort by sun hours desc, cap at 8
       final merged = [...gridSpots, ...parks, ...squares];
-      final gridReason = gridData['reason'] as String? ?? '';
-      final zoomIn = merged.isEmpty && (gridReason == 'zoom_in' || gridSpots.isEmpty);
+      final zoomIn = merged.isEmpty && gridReason == 'zoom_in';
       setState(() => _spotsZoomHint = zoomIn);
       merged.sort((a, b) => ((b['sun_hours_left'] as int?) ?? 0)
           .compareTo((a['sun_hours_left'] as int?) ?? 0));
@@ -500,8 +507,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           );
         }
       }
+    } on TimeoutException {
+      if (mounted) _showError('Search timed out — try zooming in closer');
     } catch (_) {
-      _showError('Could not find sunny spots');
+      if (mounted) _showError('Could not find sunny spots');
     } finally {
       if (mounted) setState(() => _findingSunnySpots = false);
     }
@@ -592,17 +601,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       );
       final resp = await http.get(uri).timeout(const Duration(seconds: 15));
       if (mounted && resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final data   = jsonDecode(resp.body) as Map<String, dynamic>;
+        final reason = data['reason'] as String? ?? '';
+        if (reason == 'night') {
+          _showError('No sun at this hour — move the time slider');
+          return;
+        }
         final list = data['spots'] as List<dynamic>? ?? [];
         final pois = list.cast<Map<String, dynamic>>();
         setState(() => _sunnyPois = pois);
         await _showPoiMarkers(pois);
         await _refreshPoiPositions();
       } else if (mounted) {
-        _showError('Server error ${resp.statusCode}: ${resp.body}');
+        _showError('Server error ${resp.statusCode}');
       }
+    } on TimeoutException {
+      if (mounted) _showError('Search timed out — try zooming in closer');
     } catch (e) {
-      _showError('Could not load places: $e');
+      if (mounted) _showError('Could not load places');
     } finally {
       if (mounted) setState(() => _loadingPois = false);
     }
