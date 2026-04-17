@@ -1203,7 +1203,7 @@ def _load_city_pois():
     min_lat, min_lon, max_lat, max_lon = _CITY_BBOX
     bbox = f'{min_lat},{min_lon},{max_lat},{max_lon}'
 
-    # Three parallel queries — benches capped at 2000 to stay within Overpass limits
+    # Three parallel queries covering all POI categories
     q_amenity = (
         '[out:json][timeout:60];\n(\n'
         f'  node["amenity"~"^(cafe|bar|pub|restaurant|fast_food)$"]({bbox});\n'
@@ -1216,10 +1216,11 @@ def _load_city_pois():
         f'  way["leisure"~"^(park|garden|nature_reserve|playground|pitch)$"]({bbox});\n'
         ');\nout center;'
     )
-    q_benches = (
+    q_squares = (
         '[out:json][timeout:60];\n(\n'
-        f'  node["amenity"="bench"]({bbox});\n'
-        ');\nout 2000;'
+        f'  node["place"="square"]({bbox});\n'
+        f'  way["place"="square"]({bbox});\n'
+        ');\nout center;'
     )
 
     print('[poi] Loading city-wide POI database...')
@@ -1228,7 +1229,7 @@ def _load_city_pois():
         with ThreadPoolExecutor(max_workers=3) as ex:
             f1 = ex.submit(_overpass_fetch, q_amenity, 70)
             f2 = ex.submit(_overpass_fetch, q_parks, 70)
-            f3 = ex.submit(_overpass_fetch, q_benches, 70)
+            f3 = ex.submit(_overpass_fetch, q_squares, 70)
             r1, r2, r3 = f1.result(), f2.result(), f3.result()
     except Exception as e:
         print(f'[poi] Failed to load city POIs: {e}')
@@ -1283,7 +1284,7 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
         elif t == 'square':
             type_queries += [
                 f'node["place"="square"]({ar});',
-                f'node["place"="pedestrian"]({ar});',
+                f'way["place"="square"]({ar});',
             ]
     query = '[out:json][timeout:15];\n(\n' + '\n'.join(type_queries) + '\n);\nout center 100;'
     result = _overpass_fetch(query, timeout=20)
@@ -1303,6 +1304,8 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
 _poi_cache = {}  # fallback cache for non-city locations
 
 
+MIN_POI_SEPARATION = 0.0009  # ~100 m in degrees
+
 @app.route("/sunny_pois")
 def sunny_pois():
     try:
@@ -1312,32 +1315,51 @@ def sunny_pois():
         minute     = int(request.args.get('minute', 0))
         date_str   = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
         types      = request.args.get('types', 'cafe,bar,restaurant').split(',')
+        zoom       = float(request.args.get('zoom', 15))
+        vp_min_lat = request.args.get('minLat', type=float)
+        vp_min_lon = request.args.get('minLon', type=float)
+        vp_max_lat = request.args.get('maxLat', type=float)
+        vp_max_lon = request.args.get('maxLon', type=float)
+
+        if zoom < 13:
+            return jsonify({'spots': [], 'reason': 'zoom_in'})
 
         tz        = pytz.timezone('Europe/Vienna')
         date      = datetime.strptime(date_str, '%Y-%m-%d').date()
         t         = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
         elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
 
-        # Types covered by city DB vs. must use Overpass (bench = too many for city-wide)
-        _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'bench'}
-        min_lat, min_lon, max_lat, max_lon = _CITY_BBOX
-        in_city = (min_lat <= center_lat <= max_lat and min_lon <= center_lon <= max_lon)
+        if elevation <= 0:
+            return jsonify({'spots': [], 'reason': 'night'})
 
-        type_set = set(types)
+        # Search radius: use viewport but cap by zoom so low-zoom results stay sane
+        # z13→1.5 km, z14→1.0 km, z15+→0.7 km (viewport is usually smaller at z15+)
+        max_radius_m = {13: 1500, 14: 1000}.get(int(zoom), 700)
+        R    = max_radius_m / 111320
+        Rlon = R / max(0.3, math.cos(math.radians(center_lat)))
+
+        # Clamp viewport bbox to the zoom-based radius
+        s_min_lat = max(vp_min_lat, center_lat - R)    if vp_min_lat is not None else center_lat - R
+        s_max_lat = min(vp_max_lat, center_lat + R)    if vp_max_lat is not None else center_lat + R
+        s_min_lon = max(vp_min_lon, center_lon - Rlon) if vp_min_lon is not None else center_lon - Rlon
+        s_max_lon = min(vp_max_lon, center_lon + Rlon) if vp_max_lon is not None else center_lon + Rlon
+
+        _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square'}
+        cb_min_lat, cb_min_lon, cb_max_lat, cb_max_lon = _CITY_BBOX
+        in_city = (cb_min_lat <= center_lat <= cb_max_lat and cb_min_lon <= center_lon <= cb_max_lon)
+
+        type_set       = set(types)
         city_types     = type_set & _CITY_DB_TYPES
-        overpass_types = type_set - _CITY_DB_TYPES  # e.g. bench
+        overpass_types = type_set - _CITY_DB_TYPES
 
         candidates = []
 
-        # City DB path for supported types
         if _city_pois_ready and in_city and city_types:
-            R    = 650 / 111320
-            Rlon = R / max(0.3, math.cos(math.radians(center_lat)))
             candidates += [
                 p for p in _city_pois
                 if p['poi_type'] in city_types
-                and abs(p['lat'] - center_lat) < R
-                and abs(p['lon'] - center_lon) < Rlon
+                and s_min_lat <= p['lat'] <= s_max_lat
+                and s_min_lon <= p['lon'] <= s_max_lon
             ]
         elif city_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
@@ -1345,34 +1367,47 @@ def sunny_pois():
                 _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
                 if len(_poi_cache) > 50:
                     _poi_cache.pop(next(iter(_poi_cache)))
-            candidates += _poi_cache[cache_key]
+            candidates += [p for p in _poi_cache[cache_key]
+                           if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
-        # Overpass path for bench (and any other non-city types)
         if overpass_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(overpass_types)))
             if cache_key not in _poi_cache:
                 _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
                 if len(_poi_cache) > 50:
                     _poi_cache.pop(next(iter(_poi_cache)))
-            candidates += _poi_cache[cache_key]
-
-        # Sort by distance, shadow-check each, return first 8 sunny ones
-        candidates = sorted(
-            candidates,
-            key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2
-        )[:150]
+            candidates += [p for p in _poi_cache[cache_key]
+                           if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
         def _poi_sun_hours(plat, plon):
             from shapely.geometry import Point as SPoint
             current_hour = t.hour
+            pt = SPoint(plon, plat)
+            # Pre-build index: hour -> list of cached shadow geometries for this date
+            cached_by_hour: dict[int, list] = {}
+            for ck, geom in list(_shadow_cache.items()):
+                if ck[1] == date.month and ck[2] == date.day:
+                    cached_by_hour.setdefault(ck[0], []).append(geom)
+
             sun_hours = []
             for h in range(current_hour, 24):
-                ck_h = _cache_key(h, date.month, date.day, center_lat, center_lon, 15)
-                if ck_h in _shadow_cache:
-                    try:
-                        in_sun = _shadow_cache[ck_h].contains(SPoint(plon, plat))
-                    except Exception:
-                        in_sun = False
+                geoms = cached_by_hour.get(h)
+                if geoms:
+                    # Use first cached geometry that covers this point's vicinity
+                    in_sun = False
+                    for geom in geoms:
+                        try:
+                            if geom.contains(pt):
+                                in_sun = True
+                                break
+                        except Exception:
+                            pass
+                    # If point not found in any geometry, it may be outside all cached
+                    # viewports — fall back to direct shadow check
+                    if not in_sun:
+                        th = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
+                        el, az = get_sun_angles(plat, plon, th)
+                        in_sun = el > 0 and not _point_in_shadow(plon, plat, el, az)
                 else:
                     th = tz.localize(datetime(date.year, date.month, date.day, h, 0, 0))
                     el, az = get_sun_angles(plat, plon, th)
@@ -1391,29 +1426,47 @@ def sunny_pois():
                 sun_until = last_h + 1
             return sun_hours_left, sun_until
 
-        results = []
+        # Compute sun hours for all candidates — no hard shadow filter so user
+        # always gets results even when everything nearby is currently in shadow
+        sunny = []
         for p in candidates:
-            if elevation <= 0 or _point_in_shadow(p['lon'], p['lat'], elevation, azimuth):
-                continue
             dist = int(((p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)**0.5 * 111320)
             sun_hours_left, sun_until = _poi_sun_hours(p['lat'], p['lon'])
-            entry = {
+            sunny.append({
                 'lat': p['lat'], 'lon': p['lon'],
                 'name': p['name'], 'amenity': p['amenity'],
                 'dist': dist,
                 'sun_hours': sun_hours_left,
-            }
-            if sun_until is not None:
-                entry['sun_until'] = sun_until
-            results.append(entry)
-            if len(results) == 8:
+                'sun_until': sun_until,
+            })
+
+        # Sort: most sun hours remaining first, nearest as tiebreaker
+        sunny.sort(key=lambda x: (-x['sun_hours'], x['dist']))
+
+        # Greedy min-separation filter (~100 m) — spread results across the map
+        from shapely.geometry import Point as SPoint
+        kept = []
+        kept_pts = []
+        for p in sunny:
+            pt = SPoint(p['lon'], p['lat'])
+            if any(pt.distance(q) < MIN_POI_SEPARATION for q in kept_pts):
+                continue
+            kept.append(p)
+            kept_pts.append(pt)
+            if len(kept) == 8:
                 break
 
-        return jsonify(results)
+        spots = []
+        for p in kept:
+            entry = {k: p[k] for k in ('lat', 'lon', 'name', 'amenity', 'dist', 'sun_hours')}
+            if p['sun_until'] is not None:
+                entry['sun_until'] = p['sun_until']
+            spots.append(entry)
+
+        return jsonify({'spots': spots})
     except RuntimeError as e:
-        # Overpass failure — return empty list so client shows "no results" gracefully
         print(f'[sunny_pois] {e}')
-        return jsonify([])
+        return jsonify({'spots': [], 'reason': 'error'})
     except Exception as e:
         return jsonify({'error': str(e)}), 400
 

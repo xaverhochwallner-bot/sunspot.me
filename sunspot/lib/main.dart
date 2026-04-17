@@ -109,8 +109,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _loadingPois       = false;
   bool                       _poiMarkersReady   = false;
 
-  // Spots tab — optional park/bench overlay
-  String                     _spotMode          = 'spots'; // 'spots', 'park', 'bench'
+  // Spots tab — optional park/square overlay
+  String                     _spotMode          = 'spots'; // 'spots', 'park', 'square'
+  bool                       _spotsZoomHint     = false;
 
   // Weather overlay
   Map<String, dynamic>? _weatherData;
@@ -404,7 +405,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&minLon=${bounds.southwest.longitude}'
         '&maxLat=${bounds.northeast.latitude}'
         '&maxLon=${bounds.northeast.longitude}'
-        '&n=5',
+        '&n=8',
       );
 
       final response = await http.get(uri).timeout(const Duration(seconds: 30));
@@ -418,7 +419,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               })
           .toList();
 
-      // Show POI results for park/bench modes, grid spots for 'spots' mode
+      // Show POI results for park/square modes, grid spots for 'spots' mode
       List<Map<String, dynamic>> allSpots = _spotMode == 'spots' ? spots : [];
       if (_spotMode != 'spots') {
         try {
@@ -428,12 +429,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
             '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
             '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-            '&hour=$h&minute=$min&date=$dateStr&types=$_spotMode',
+            '&hour=$h&minute=$min&date=$dateStr&types=$_spotMode'
+            '&zoom=${zoom.round()}',
           );
           final poiResp = await http.get(poiUri);
-          final poiData = jsonDecode(poiResp.body);
-          if (poiData is List) {
-            allSpots = poiData.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
+          final poiData = jsonDecode(poiResp.body) as Map<String, dynamic>;
+          final reason  = poiData['reason'] as String?;
+          if (reason == 'zoom_in') {
+            setState(() => _spotsZoomHint = true);
+          } else {
+            setState(() => _spotsZoomHint = false);
+            final list = poiData['spots'] as List<dynamic>? ?? [];
+            allSpots = list.cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
               'lat': p['lat'], 'lon': p['lon'],
               'sun_hours_left': p['sun_hours'] as int? ?? 0,
               'sun_until': p['sun_until'] as int?,
@@ -530,22 +537,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final h       = _hour.toInt();
       final min     = ((_hour * 60).toInt() % 60);
       final types   = _poiFilter;
+      final zoom    = ctrl.cameraPosition?.zoom ?? 15.0;
       final uri = Uri.parse(
         '$flaskBaseUrl/sunny_pois'
         '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
         '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
         '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-        '&hour=$h&minute=$min&date=$dateStr&types=$types',
+        '&hour=$h&minute=$min&date=$dateStr&types=$types'
+        '&zoom=${zoom.round()}',
       );
       final resp = await http.get(uri);
       if (mounted && resp.statusCode == 200) {
-        final data = jsonDecode(resp.body);
-        if (data is List) {
-          final pois = data.cast<Map<String, dynamic>>();
-          setState(() => _sunnyPois = pois);
-          await _showPoiMarkers(pois);
-          await _refreshPoiPositions();
-        }
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final list = data['spots'] as List<dynamic>? ?? [];
+        final pois = list.cast<Map<String, dynamic>>();
+        setState(() => _sunnyPois = pois);
+        await _showPoiMarkers(pois);
+        await _refreshPoiPositions();
       } else if (mounted) {
         _showError('Server error ${resp.statusCode}: ${resp.body}');
       }
@@ -2935,7 +2943,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   IconData _poiIcon(String amenity) {
     if (amenity.contains('cafe'))        return Icons.local_cafe;
     if (amenity.contains('park') || amenity.contains('garden')) return Icons.park;
-    if (amenity.contains('bench'))       return Icons.chair_alt;
+    if (amenity.contains('square') || amenity.contains('pedestrian')) return Icons.location_city;
     if (amenity.contains('bar') || amenity.contains('pub') || amenity.contains('beer')) return Icons.sports_bar;
     if (amenity.contains('restaurant') || amenity.contains('fast_food')) return Icons.restaurant;
     return Icons.place;
@@ -2949,7 +2957,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (amenity.contains('park'))        return '🌳 Park';
     if (amenity.contains('garden'))      return '🌳 Garden';
     if (amenity.contains('square') || amenity.contains('pedestrian')) return '⛲ Square';
-    if (amenity.contains('bench'))       return '🪑 Bench';
+    if (amenity.contains('square') || amenity.contains('pedestrian')) return '🏛️ Square';
     if (amenity.contains('bar') || amenity.contains('pub')) return '🍺 Bar';
     if (amenity.contains('restaurant'))  return '🍽️ Restaurant';
     if (amenity.contains('fast_food'))   return '🍔 Food';
@@ -2959,7 +2967,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String _poiLabel(String amenity) {
     if (amenity.contains('cafe'))        return 'Café';
     if (amenity.contains('park') || amenity.contains('garden')) return 'Park';
-    if (amenity.contains('bench'))       return 'Bench';
+    if (amenity.contains('square') || amenity.contains('pedestrian')) return 'Square';
     if (amenity.contains('beer_garden')) return 'Beer garden';
     if (amenity.contains('bar') || amenity.contains('pub')) return 'Bar';
     if (amenity.contains('restaurant'))  return 'Restaurant';
@@ -2991,14 +2999,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           for (final t in [
             ('spots', Icons.wb_sunny, 'Spots'),
             ('park',  Icons.park,     'Parks'),
-            ('bench', Icons.chair_alt,'Benches'),
+            ('square', Icons.location_city, 'Squares'),
           ])
             Padding(
               padding: const EdgeInsets.only(right: 6),
               child: GestureDetector(
                 onTap: () {
                   if (_spotMode == t.$1) return;
-                  setState(() { _spotMode = t.$1; });
+                  setState(() { _spotMode = t.$1; _spotsZoomHint = false; });
                   _clearSunnySpots();
                 },
                 child: Container(
@@ -3053,6 +3061,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ],
         ]),
+        if (_spotsZoomHint) ...[
+          const SizedBox(height: 10),
+          Row(children: [
+            const Icon(Icons.zoom_in, size: 14, color: Colors.grey),
+            const SizedBox(width: 6),
+            Text('Zoom in to see results', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+          ]),
+        ],
         if (_sunnySpots.isNotEmpty) ...[
           const SizedBox(height: 10),
           ..._sunnySpots.asMap().entries.map((e) {
