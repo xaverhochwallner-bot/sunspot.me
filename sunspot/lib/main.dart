@@ -3058,7 +3058,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               sunLabel: untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left',
               categoryIcon: catIcon,
               categoryLabel: catLabel,
-              categoryColor: catColor,
               isSaved: isSaved,
               onTap: () => _showSpotSheet(spot, idx),
             );
@@ -3106,26 +3105,34 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (_sunnyPois.isNotEmpty) ...[
         const SizedBox(height: 10),
         ..._sunnyPois.asMap().entries.map((e) {
-          final idx  = e.key;
-          final poi  = e.value;
-          final lat  = poi['lat'] as double;
-          final lon  = poi['lon'] as double;
-          final name = (poi['name'] as String? ?? '').isNotEmpty
+          final idx     = e.key;
+          final poi     = e.value;
+          final lat     = poi['lat'] as double;
+          final lon     = poi['lon'] as double;
+          final name    = (poi['name'] as String? ?? '').isNotEmpty
               ? poi['name'] as String
               : (poi['amenity'] as String? ?? 'Place ${idx + 1}');
-          final dist    = poi['dist'] as int? ?? 0;
-          final amenity = poi['amenity'] as String? ?? '';
-          final isSaved = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          final dist     = poi['dist'] as int? ?? 0;
+          final amenity  = poi['amenity'] as String? ?? '';
+          final sunH     = (poi['sun_hours_left'] as int?) ?? 0;
+          final sunUntil = poi['sun_until'] as int?;
+          final untilLbl = sunUntil != null ? 'until ${sunUntil.toString().padLeft(2,'0')}:00' : null;
+          final isSaved  = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          final catLabel = _poiLabel(amenity);
+          final catIcon  = _poiIcon(amenity);
+          final sunLbl   = untilLbl != null ? '$sunH h · $untilLbl' : '$sunH h left';
           return _spotCard(
             circleChild: Text('${idx + 1}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white)),
             circleColor: const Color(0xFFFF8C00),
             address: name,
             distLabel: _formatDistance(dist.toDouble()),
-            sunLabel: _poiLabel(amenity),
+            sunLabel: sunLbl,
+            categoryIcon: catIcon,
+            categoryLabel: catLabel,
             isSaved: isSaved,
             onTap: () => _showSpotSheet({
               'lat': lat, 'lon': lon,
-              'sun_hours_left': 0, 'sun_until': null,
+              'sun_hours_left': sunH, 'sun_until': sunUntil,
               '_poi_name': name,
             }, idx),
           );
@@ -3165,7 +3172,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     required VoidCallback onTap,
     IconData? categoryIcon,
     String? categoryLabel,
-    Color? categoryColor,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -3198,29 +3204,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       Icon(Icons.directions_walk, size: 11, color: Colors.grey.shade500),
                       const SizedBox(width: 2),
                       Text(distLabel, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
+                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+                      const SizedBox(width: 6),
                     ],
                     Icon(Icons.wb_sunny_outlined, size: 11, color: Colors.orange.shade400),
                     const SizedBox(width: 2),
                     Text(sunLabel, style: TextStyle(fontSize: 11, color: Colors.orange.shade700)),
+                    if (categoryIcon != null) ...[
+                      const SizedBox(width: 6),
+                      Text('·', style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
+                      const SizedBox(width: 6),
+                      Icon(categoryIcon, size: 11, color: Colors.orange.shade500),
+                      const SizedBox(width: 2),
+                      Text(categoryLabel ?? '', style: TextStyle(fontSize: 11, color: Colors.orange.shade700)),
+                    ],
                   ]),
                 ]),
               ),
-              if (categoryIcon != null) ...[
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: categoryColor ?? Colors.orange,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(categoryIcon, size: 11, color: Colors.white),
-                    const SizedBox(width: 3),
-                    Text(categoryLabel ?? '', style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: Colors.white)),
-                  ]),
-                ),
-              ],
               if (isSaved) ...[const SizedBox(width: 4), Icon(Icons.favorite, size: 14, color: Colors.red.shade300)],
               const SizedBox(width: 4),
               Icon(Icons.chevron_right, size: 16, color: Colors.orange.shade300),
