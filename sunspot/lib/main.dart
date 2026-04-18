@@ -2325,7 +2325,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       body: isMobile
           ? LayoutBuilder(builder: (ctx, constraints) {
               final totalH    = constraints.maxHeight;
-              const collapsedH = 240.0;
+              const collapsedH = 256.0;
               final bottomH   = _panelExpanded ? totalH : collapsedH;
               final mapH      = totalH - bottomH;
               return Column(children: [

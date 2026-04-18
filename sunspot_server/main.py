@@ -2020,9 +2020,18 @@ def _startup_prewarm():
         print("[startup] Nighttime — skipping pre-warm.")
         return
     lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
-    print(f"[startup] Pre-warming Vienna center z12-14 for hour {now.hour} ...")
-    for zoom, vp_w, vp_h in [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04)]:
-        _compute_shadow_cached(now.hour, now.month, now.day, lat, lon, zoom, vp_w, vp_h)
+    hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
+    zooms = [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04), (15, 0.025, 0.02)]
+    tasks = [(h, now.month, now.day, lat, lon, z, w, v)
+             for h in hours for z, w, v in zooms]
+    print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} "
+          f"({len(tasks)} tasks in parallel) ...")
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
+                for h, mo, d, la, lo, z, w, v in tasks]
+        for f in futs:
+            try:    f.result()
+            except Exception as e: print(f"[startup] prewarm error: {e}")
     print("[startup] Pre-warm complete.")
 
 threading.Thread(target=_startup_prewarm, daemon=True).start()
