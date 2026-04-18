@@ -83,6 +83,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Live mode
   bool   _liveMode  = false;
   Timer? _liveTimer;
+  int    _animSpeed = 1; // 1×=600ms, 2×=300ms, 4×=100ms per hour step
 
   // Sunrise / sunset (local hours, e.g. 6.0, 20.0)
   double? _sunriseHour;
@@ -1864,15 +1865,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _toggle24h() {
     if (_animating) {
-      setState(() => _animating = false);
+      // Cycle speed: 1×→2×→4×→stop
+      if (_animSpeed == 1) { setState(() => _animSpeed = 2); return; }
+      if (_animSpeed == 2) { setState(() => _animSpeed = 4); return; }
+      setState(() { _animating = false; _animSpeed = 1; });
       return;
     }
     final start = _sunriseHour ?? 6.0;
-    setState(() {
-      _animating = true;
-      _liveMode = false;
-      _hour = start;
-    });
+    setState(() { _animating = true; _liveMode = false; _animSpeed = 1; _hour = start; });
     _run24hStep();
   }
 
@@ -1880,7 +1880,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (!_animating) return;
     await fetchShadows();
     if (_heatmapMode) await _fetchAndShowHeatmap();
-    await Future.delayed(const Duration(milliseconds: 400));
+    final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
+    await Future.delayed(Duration(milliseconds: ms));
     if (!_animating) return;
     final end = _sunsetHour ?? 20.0;
     if (_hour >= end) {
@@ -2676,7 +2677,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 Icon(_animating ? Icons.stop : Icons.play_arrow, size: 13,
                     color: _animating ? Colors.white : Colors.black54),
                 const SizedBox(width: 4),
-                Text('24h', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                Text(_animating ? '${_animSpeed}×' : '24h',
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
                     color: _animating ? Colors.white : Colors.black54)),
               ]),
             ),
