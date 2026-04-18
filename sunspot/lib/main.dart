@@ -778,7 +778,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final uri = Uri.parse(
         'https://api.open-meteo.com/v1/forecast'
         '?latitude=$lat&longitude=$lon'
-        '&current=temperature_2m,weather_code,uv_index'
+        '&current=temperature_2m,weather_code,uv_index,cloud_cover'
         '&timezone=auto',
       );
       final res = await http.get(uri);
@@ -922,15 +922,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null) return;
 
+    // Fade opacity with sun elevation: 0° → 0.0, 45°+ → 0.50
+    final opacity = (_elevation <= 0)
+        ? 0.0
+        : (_elevation / 45.0).clamp(0.0, 1.0) * 0.50;
+
     if (!_heatmapLayerReady) {
       await ctrl.addGeoJsonSource('sunmap-src', geojson);
       await ctrl.addFillLayer(
         'sunmap-src', 'sunmap-fill',
-        FillLayerProperties(fillColor: '#FFD700', fillOpacity: 0.50),
+        FillLayerProperties(fillColor: '#FFD700', fillOpacity: opacity),
       );
       _heatmapLayerReady = true;
     } else {
       await ctrl.setGeoJsonSource('sunmap-src', geojson);
+      await ctrl.setLayerProperties(
+          'sunmap-fill', FillLayerProperties(fillOpacity: opacity));
     }
   }
 
@@ -2571,6 +2578,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildTimeSlider(),
               const SizedBox(height: 16),
               _buildDateSection(),
+              if (_weatherData != null) ...[
+                const SizedBox(height: 12),
+                _buildWeatherTile(),
+              ],
               const Divider(height: 28),
               _buildFindSunnySpotsSection(),
               const Divider(height: 28),
@@ -3588,6 +3599,60 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
+  // ---- Weather tile ----
+  Widget _buildWeatherTile() {
+    final data = _weatherData!;
+    final uv    = (data['uv_index']    as num?) ?? 0;
+    final cloud = (data['cloud_cover'] as num?) ?? 0;
+    final uvInt = uv.round();
+    final cloudInt = cloud.round();
+
+    // Cloud cover label
+    final String cloudLabel;
+    if (cloudInt < 20)       cloudLabel = 'Clear';
+    else if (cloudInt < 50)  cloudLabel = 'Partly cloudy';
+    else if (cloudInt < 85)  cloudLabel = 'Mostly cloudy';
+    else                     cloudLabel = 'Overcast';
+
+    return Row(children: [
+      Expanded(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade50,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: Colors.grey.shade200),
+          ),
+          child: Row(children: [
+            Icon(Icons.cloud_outlined, size: 14, color: Colors.grey.shade400),
+            const SizedBox(width: 6),
+            Expanded(child: Text(cloudLabel,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600))),
+            Text('$cloudInt%',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                    color: Colors.grey.shade500)),
+          ]),
+        ),
+      ),
+      const SizedBox(width: 8),
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: Colors.grey.shade50,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange.shade300),
+          const SizedBox(width: 6),
+          Text('UV $uvInt',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                  color: _uvColor(uv))),
+        ]),
+      ),
+    ]);
+  }
+
   // ---- Date section ----
   Widget _buildDateSection() {
     return Column(
@@ -3841,6 +3906,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _buildTimeSlider(),
             const SizedBox(height: 16),
             _buildDateSection(),
+            if (_weatherData != null) ...[
+              const SizedBox(height: 12),
+              _buildWeatherTile(),
+            ],
           ],
         );
       case 1: // Spots
