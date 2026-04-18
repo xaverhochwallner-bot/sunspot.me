@@ -262,14 +262,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void _injectAttributionCss() {
     final style = html.StyleElement();
     style.text =
-        // Collapse attribution text — show only the compact ⓘ button
-        '.maplibregl-ctrl-attrib.maplibregl-compact { min-height: 20px; }'
-        '.maplibregl-ctrl-attrib-inner { display: none !important; }'
-        '.maplibregl-ctrl-attrib-button { opacity: 0.4; }'
-        // Hide the MapLibre logo
+        // Hide attribution and logo entirely
+        '.maplibregl-ctrl-attrib { display: none !important; }'
         '.maplibregl-ctrl-logo { display: none !important; }'
-        // Move the control area above the mobile bottom bar (avoids overlap)
-        '.maplibregl-ctrl-bottom-right { bottom: 4px !important; right: 4px !important; }';
+        '.maplibregl-ctrl-bottom-right { display: none !important; }';
     html.document.head!.append(style);
   }
 
