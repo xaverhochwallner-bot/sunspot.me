@@ -2578,10 +2578,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               _buildTimeSlider(),
               const SizedBox(height: 16),
               _buildDateSection(),
-              if (_weatherData != null) ...[
-                const SizedBox(height: 12),
-                _buildWeatherTile(),
-              ],
               const Divider(height: 28),
               _buildFindSunnySpotsSection(),
               const Divider(height: 28),
@@ -3599,60 +3595,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  // ---- Weather tile ----
-  Widget _buildWeatherTile() {
-    final data = _weatherData!;
-    final uv    = (data['uv_index']    as num?) ?? 0;
-    final cloud = (data['cloud_cover'] as num?) ?? 0;
-    final uvInt = uv.round();
-    final cloudInt = cloud.round();
-
-    // Cloud cover label
-    final String cloudLabel;
-    if (cloudInt < 20)       cloudLabel = 'Clear';
-    else if (cloudInt < 50)  cloudLabel = 'Partly cloudy';
-    else if (cloudInt < 85)  cloudLabel = 'Mostly cloudy';
-    else                     cloudLabel = 'Overcast';
-
-    return Row(children: [
-      Expanded(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.grey.shade50,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.grey.shade200),
-          ),
-          child: Row(children: [
-            Icon(Icons.cloud_outlined, size: 14, color: Colors.grey.shade400),
-            const SizedBox(width: 6),
-            Expanded(child: Text(cloudLabel,
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade600))),
-            Text('$cloudInt%',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                    color: Colors.grey.shade500)),
-          ]),
-        ),
-      ),
-      const SizedBox(width: 8),
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: Colors.grey.shade50,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.shade200),
-        ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange.shade300),
-          const SizedBox(width: 6),
-          Text('UV $uvInt',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                  color: _uvColor(uv))),
-        ]),
-      ),
-    ]);
-  }
-
   // ---- Date section ----
   Widget _buildDateSection() {
     return Column(
@@ -3906,10 +3848,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _buildTimeSlider(),
             const SizedBox(height: 16),
             _buildDateSection(),
-            if (_weatherData != null) ...[
-              const SizedBox(height: 12),
-              _buildWeatherTile(),
-            ],
           ],
         );
       case 1: // Spots
