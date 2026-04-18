@@ -107,8 +107,8 @@ _AMENITY_BOOST_TYPES = {
 MIN_SPOT_SEPARATION = 0.0015
 
 PRE_SIMPLIFY = {
-    12: 0.00020,  # ~20 m — buildings become pentagons
-    13: 0.00008,  # ~8 m
+    12: 0.00060,  # ~60 m — city overview, pentagon shapes fine
+    13: 0.00025,  # ~25 m — neighbourhood level
     14: 0.00003,  # ~3 m
     15: 0.000010, # ~1 m — modest reduction, still worth the STRtree cache
 }
@@ -632,9 +632,9 @@ def _simplify_tolerance(zoom):
     if zoom >= 16: return 0.000020   # ~2 m
     if zoom == 15: return 0.000040   # ~4 m
     if zoom == 14: return 0.000045   # ~4 m
-    if zoom == 13: return 0.000080   # ~8 m
-    if zoom == 12: return 0.00015    # ~15 m
-    return               0.00022    # zoom ≤ 11 — ~22 m
+    if zoom == 13: return 0.00025    # ~25 m — neighbourhood overview
+    if zoom == 12: return 0.00060    # ~60 m — city overview, massive vertex reduction
+    return               0.00080    # zoom ≤ 11 — ~80 m
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):

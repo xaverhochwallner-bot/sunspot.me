@@ -72,6 +72,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                _shadowLayersReady = false;
   int                 _lastFetchZoom     = -1;
 
+  // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3'
+  final Map<String, Map<String, dynamic>> _shadowResultCache = {};
+  static const int _shadowCacheMax = 30;
+
   // Panel
   bool _panelOpen = true;
   bool _panelExpanded = false;
@@ -1613,6 +1617,29 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       _lastFetchZoom = zoom;
 
+      // Cache lookup — key matches server's _cache_key(hour, month, day, lat, lon, zoom)
+      final cacheKey = '${zoom}_${_hour.toInt()}_${_selectedDate.month}_${_selectedDate.day}'
+          '_${_currentCenter.latitude.toStringAsFixed(3)}'
+          '_${_currentCenter.longitude.toStringAsFixed(3)}';
+      final cached = _shadowResultCache[cacheKey];
+      if (cached != null) {
+        final elev   = (cached['elevation'] as num?)?.toDouble() ?? 0.0;
+        final azim   = (cached['azimuth']   as num?)?.toDouble() ?? 0.0;
+        final srHour = (cached['sunrise']   as num?)?.toDouble();
+        final ssHour = (cached['sunset']    as num?)?.toDouble();
+        if (cached['dark_area'] != null) {
+          await _updateMapLayers(cached['dark_area'] as Map<String, dynamic>, elev);
+        }
+        _pillTimer?.cancel();
+        if (mounted) setState(() {
+          _elevation = elev; _azimuth = azim;
+          _sunriseHour = srHour; _sunsetHour = ssHour;
+          _loading = false; _showPill = false; _loadingProgress = 0.0;
+        });
+        if (!completer.isCompleted) completer.complete();
+        return;
+      }
+
       final uri = Uri.parse(
         '$flaskBaseUrl/shadow/stream'
         '?lat=${_currentCenter.latitude}'
@@ -1656,6 +1683,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final ssHour  = (result['sunset']    as num?)?.toDouble();
           if (result['dark_area'] != null) {
             await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
+          }
+          // Store in client cache for instant replay (e.g. slider scrub back)
+          _shadowResultCache[cacheKey] = result;
+          if (_shadowResultCache.length > _shadowCacheMax) {
+            _shadowResultCache.remove(_shadowResultCache.keys.first);
           }
           _pillTimer?.cancel();
           if (mounted) {
@@ -1934,6 +1966,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             compassEnabled:        false,
           ),
         ),
+
+        // Radial vignette — fades shadow layer edges so rectangular boundary is hidden
+        if (_shadowLayersReady && !_heatmapMode)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(painter: _VignettePainter()),
+            ),
+          ),
 
         // Tap-to-inspect hint badge (Saved tab only)
         if (_isMobile && _mobileTab == 3)
@@ -3815,4 +3855,31 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
+}
+
+// Radial vignette overlay — fades the map edge to mask the rectangular
+// shadow boundary. Drawn above MapLibre, below all UI widgets.
+class _VignettePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    // Use the longer axis so the gradient always reaches the corners.
+    final radius = sqrt(size.width * size.width + size.height * size.height) / 2;
+    final paint = Paint()
+      ..shader = RadialGradient(
+        center: Alignment.center,
+        radius: 1.0,
+        colors: const [
+          Color(0x00FFFFFF), // transparent centre
+          Color(0x00FFFFFF), // still transparent at 50%
+          Color(0x55FFFFFF), // soft at 75%
+          Color(0xCCFFFFFF), // ~80% white at edge
+        ],
+        stops: const [0.0, 0.50, 0.75, 1.0],
+      ).createShader(Rect.fromCircle(center: center, radius: radius));
+    canvas.drawRect(Offset.zero & size, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
