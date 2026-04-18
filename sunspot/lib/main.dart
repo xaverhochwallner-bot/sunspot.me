@@ -2130,6 +2130,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               backgroundColor: _heatmapMode ? Colors.orange : Colors.white,
               foregroundColor: _heatmapMode ? Colors.white : Colors.black87,
               elevation: 2,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               child: _heatmapLoading
                   ? SizedBox(
                       width: 16, height: 16,
@@ -2156,6 +2157,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               backgroundColor: Colors.white,
               foregroundColor: Colors.black87,
               elevation: 2,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
               child: const Icon(Icons.my_location, size: 20),
             ),
           ),
@@ -2241,16 +2243,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildZoomButton(IconData icon, VoidCallback onTap) {
-    return SizedBox(
-      width: 40, height: 40,
-      child: FloatingActionButton.small(
-        heroTag: icon == Icons.add ? 'zoom_in' : 'zoom_out',
-        onPressed: onTap,
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black87,
-        elevation: 2,
-        child: Icon(icon, size: 20),
-      ),
+    return FloatingActionButton.small(
+      heroTag: icon == Icons.add ? 'zoom_in' : 'zoom_out',
+      onPressed: onTap,
+      backgroundColor: Colors.white,
+      foregroundColor: Colors.black87,
+      elevation: 2,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: Icon(icon, size: 20),
     );
   }
 
