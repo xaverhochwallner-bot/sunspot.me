@@ -838,6 +838,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               shape: BoxShape.circle,
             ),
           ),
+          if (_elevation > 0) ...[
+            const SizedBox(width: 8),
+            Transform.rotate(
+              angle: (_azimuth - 180) * 3.14159265 / 180,
+              child: Icon(Icons.navigation, size: 13, color: Colors.orange.shade400),
+            ),
+          ],
         ],
       ),
     );
@@ -2560,8 +2567,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               const SizedBox(height: 16),
               _buildDateSection(),
               const Divider(height: 28),
-              _buildSunPosition(),
-              const Divider(height: 28),
               _buildFindSunnySpotsSection(),
               const Divider(height: 28),
               Padding(
@@ -3815,8 +3820,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             _buildTimeSlider(),
             const SizedBox(height: 16),
             _buildDateSection(),
-            const Divider(height: 28),
-            _buildSunPosition(),
           ],
         );
       case 1: // Spots
