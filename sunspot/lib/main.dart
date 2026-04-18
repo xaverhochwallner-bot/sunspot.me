@@ -1473,9 +1473,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium,
+          accuracy: LocationAccuracy.low,
         ),
-      ).timeout(const Duration(seconds: 20));
+      ).timeout(const Duration(seconds: 30));
       return LatLng(pos.latitude, pos.longitude);
     } on TimeoutException {
       _showError('GPS: location timed out — try again');
