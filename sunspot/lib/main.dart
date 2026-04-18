@@ -2556,7 +2556,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildTimeHeader(),
-              const SizedBox(height: 4),
               _buildTimeSlider(),
               const SizedBox(height: 16),
               _buildDateSection(),
@@ -2731,9 +2730,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
 
     return Column(children: [
-      buttonsRow,
       slider,
       labelsRow,
+      const SizedBox(height: 10),
+      buttonsRow,
     ]);
   }
 
