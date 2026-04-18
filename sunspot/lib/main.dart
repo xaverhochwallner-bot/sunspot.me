@@ -139,6 +139,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Saved spots sunny status  key = 'lat,lon', null=loading, true=sunny, false=shadow
   Map<String, bool?> _savedSunny = {};
 
+  // Inline spot detail (replaces modal)
+  Map<String, dynamic>? _selectedSpot;
+  int _selectedSpotIdx = 0;
+  LatLng? _detailReturnCenter;
+  double? _detailReturnZoom;
+
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
@@ -308,8 +314,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() => _searchResults = []);
       return;
     }
-    // On mobile, point info is only active on the Saved tab
-    if (_isMobile && _mobileTab != 3) return;
+    // Point inspection only active on Saved tab
+    if (_mobileTab != 3) return;
     setState(() {
       _clickedPoint      = coordinates;
       _pointInfo         = null;
@@ -963,8 +969,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
 
   void _selectSpot(Map<String, dynamic> spot, int idx) {
-    final returnCenter = _lastSearchCenter ?? _currentCenter;
-    final returnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
+    _detailReturnCenter = _lastSearchCenter ?? _currentCenter;
+    _detailReturnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
     final lat = spot['lat'] as double;
     final lon = spot['lon'] as double;
     if (_panelExpanded) setState(() => _panelExpanded = false);
@@ -990,162 +996,169 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 : (Icons.wb_sunny, 'Spot');
     final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
 
-    showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: Colors.white,
-      barrierColor: Colors.transparent,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) {
-          final isSaved = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
-          return SizedBox(
-            height: 230,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                // handle + close
-                Row(children: [
-                  const Spacer(),
-                  Container(width: 36, height: 4,
-                      decoration: BoxDecoration(color: Colors.grey.shade200,
-                          borderRadius: BorderRadius.circular(2))),
-                  Expanded(child: Align(alignment: Alignment.centerRight,
-                    child: GestureDetector(
-                      onTap: () => Navigator.of(ctx).pop(),
-                      child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
-                    ),
-                  )),
-                ]),
-                const SizedBox(height: 8),
-                // number + name
-                Row(children: [
-                  Container(width: 26, height: 26,
-                    margin: const EdgeInsets.only(right: 10),
-                    decoration: BoxDecoration(color: circColor, shape: BoxShape.circle),
-                    child: Center(child: Text('${idx + 1}',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white))),
-                  ),
-                  Expanded(child: Text(address,
-                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                      maxLines: 1, overflow: TextOverflow.ellipsis)),
-                ]),
-                const SizedBox(height: 4),
-                // subtitle
-                Row(children: [
-                  if (distLabel != null) ...[
-                    Icon(Icons.directions_walk, size: 12, color: Colors.grey.shade500),
-                    const SizedBox(width: 3),
-                    Text(distLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
-                    const SizedBox(width: 6),
-                    Text('·', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
-                    const SizedBox(width: 6),
-                  ],
-                  Icon(sunUntil != null ? Icons.wb_sunny_outlined : Icons.nights_stay_outlined,
-                      size: 12, color: sunUntil != null ? Colors.orange.shade400 : Colors.grey.shade400),
-                  const SizedBox(width: 3),
-                  Text(
-                    sunUntil != null
-                        ? (sunHoursLeft == 0
-                            ? '< 1h · until ${sunUntil.toString().padLeft(2, '0')}:00'
-                            : '$sunHoursLeft h · until ${sunUntil.toString().padLeft(2, '0')}:00')
-                        : 'In shadow',
-                    style: TextStyle(fontSize: 12,
-                        color: sunUntil != null ? Colors.orange.shade700 : Colors.grey.shade500),
-                  ),
-                  const SizedBox(width: 6),
-                  Text('·', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
-                  const SizedBox(width: 6),
-                  Icon(catIcon, size: 12, color: Colors.grey.shade400),
-                  const SizedBox(width: 3),
-                  Text(catLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-                ]),
-                // opening hours (POIs only)
-                if (openingHours.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Row(children: [
-                    Icon(Icons.schedule, size: 12, color: Colors.grey.shade400),
-                    const SizedBox(width: 5),
-                    Expanded(child: Text(openingHours,
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                        maxLines: 1, overflow: TextOverflow.ellipsis)),
-                    if (outdoorSeating == 'yes') ...[
-                      const SizedBox(width: 10),
-                      Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
-                      const SizedBox(width: 4),
-                      Text('Terrace', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-                    ],
-                  ]),
-                ] else if (outdoorSeating == 'yes') ...[
-                  const SizedBox(height: 6),
-                  Row(children: [
-                    Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
-                    const SizedBox(width: 5),
-                    Text('Outdoor seating available',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
-                  ]),
-                ],
-                const Spacer(),
-                // action buttons
-                Row(children: [
-                  _sheetButton(
-                    icon: Icons.directions_walk, label: 'Navigate',
-                    color: Colors.orange.shade700,
-                    onTap: () {
-                      html.window.open(
-                        'https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=walking',
-                        '_blank');
-                      Navigator.pop(ctx);
-                    },
-                  ),
-                  const SizedBox(width: 8),
-                  _sheetButton(
-                    icon: isSaved ? Icons.favorite : Icons.favorite_outline,
-                    label: isSaved ? 'Saved' : 'Save',
-                    color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
-                    onTap: () {
-                      setState(() {
-                        if (isSaved) {
-                          _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
-                        } else {
-                          _savedSpots.add({'lat': lat, 'lon': lon, 'address': address,
-                              'sun_hours_left': sunHoursLeft, 'sun_until': sunUntil});
-                        }
-                        _persistSaved();
-                      });
-                      setSheet(() {});
-                    },
-                  ),
-                  const SizedBox(width: 8),
-                  _sheetButton(
-                    icon: Icons.share, label: 'Share',
-                    color: Colors.orange.shade500,
-                    onTap: () async {
-                      final server = Uri.base.queryParameters['server'] ?? 'https://sunspotme.duckdns.org';
-                      final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
-                          '?server=${Uri.encodeComponent(server)}&lat=$lat&lon=$lon';
-                      await Clipboard.setData(ClipboardData(text: link));
-                      Navigator.pop(ctx);
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Link copied to clipboard'),
-                              duration: Duration(seconds: 2)));
-                      }
-                    },
-                  ),
-                ]),
-              ]),
-            ),
-          );
-        },
-      ),
-    ).then((_) {
-      if (mounted && (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty)) {
-        _suppressResultClear = true;
-        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(returnCenter, returnZoom));
-      }
+    setState(() {
+      _selectedSpot    = spot;
+      _selectedSpotIdx = idx;
     });
+    _panelScroll.jumpTo(0);
+  }
+
+  void _closeSpotDetail() {
+    setState(() => _selectedSpot = null);
+    if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
+      _suppressResultClear = true;
+      final rc = _detailReturnCenter;
+      final rz = _detailReturnZoom;
+      if (rc != null && rz != null) {
+        _mapController?.animateCamera(CameraUpdate.newLatLngZoom(rc, rz));
+      }
+    }
+  }
+
+  Widget _buildSpotDetail() {
+    final spot   = _selectedSpot!;
+    final idx    = _selectedSpotIdx;
+    final lat    = spot['lat'] as double;
+    final lon    = spot['lon'] as double;
+    final key    = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
+    final poiName = spot['_poi_name'] as String? ?? '';
+    final address = poiName.isNotEmpty ? poiName : (_spotAddresses[key] ?? 'Sunny spot ${idx + 1}');
+    final sunHoursLeft  = (spot['sun_hours_left'] as int?) ?? 0;
+    final sunUntil      = spot['sun_until'] as int?;
+    final openingHours  = spot['_opening_hours'] as String? ?? '';
+    final outdoorSeating = spot['_outdoor_seating'] as String? ?? '';
+    final gps      = _gpsPosition;
+    final distLabel = gps != null ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon))) : null;
+    final category  = spot['_category'] as String? ?? '';
+    final poiAmenity = spot['_poi_amenity'] as String? ?? '';
+    final (catIcon, catLabel) = category == 'park'
+        ? (Icons.park, 'Park')
+        : category == 'square'
+            ? (Icons.location_city, 'Square')
+            : poiAmenity.isNotEmpty
+                ? (_poiIcon(poiAmenity), _poiLabel(poiAmenity))
+                : (Icons.wb_sunny, 'Spot');
+    final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
+    final isSaved   = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Back + title row
+        Row(children: [
+          GestureDetector(
+            onTap: _closeSpotDetail,
+            child: Icon(Icons.arrow_back, size: 20, color: Colors.grey.shade600),
+          ),
+          const SizedBox(width: 10),
+          Container(width: 26, height: 26,
+            decoration: BoxDecoration(color: circColor, shape: BoxShape.circle),
+            child: Center(child: Text('${idx + 1}',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white))),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(address,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+              maxLines: 1, overflow: TextOverflow.ellipsis)),
+        ]),
+        const SizedBox(height: 10),
+        // Subtitle
+        Wrap(spacing: 8, children: [
+          if (distLabel != null) Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.directions_walk, size: 12, color: Colors.grey.shade500),
+            const SizedBox(width: 3),
+            Text(distLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+          ]),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(sunUntil != null ? Icons.wb_sunny_outlined : Icons.nights_stay_outlined,
+                size: 12, color: sunUntil != null ? Colors.orange.shade400 : Colors.grey.shade400),
+            const SizedBox(width: 3),
+            Text(
+              sunUntil != null
+                  ? (sunHoursLeft == 0
+                      ? '< 1h · until ${sunUntil.toString().padLeft(2, '0')}:00'
+                      : '$sunHoursLeft h · until ${sunUntil.toString().padLeft(2, '0')}:00')
+                  : 'In shadow',
+              style: TextStyle(fontSize: 12,
+                  color: sunUntil != null ? Colors.orange.shade700 : Colors.grey.shade500),
+            ),
+          ]),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(catIcon, size: 12, color: Colors.grey.shade400),
+            const SizedBox(width: 3),
+            Text(catLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+          ]),
+        ]),
+        // Opening hours
+        if (openingHours.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            Icon(Icons.schedule, size: 12, color: Colors.grey.shade400),
+            const SizedBox(width: 5),
+            Expanded(child: Text(openingHours,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                maxLines: 1, overflow: TextOverflow.ellipsis)),
+            if (outdoorSeating == 'yes') ...[
+              const SizedBox(width: 8),
+              Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
+              const SizedBox(width: 3),
+              Text('Terrace', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+            ],
+          ]),
+        ] else if (outdoorSeating == 'yes') ...[
+          const SizedBox(height: 8),
+          Row(children: [
+            Icon(Icons.deck, size: 12, color: Colors.grey.shade400),
+            const SizedBox(width: 5),
+            Text('Outdoor seating', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+          ]),
+        ],
+        const SizedBox(height: 16),
+        // Action buttons
+        Row(children: [
+          _sheetButton(
+            icon: Icons.directions_walk, label: 'Navigate',
+            color: Colors.orange.shade700,
+            onTap: () {
+              html.window.open(
+                'https://www.google.com/maps/dir/?api=1&destination=$lat,$lon&travelmode=walking',
+                '_blank');
+            },
+          ),
+          const SizedBox(width: 8),
+          _sheetButton(
+            icon: isSaved ? Icons.favorite : Icons.favorite_outline,
+            label: isSaved ? 'Saved' : 'Save',
+            color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
+            onTap: () {
+              setState(() {
+                if (isSaved) {
+                  _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
+                } else {
+                  _savedSpots.add({'lat': lat, 'lon': lon, 'address': address,
+                      'sun_hours_left': sunHoursLeft, 'sun_until': sunUntil});
+                }
+                _persistSaved();
+              });
+            },
+          ),
+          const SizedBox(width: 8),
+          _sheetButton(
+            icon: Icons.share, label: 'Share',
+            color: Colors.orange.shade500,
+            onTap: () async {
+              final server = Uri.base.queryParameters['server'] ?? 'https://sunspotme.duckdns.org';
+              final link = 'https://coruscating-fenglisu-505ed3.netlify.app/'
+                  '?server=${Uri.encodeComponent(server)}&lat=$lat&lon=$lon';
+              await Clipboard.setData(ClipboardData(text: link));
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Link copied to clipboard'),
+                    duration: Duration(seconds: 2)));
+            },
+          ),
+        ]),
+      ]),
+    );
   }
 
   Widget _buildSunTimeline(int sunHoursLeft, int? sunUntil) {
@@ -2403,7 +2416,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchCenter = null;
                           _lastSearchZoom   = null;
                         }
-                        setState(() => _mobileTab = i);
+                        setState(() { _mobileTab = i; _selectedSpot = null; });
                         _panelScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -3637,7 +3650,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchCenter = null;
                           _lastSearchZoom   = null;
                         }
-                        setState(() { _mobileTab = i; _panelExpanded = false; });
+                        setState(() { _mobileTab = i; _panelExpanded = false; _selectedSpot = null; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -3675,6 +3688,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildMobileTabContent() {
+    if (_selectedSpot != null) return _buildSpotDetail();
     switch (_mobileTab) {
       case 0: // Time
         return Column(
