@@ -881,6 +881,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final bounds = await ctrl.getVisibleRegion();
       final zoom   = (ctrl.cameraPosition?.zoom ?? 12.0).clamp(1.0, 13.0);
       final date   = _selectedDate;
+      final h      = _hour.toInt();
+      final min    = ((_hour * 60).toInt() % 60);
       final uri    = Uri.parse(
         '$flaskBaseUrl/heatmap'
         '?minLat=${bounds.southwest.latitude}'
@@ -888,6 +890,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&maxLat=${bounds.northeast.latitude}'
         '&maxLon=${bounds.northeast.longitude}'
         '&month=${date.month}&day=${date.day}'
+        '&hour=$h&minute=$min'
         '&zoom=${zoom.round()}',
       );
       final res = await http.get(uri).timeout(const Duration(seconds: 90));
@@ -896,7 +899,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _showHeatmapLayers(geojson);
     } catch (e) {
       if (mounted) {
-        _showError('Heatmap error: ${e.toString().split('\n').first}');
+        _showError('Sun Map error: ${e.toString().split('\n').first}');
         setState(() => _heatmapMode = false);
       }
     }
@@ -906,42 +909,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null) return;
 
-    final features = (geojson['features'] as List? ?? [])
-        .cast<Map<String, dynamic>>();
-
-    // Split tiers into separate GeoJSON — avoids MapLibre expression filters
-    Map<String, dynamic> tier(String t) => {
-      'type': 'FeatureCollection',
-      'features': features
-          .where((f) => (f['properties'] as Map?)?['tier'] == t)
-          .toList(),
-    };
-    final always    = tier('always');
-    final sometimes = tier('sometimes');
-
     if (!_heatmapLayerReady) {
-      await ctrl.addGeoJsonSource('heatmap-sometimes-src', sometimes);
+      await ctrl.addGeoJsonSource('sunmap-src', geojson);
       await ctrl.addFillLayer(
-        'heatmap-sometimes-src', 'heatmap-sometimes',
-        FillLayerProperties(fillColor: '#FFD700', fillOpacity: 0.55),
-      );
-      await ctrl.addGeoJsonSource('heatmap-always-src', always);
-      await ctrl.addFillLayer(
-        'heatmap-always-src', 'heatmap-always',
-        FillLayerProperties(fillColor: '#FF8C00', fillOpacity: 0.75),
+        'sunmap-src', 'sunmap-fill',
+        FillLayerProperties(fillColor: '#FFD700', fillOpacity: 0.50),
       );
       _heatmapLayerReady = true;
     } else {
-      await ctrl.setGeoJsonSource('heatmap-sometimes-src', sometimes);
-      await ctrl.setGeoJsonSource('heatmap-always-src', always);
+      await ctrl.setGeoJsonSource('sunmap-src', geojson);
     }
   }
 
   Future<void> _clearHeatmapLayers() async {
     if (!_heatmapLayerReady) return;
     final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
-    await _mapController?.setGeoJsonSource('heatmap-sometimes-src', empty);
-    await _mapController?.setGeoJsonSource('heatmap-always-src', empty);
+    await _mapController?.setGeoJsonSource('sunmap-src', empty);
+    _heatmapLayerReady = false;
   }
 
   // -------------------------------------------------------------------------
@@ -2385,7 +2369,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final rawStage = _loadingStage;
     // At low zoom, hide verbose "Projecting X buildings" — show generic label
     final label = _heatmapLoading
-        ? 'Heatmap…'
+        ? 'Sun Map…'
         : (rawStage.isEmpty
             ? 'Loading…'
             : (_lastFetchZoom <= 13 && rawStage.startsWith('Projecting')

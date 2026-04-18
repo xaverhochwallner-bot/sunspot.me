@@ -1861,7 +1861,8 @@ def heatmap():
         max_lon = float(request.args['maxLon'])
         month   = int(request.args['month'])
         day     = int(request.args['day'])
-        # Cap zoom at 12 — fewer buildings, faster computation
+        hour    = int(request.args['hour'])
+        minute  = int(request.args.get('minute', 0))
         zoom    = min(int(request.args.get('zoom', 12)), 12)
     except (KeyError, ValueError) as e:
         return jsonify({'error': str(e)}), 400
@@ -1869,80 +1870,48 @@ def heatmap():
     center_lat = (min_lat + max_lat) / 2
     center_lon = (min_lon + max_lon) / 2
     tz  = pytz.timezone("Europe/Vienna")
-    now = datetime(2000, month, day, 12, 0, 0)
 
-    sr, ss = _get_sunrise_sunset(center_lat, center_lon, now, tz)
-    if sr is None or ss is None:
+    t = tz.localize(datetime(2000, month, day, hour, minute, 0))
+    elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
+
+    if elevation <= 0:
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
-    # Fixed 3 sample hours: morning / noon / afternoon — fast enough for a single request
-    candidate_hours = [9, 12, 15]
-    hours = [h for h in candidate_hours if sr < h < ss]
-    if not hours:
-        hours = [int((sr + ss) / 2)]  # fallback: solar noon
+    compute_bbox = shapely_box(min_lon, min_lat, max_lon, max_lat)
+    min_bld_area = _min_building_area(zoom)
+    buildings    = [(p, h) for p, h in
+                    get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=zoom)
+                    if p.area >= min_bld_area]
 
-    compute_bbox  = shapely_box(min_lon, min_lat, max_lon, max_lat)
-    min_bld_area  = _min_building_area(zoom)
-    buildings     = [(p, h) for p, h in
-                     get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=zoom)
-                     if p.area >= min_bld_area]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        all_shadows = list(ex.map(
+            lambda args: project_shadow(args[0], args[1], elevation, azimuth),
+            buildings,
+        ))
 
-    sunlit_list = []
-    for h in hours:
-        t = tz.localize(datetime(2000, month, day, h, 0, 0))
-        elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
-        if elevation <= 0:
-            continue
+    shadow_parts = [sh for sh in all_shadows if sh and not sh.is_empty]
+    all_parts    = [p for p, _ in buildings] + shadow_parts
 
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            all_shadows = list(ex.map(
-                lambda args: project_shadow(args[0], args[1], elevation, azimuth),
-                buildings,
-            ))
+    if all_parts:
+        merged = parallel_union(all_parts)
+        gfill  = _gap_fill(zoom)
+        stol   = _simplify_tolerance(zoom)
+        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+        merged = merged.simplify(stol, preserve_topology=True)
+        sunlit = compute_bbox.difference(merged)
+    else:
+        sunlit = compute_bbox
 
-        shadow_parts = [sh for sh in all_shadows if sh and not sh.is_empty]
-        all_parts    = [p for p, _ in buildings] + shadow_parts
-
-        if all_parts:
-            merged = parallel_union(all_parts)
-            gfill  = _gap_fill(zoom)
-            stol   = _simplify_tolerance(zoom)
-            merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-            merged = merged.simplify(stol, preserve_topology=True)
-            sunlit = compute_bbox.difference(merged)
-        else:
-            sunlit = compute_bbox
-
-        if sunlit and not sunlit.is_empty:
-            sunlit_list.append(sunlit)
-
-    if not sunlit_list:
+    if not sunlit or sunlit.is_empty:
         return jsonify({'type': 'FeatureCollection', 'features': []})
-
-    # Tier computation:
-    #   always   = intersection of all hourly sunlit areas  (in sun every sampled hour)
-    #   sometimes = union − always                          (in sun only part of the day)
-    from functools import reduce
-    union_all = unary_union(sunlit_list)
-    always    = reduce(lambda a, b: a.intersection(b), sunlit_list)
-    sometimes = union_all.difference(always) if not always.is_empty else union_all
 
     stol     = _simplify_tolerance(zoom) * 2
-    features = []
-    for geom, tier in [(always, 'always'), (sometimes, 'sometimes')]:
-        if not geom or geom.is_empty:
-            continue
-        geom = geom.simplify(stol, preserve_topology=True)
-        polys = geom.geoms if hasattr(geom, 'geoms') else [geom]
-        for g in polys:
-            if g.is_empty:
-                continue
-            features.append({
-                'type': 'Feature',
-                'geometry': mapping(g),
-                'properties': {'tier': tier},
-            })
-
+    sunlit   = sunlit.simplify(stol, preserve_topology=True)
+    polys    = sunlit.geoms if hasattr(sunlit, 'geoms') else [sunlit]
+    features = [
+        {'type': 'Feature', 'geometry': mapping(g), 'properties': {}}
+        for g in polys if not g.is_empty
+    ]
     return jsonify({'type': 'FeatureCollection', 'features': features})
 
 
