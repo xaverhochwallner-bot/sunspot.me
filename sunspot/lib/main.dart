@@ -2595,8 +2595,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
 
     return Column(children: [
-      slider,
       buttonsRow,
+      slider,
       labelsRow,
     ]);
   }
