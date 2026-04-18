@@ -1879,6 +1879,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _run24hStep() async {
     if (!_animating) return;
     await fetchShadows();
+    if (_heatmapMode) await _fetchAndShowHeatmap();
     await Future.delayed(const Duration(milliseconds: 400));
     if (!_animating) return;
     final end = _sunsetHour ?? 20.0;
@@ -1924,6 +1925,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
       });
       fetchShadows();
+      if (_heatmapMode) _fetchAndShowHeatmap();
       _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
         if (!mounted || !_liveMode) return;
         setState(() {
@@ -1932,6 +1934,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
         });
         fetchShadows();
+        if (_heatmapMode) _fetchAndShowHeatmap();
       });
     }
   }
