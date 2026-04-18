@@ -2654,12 +2654,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
     );
 
-    // LIVE | 24h — prominent row between slider and labels
-    final buttonsRow = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
+    // LIVE | 24h — centered below time header
+    final buttonsRow = Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
           GestureDetector(
             onTap: _toggleLiveMode,
             child: AnimatedContainer(
@@ -2678,6 +2676,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ]),
             ),
           ),
+          const SizedBox(width: 12),
           GestureDetector(
             onTap: _toggle24h,
             child: AnimatedContainer(
@@ -2697,12 +2696,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ],
-      ),
     );
 
     // sunrise · (noon) · sunset labels
     final labelsRow = Padding(
-      padding: const EdgeInsets.only(left: 4, right: 4, top: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
