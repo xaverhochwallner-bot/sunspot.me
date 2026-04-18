@@ -52,7 +52,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool    _suppressResultClear = false;
   Timer? _debounceTimer;
 
-  double   _hour          = DateTime.now().hour.toDouble();
+  double   _hour          = DateTime.now().toUtc().add(const Duration(hours: 1)).hour.toDouble(); // Vienna CET fallback
   DateTime _selectedDate  = DateTime.now();
   double   _elevation     = 0.0;
   double   _azimuth       = 0.0;
@@ -200,6 +200,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       case 'EVENING':   return Icons.wb_twilight;
       default:          return Icons.nightlight_round;
     }
+  }
+
+  // Vienna local time — handles CET (UTC+1) / CEST (UTC+2) without a package.
+  DateTime _viennaNow() {
+    final utc = DateTime.now().toUtc();
+    final isDst = _isViennaDst(utc);
+    return utc.add(Duration(hours: isDst ? 2 : 1));
+  }
+
+  bool _isViennaDst(DateTime utc) {
+    if (utc.month > 3 && utc.month < 10) return true;
+    if (utc.month < 3 || utc.month > 10) return false;
+    final lastSun = _lastSundayOf(utc.year, utc.month);
+    return utc.month == 3 ? utc.day >= lastSun : utc.day < lastSun;
+  }
+
+  int _lastSundayOf(int year, int month) {
+    var d = DateTime.utc(year, month + 1, 0); // last day of month
+    while (d.weekday != DateTime.sunday) d = d.subtract(const Duration(days: 1));
+    return d.day;
   }
 
   String _azimuthDirection(double az) {
@@ -1909,16 +1929,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() {
         _liveMode = true;
         _animating = false;  // stop animation when going live
-        _selectedDate = DateTime.now();
-        final now = DateTime.now();
+        final now = _viennaNow();
+        _selectedDate = DateTime(now.year, now.month, now.day);
         _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
       });
       fetchShadows();
       _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
         if (!mounted || !_liveMode) return;
         setState(() {
-          final now = DateTime.now();
-          _selectedDate = now;
+          final now = _viennaNow();
+          _selectedDate = DateTime(now.year, now.month, now.day);
           _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
         });
         fetchShadows();
@@ -2614,11 +2634,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Slider full width
     final slider = SliderTheme(
       data: SliderTheme.of(context).copyWith(
-        activeTrackColor: Colors.orange,
-        inactiveTrackColor: Colors.orange.shade100,
-        thumbColor: Colors.white,
+        activeTrackColor: _liveMode ? Colors.red.shade300 : Colors.orange,
+        inactiveTrackColor: _liveMode ? Colors.red.shade100 : Colors.orange.shade100,
+        thumbColor: _liveMode ? Colors.red.shade400 : Colors.white,
         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-        overlayColor: Colors.orange.withValues(alpha: 0.2),
+        overlayColor: (_liveMode ? Colors.red : Colors.orange).withValues(alpha: 0.2),
       ),
       child: Slider(
         value: sliderVal,
@@ -3296,6 +3316,43 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             Text('Zoom in to see results', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
           ]),
         ],
+        // Actionable empty state — shown after a search completes with 0 results
+        if (!_findingSunnySpots && !_spotsZoomHint && _sunnySpots.isEmpty && _lastSearchCenter != null) ...[
+          const SizedBox(height: 16),
+          Column(children: [
+            Icon(Icons.wb_cloudy_outlined, size: 32, color: Colors.grey.shade300),
+            const SizedBox(height: 8),
+            Text('No sunny spots found here',
+                style: TextStyle(fontSize: 13, color: Colors.grey.shade500, fontWeight: FontWeight.w500)),
+            const SizedBox(height: 4),
+            Text('Everything is in shadow right now.',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+            const SizedBox(height: 12),
+            GestureDetector(
+              onTap: () {
+                final noon = (_sunriseHour != null && _sunsetHour != null)
+                    ? ((_sunriseHour! + _sunsetHour!) / 2).roundToDouble()
+                    : 12.0;
+                setState(() { _hour = noon; _liveMode = false; });
+                fetchShadows();
+                Future.delayed(const Duration(milliseconds: 700), _findSunnySpots);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.orange.shade200),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.schedule, size: 13, color: Colors.orange.shade600),
+                  const SizedBox(width: 6),
+                  Text('Try solar noon', style: TextStyle(fontSize: 12, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ]),
+        ],
         if (_sunnySpots.isNotEmpty) ...[
           const SizedBox(height: 10),
           ..._sunnySpots.asMap().entries.map((e) {
@@ -3580,11 +3637,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             value: '${_elevation.toStringAsFixed(1)}°',
           )),
           const SizedBox(width: 8),
-          Expanded(child: _sunCard(
-            label: 'AZIMUTH',
-            icon: Icons.explore_outlined,
-            value: '${_azimuth.toStringAsFixed(0)}° ${_azimuthDirection(_azimuth)}',
-          )),
+          Expanded(child: _buildSunRadar()),
         ]),
       ],
     );
@@ -3614,6 +3667,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   fontSize: 16, fontWeight: FontWeight.bold)),
         ],
       ),
+    );
+  }
+
+  Widget _buildSunRadar() {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(Icons.explore_outlined, size: 12, color: Colors.grey),
+          const SizedBox(width: 4),
+          const Text('DIRECTION', style: TextStyle(
+              fontSize: 10, color: Colors.grey,
+              fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+        ]),
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 44, width: double.infinity,
+          child: CustomPaint(
+            painter: _SunRadarPainter(azimuth: _azimuth, elevation: _elevation),
+          ),
+        ),
+      ]),
     );
   }
 
@@ -3945,4 +4024,71 @@ class _VignettePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// Sun direction radar — replaces the "Azimuth 184° NNW" text card.
+// Shows a compass circle with the sun icon positioned by azimuth+elevation.
+class _SunRadarPainter extends CustomPainter {
+  final double azimuth;   // 0=N, 90=E, 180=S, 270=W
+  final double elevation; // 0=horizon, 90=zenith
+
+  const _SunRadarPainter({required this.azimuth, required this.elevation});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final r  = min(cx, cy) - 3;
+
+    // Compass circle
+    canvas.drawCircle(Offset(cx, cy), r,
+        Paint()..color = const Color(0xFFDDDDDD)..style = PaintingStyle.stroke..strokeWidth = 1.0);
+
+    // Cardinal tick marks
+    final tickPaint = Paint()..color = const Color(0xFFBBBBBB)..strokeWidth = 1.0;
+    for (int i = 0; i < 8; i++) {
+      final a = i * pi / 4;
+      final inner = r - 4;
+      canvas.drawLine(
+        Offset(cx + inner * sin(a), cy - inner * cos(a)),
+        Offset(cx + r * sin(a),     cy - r * cos(a)),
+        tickPaint,
+      );
+    }
+
+    // N label
+    final nPainter = TextPainter(
+      text: const TextSpan(text: 'N', style: TextStyle(fontSize: 8, color: Color(0xFF999999), fontWeight: FontWeight.w600)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    nPainter.paint(canvas, Offset(cx - nPainter.width / 2, cy - r - nPainter.height - 1));
+
+    if (elevation <= 0) {
+      // Night — draw moon icon position
+      final moonPaint = Paint()..color = const Color(0xFF9E9E9E);
+      canvas.drawCircle(Offset(cx, cy), 4, moonPaint);
+      return;
+    }
+
+    // Sun position: high elevation → near center, horizon → near edge
+    final t      = (elevation.clamp(0.0, 90.0) / 90.0);
+    final dist   = r * (1.0 - t * 0.75);
+    final azRad  = azimuth * pi / 180.0;
+    final sx     = cx + dist * sin(azRad);
+    final sy     = cy - dist * cos(azRad);
+
+    // Glow
+    canvas.drawCircle(Offset(sx, sy), 8,
+        Paint()..color = Colors.orange.withValues(alpha: 0.18));
+    // Sun dot
+    canvas.drawCircle(Offset(sx, sy), 5,
+        Paint()..color = Colors.orange.shade400);
+    // Bright centre
+    canvas.drawCircle(Offset(sx, sy), 2,
+        Paint()..color = Colors.white);
+  }
+
+  @override
+  bool shouldRepaint(_SunRadarPainter old) =>
+      old.azimuth != azimuth || old.elevation != elevation;
 }
