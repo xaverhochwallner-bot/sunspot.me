@@ -2633,6 +2633,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           setState(() => _draggingSlider = false);
           _setMapPointerEvents(true);
           fetchShadows();
+          if (_heatmapMode) _fetchAndShowHeatmap();
         },
       ),
     );
