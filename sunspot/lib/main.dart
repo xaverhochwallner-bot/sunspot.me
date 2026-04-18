@@ -107,7 +107,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                       _findingSunnySpots    = false;
   bool                       _spotsNoResults       = false;
   bool                       _poisNoResults        = false;
-  bool                       _tourNoResults        = false;
   List<Offset>               _sunnySpotScreenPos   = [];
   List<Offset>               _tourMarkerScreenPos  = [];
   List<Offset>               _poiScreenPos         = [];
@@ -2766,7 +2765,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _buildTour() async {
     if (_tourBuilding) return;
-    setState(() { _tourBuilding = true; _tourSpots = []; _tourNoResults = false; });
+    setState(() { _tourBuilding = true; _tourSpots = []; });
     await _clearSunnySpots();
 
     try {
@@ -2792,7 +2791,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           .toList();
 
       if (raw.isEmpty) {
-        setState(() { _tourBuilding = false; _tourNoResults = true; });
+        setState(() => _tourBuilding = false);
+        _showError('No sun at this hour — move the time slider');
         return;
       }
 
@@ -2940,7 +2940,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (_tourSpots.isNotEmpty || _tourBuilding)
             GestureDetector(
               onTap: () {
-                setState(() { _tourSpots = []; _tourMarkerScreenPos = []; _tourNoResults = false; });
+                setState(() { _tourSpots = []; _tourMarkerScreenPos = []; });
                 _clearTourLine();
               },
               child: Container(
@@ -2978,11 +2978,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ]),
-
-        if (_tourNoResults) ...[
-          const SizedBox(height: 16),
-          _buildNoResultsMessage(),
-        ],
 
         // Results
         if (_tourSpots.isNotEmpty) ...[
