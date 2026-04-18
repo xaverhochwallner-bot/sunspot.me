@@ -25,3 +25,7 @@ provision_arm.py
 
 # Local Netlify folder
 .netlify
+
+# Server-generated cache files (regenerated at startup)
+sunspot_server/buildings_cache.pkl
+sunspot_server/city_pois_cache.json
