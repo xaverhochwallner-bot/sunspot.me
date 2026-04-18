@@ -1466,17 +1466,15 @@ def sunny_pois():
         if elevation <= 0:
             return jsonify({'spots': [], 'reason': 'night'})
 
-        # Search radius: use viewport but cap by zoom so low-zoom results stay sane
-        # z13→1.5 km, z14→1.0 km, z15+→0.7 km (viewport is usually smaller at z15+)
-        max_radius_m = {13: 1500, 14: 1000}.get(int(zoom), 700)
-        R    = max_radius_m / 111320
-        Rlon = R / max(0.3, math.cos(math.radians(center_lat)))
-
-        # Clamp viewport bbox to the zoom-based radius
-        s_min_lat = max(vp_min_lat, center_lat - R)    if vp_min_lat is not None else center_lat - R
-        s_max_lat = min(vp_max_lat, center_lat + R)    if vp_max_lat is not None else center_lat + R
-        s_min_lon = max(vp_min_lon, center_lon - Rlon) if vp_min_lon is not None else center_lon - Rlon
-        s_max_lon = min(vp_max_lon, center_lon + Rlon) if vp_max_lon is not None else center_lon + Rlon
+        # Use full viewport bbox; fall back to a 1.5 km radius if no viewport provided
+        if vp_min_lat is not None:
+            s_min_lat, s_max_lat = vp_min_lat, vp_max_lat
+            s_min_lon, s_max_lon = vp_min_lon, vp_max_lon
+        else:
+            R    = 1500 / 111320
+            Rlon = R / max(0.3, math.cos(math.radians(center_lat)))
+            s_min_lat, s_max_lat = center_lat - R, center_lat + R
+            s_min_lon, s_max_lon = center_lon - Rlon, center_lon + Rlon
 
         _CITY_DB_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square', 'terrace'}
         cb_min_lat, cb_min_lon, cb_max_lat, cb_max_lon = _CITY_BBOX
@@ -1566,8 +1564,10 @@ def sunny_pois():
                 'outdoor_seating': p.get('outdoor_seating', ''),
             })
 
-        # Sort: most sun hours remaining first, nearest as tiebreaker
-        sunny.sort(key=lambda x: (-x['sun_hours'], x['dist']))
+        # Shuffle within same sun-tier so repeated searches vary
+        import random as _rnd
+        _rnd.shuffle(sunny)
+        sunny.sort(key=lambda x: -x['sun_hours'])
 
         # Greedy min-separation filter (~100 m) — spread results across the map
         kept = []
@@ -1578,7 +1578,7 @@ def sunny_pois():
                 continue
             kept.append(p)
             kept_pts.append(pt)
-            if len(kept) == 8:
+            if len(kept) == 12:
                 break
 
         spots = []
@@ -1688,7 +1688,7 @@ def find_sunny_spots():
         min_lon = request.args.get("minLon", default=None,    type=float)
         max_lat = request.args.get("maxLat", default=None,    type=float)
         max_lon = request.args.get("maxLon", default=None,    type=float)
-        n       = min(request.args.get("n", default=5, type=int), 10)
+        n       = min(request.args.get("n", default=5, type=int), 15)
 
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime.now(tz)
@@ -1844,8 +1844,9 @@ def find_sunny_spots():
 
             return score
 
+        import random
         scored = sorted(
-            ((pt, area, _score(pt, area)) for pt, area in raw_candidates),
+            ((pt, area, _score(pt, area) * random.uniform(0.82, 1.18)) for pt, area in raw_candidates),
             key=lambda x: x[2], reverse=True,
         )
 
