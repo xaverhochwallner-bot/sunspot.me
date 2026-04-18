@@ -925,7 +925,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (!_heatmapLayerReady) return;
     final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
     await _mapController?.setGeoJsonSource('sunmap-src', empty);
-    _heatmapLayerReady = false;
   }
 
   // -------------------------------------------------------------------------
