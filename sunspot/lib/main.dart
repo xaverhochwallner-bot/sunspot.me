@@ -1608,10 +1608,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
           await _mapController!.setGeoJsonSource('dark-area', empty);
         } else {
-          // Small step — keep old shadow visible but dim it to signal stale data.
-          await _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: 0.15));
-          await _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: 0.10));
-          await _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#2d4862', fillOpacity: 0.08));
+          // Small step — delay 200ms before dimming so fast cache hits
+          // never show a flash of dim (user won't notice the wait).
+          Future.delayed(const Duration(milliseconds: 200), () async {
+            if (!mounted || !_loading) return;
+            await _mapController?.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: 0.15));
+            await _mapController?.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: 0.10));
+            await _mapController?.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: 0.08));
+          });
         }
       }
 
@@ -1802,16 +1806,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (ctrl == null) return;
 
     final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
-    final opL0 = elevation <= 0 ? 0.82 : 0.20 + t * 0.10;
-    final opL1 = elevation <= 0 ? 0.0  : 0.22 + t * 0.13;
-    final opL2 = elevation <= 0 ? 0.0  : 0.24 + t * 0.16;
+    final opL0 = elevation <= 0 ? 0.82 : 0.28 + t * 0.12;
+    final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
+    final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
     if (_shadowLayersReady) {
       // Update source data + opacity in-place — no remove/re-add, no flicker
       await ctrl.setGeoJsonSource('dark-area', geoJson);
-      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0));
-      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1));
-      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2));
+      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0));
+      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1));
+      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2));
       return;
     }
 
@@ -1825,19 +1829,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(fillColor: '#4a6d8a', fillOpacity: opL0),
+      FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(fillColor: '#3d5f7d', fillOpacity: opL1),
+      FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(fillColor: '#2d4862', fillOpacity: opL2),
+      FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
@@ -2361,7 +2365,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Widget _buildLoadingPill() {
     final visible = _showPill || _heatmapLoading;
-    final label   = _heatmapLoading ? 'Heatmap…' : (_loadingStage.isEmpty ? 'Loading…' : _loadingStage);
+    final rawStage = _loadingStage;
+    // At low zoom, hide verbose "Projecting X buildings" — show generic label
+    final label = _heatmapLoading
+        ? 'Heatmap…'
+        : (rawStage.isEmpty
+            ? 'Loading…'
+            : (_lastFetchZoom <= 13 && rawStage.startsWith('Projecting')
+                ? 'Computing…'
+                : rawStage));
     final pct     = _heatmapLoading ? null : (_loadingProgress > 0 ? _loadingProgress : null);
     return AnimatedOpacity(
       opacity: visible ? 1.0 : 0.0,
@@ -3921,10 +3933,10 @@ class _VignettePainter extends CustomPainter {
         center: Alignment.center,
         radius: 1.0,
         colors: const [
-          Color(0x00FFFFFF), // transparent centre
-          Color(0x00FFFFFF), // still transparent at 50%
-          Color(0x55FFFFFF), // soft at 75%
-          Color(0xCCFFFFFF), // ~80% white at edge
+          Color(0x00F5F0EB), // transparent centre
+          Color(0x00F5F0EB), // still transparent at 50%
+          Color(0x55F5F0EB), // soft at 75%
+          Color(0xCCF5F0EB), // ~80% warm cream at edge
         ],
         stops: const [0.0, 0.50, 0.75, 1.0],
       ).createShader(Rect.fromCircle(center: center, radius: radius));
