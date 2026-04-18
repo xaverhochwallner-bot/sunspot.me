@@ -2778,39 +2778,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // Duration picker
-        Row(children: [
-          Icon(Icons.directions_walk, size: 14, color: Colors.grey.shade500),
-          const SizedBox(width: 5),
-          Text('Walk duration',
-              style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
-        ]),
-        const SizedBox(height: 8),
-        Row(children: [
+        // Duration chips + clear
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
           ...[15, 30, 60].map((min) {
             final sel = _tourDuration == min;
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: GestureDetector(
-                onTap: () {
-                  setState(() => _tourDuration = min);
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                onTap: () => setState(() => _tourDuration = min),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                   decoration: BoxDecoration(
                     color: sel ? Colors.orange : Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(14),
                   ),
                   child: Text('$min min',
-                      style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600,
-                        color: sel ? Colors.white : Colors.black54,
-                      )),
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: sel ? Colors.white : Colors.black54)),
                 ),
               ),
             );
           }),
-          const Spacer(),
           if (_tourSpots.isNotEmpty || _tourBuilding)
             GestureDetector(
               onTap: () {
@@ -2819,43 +2808,39 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               },
               child: Container(
                 padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: Colors.red.shade50,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(Icons.close, size: 16, color: Colors.red.shade400),
+                decoration: BoxDecoration(color: Colors.grey.shade100, shape: BoxShape.circle),
+                child: Icon(Icons.close, size: 16, color: Colors.grey.shade500),
               ),
             ),
         ]),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
 
-        // Plan button
-        MouseRegion(
-          cursor: SystemMouseCursors.click,
-          child: GestureDetector(
-            onTap: _tourBuilding ? null : _buildTour,
-            child: Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.orange,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Center(
-                child: _tourBuilding
-                    ? const SizedBox(width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : Row(mainAxisSize: MainAxisSize.min, children: [
-                        const Icon(Icons.wb_sunny, size: 15, color: Colors.white),
-                        const SizedBox(width: 6),
-                        const Text('Plan sunny tour',
-                            style: TextStyle(fontSize: 13,
-                                fontWeight: FontWeight.w700, color: Colors.white)),
-                      ]),
+        // Plan button — same style as Find sunny spots
+        Row(children: [
+          Expanded(
+            child: GestureDetector(
+              onTap: _tourBuilding ? null : _buildTour,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(
+                  color: _tourBuilding ? Colors.orange : Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  _tourBuilding
+                      ? const SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : Icon(Icons.wb_sunny_outlined, size: 15, color: Colors.black54),
+                  const SizedBox(width: 6),
+                  Text(_tourBuilding ? 'Planning...' : 'Plan sunny tour',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          color: _tourBuilding ? Colors.white : Colors.black54)),
+                ]),
               ),
             ),
           ),
-        ),
+        ]),
 
         // Results
         if (_tourSpots.isNotEmpty) ...[
