@@ -16,9 +16,66 @@ import math
 import os
 import json
 import time
+import re
+from datetime import time as dtime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import pysolar.solar as ps
+
+# ---------------------------------------------------------------------------
+# OSM opening_hours parser (covers ~90% of real-world tags)
+# Returns True=open, False=closed, None=unknown/unparseable (treat as open)
+# ---------------------------------------------------------------------------
+_OH_DAY   = {'Mo': 0, 'Tu': 1, 'We': 2, 'Th': 3, 'Fr': 4, 'Sa': 5, 'Su': 6}
+_OH_TIME  = re.compile(r'(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})')
+_OH_DAYS  = re.compile(r'(Mo|Tu|We|Th|Fr|Sa|Su)')
+_OH_RANGE = re.compile(r'(Mo|Tu|We|Th|Fr|Sa|Su)\s*-\s*(Mo|Tu|We|Th|Fr|Sa|Su)')
+
+def _is_open_at(oh_str: str, dt) -> bool | None:
+    s = oh_str.strip()
+    if not s:
+        return None
+    if s.lower() == '24/7':
+        return True
+    weekday     = dt.weekday()       # Mon=0 … Sun=6
+    current     = dt.time()
+    matched_day = False
+    for rule in s.split(';'):
+        rule = rule.strip()
+        tm = _OH_TIME.search(rule)
+        if not tm:
+            continue
+        oh, om, ch, cm = (int(x) for x in tm.groups())
+        day_part = rule[:tm.start()].strip()
+        if not day_part:
+            today = True
+        else:
+            day_set = set()
+            for sd, ed in _OH_RANGE.findall(day_part):
+                si, ei = _OH_DAY[sd], _OH_DAY[ed]
+                if si <= ei:
+                    day_set.update(range(si, ei + 1))
+                else:
+                    day_set.update(range(si, 7))
+                    day_set.update(range(0, ei + 1))
+            range_ends = {d for pair in _OH_RANGE.findall(day_part) for d in pair}
+            for d in _OH_DAYS.findall(day_part):
+                if d not in range_ends:
+                    day_set.add(_OH_DAY[d])
+            today = weekday in day_set
+        if not today:
+            continue
+        matched_day = True
+        o_t = dtime(oh % 24, om)
+        c_t = dtime(ch % 24, cm)
+        if o_t <= c_t:
+            if o_t <= current <= c_t:
+                return True
+        else:                        # crosses midnight
+            if current >= o_t or current <= c_t:
+                return True
+        return False                 # rule matched today but outside window
+    return None if not matched_day else False
 
 app = Flask(__name__)
 CORS(app)
@@ -1482,6 +1539,12 @@ def sunny_pois():
                     pass
             # Slow path: compute directly
             return elevation > 0 and not _point_in_shadow(plon, plat, elevation, azimuth)
+
+        # Filter by opening hours — drop only places definitively closed; unknown = keep
+        candidates = [
+            p for p in candidates
+            if _is_open_at(p.get('opening_hours', ''), t) is not False
+        ]
 
         # Cap candidates, sort nearest first
         candidates.sort(key=lambda p: (p['lat'] - center_lat)**2 + (p['lon'] - center_lon)**2)
