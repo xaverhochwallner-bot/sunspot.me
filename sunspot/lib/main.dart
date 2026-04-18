@@ -157,6 +157,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Mobile bottom UI
   int _mobileTab = 0;
+  int _spotsSearchGen = 0; // incremented on tab-switch to cancel in-flight searches
+  int _poisSearchGen  = 0;
   final ScrollController _mobileContentScroll = ScrollController();
   double _screenHeight = 800.0;
 
@@ -442,6 +444,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
 
+    final gen = ++_spotsSearchGen;
     setState(() { _findingSunnySpots = true; _spotsZoomHint = false; _spotsNoResults = false; });
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
@@ -464,7 +467,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Run grid spots + parks + squares in parallel
       final spotsUri  = Uri.parse('$flaskBaseUrl/find_sunny_spots$centerParams'
           '&hour=$h&minute=$min&month=${date.month}&day=${date.day}'
-          '&zoom=${zoom.round()}$vpParams&n=3');
+          '&zoom=${zoom.round()}$vpParams&n=8');
       final parksUri  = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
           '&hour=$h&minute=$min&date=$dateStr&types=park');
       final squaresUri = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
@@ -475,6 +478,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         http.get(parksUri).timeout(const Duration(seconds: 30)),
         http.get(squaresUri).timeout(const Duration(seconds: 30)),
       ]);
+      if (!mounted || gen != _spotsSearchGen) return;
 
       List<Map<String, dynamic>> parsePois(http.Response resp, String category) {
         try {
@@ -610,6 +614,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
 
+    final gen = ++_poisSearchGen;
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; _poisNoResults = false; });
@@ -630,7 +635,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&zoom=${zoom.round()}',
       );
       final resp = await http.get(uri).timeout(const Duration(seconds: 20));
-      if (mounted && resp.statusCode == 200) {
+      if (!mounted || gen != _poisSearchGen) return;
+      if (resp.statusCode == 200) {
         final data   = jsonDecode(resp.body) as Map<String, dynamic>;
         final reason = data['reason'] as String? ?? '';
         if (reason == 'night') {
@@ -642,8 +648,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         setState(() { _sunnyPois = pois; _poisNoResults = pois.isEmpty; });
         await _showPoiMarkers(pois);
         await _refreshPoiPositions();
-      } else if (mounted) {
-        _showError('Server error ${resp.statusCode}');
+      } else {
+        if (mounted) _showError('Server error ${resp.statusCode}');
       }
     } on TimeoutException {
       if (mounted) _showError('Search timed out — try zooming in closer');
@@ -2518,6 +2524,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchCenter = null;
                           _lastSearchZoom   = null;
                         }
+                        _spotsSearchGen++; _poisSearchGen++;
                         setState(() { _mobileTab = i; _selectedSpot = null; });
                         _panelScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
@@ -2820,7 +2827,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&hour=${_hour.toInt()}'
         '&minute=${((_hour * 60).toInt() % 60)}'
         '&month=${date.month}&day=${date.day}'
-        '&n=8',
+        '&n=12',
       );
       final res  = await http.get(uri).timeout(const Duration(seconds: 30));
       final data = jsonDecode(res.body) as Map<String, dynamic>;
@@ -3799,6 +3806,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchCenter = null;
                           _lastSearchZoom   = null;
                         }
+                        _spotsSearchGen++; _poisSearchGen++;
                         setState(() { _mobileTab = i; _panelExpanded = false; _selectedSpot = null; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
