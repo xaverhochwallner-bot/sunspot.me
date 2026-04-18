@@ -2241,16 +2241,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildZoomButton(IconData icon, VoidCallback onTap) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 36, height: 36,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4, offset: const Offset(0, 1))],
-        ),
-        child: Icon(icon, size: 20, color: Colors.black87),
+    return SizedBox(
+      width: 40, height: 40,
+      child: FloatingActionButton.small(
+        heroTag: icon == Icons.add ? 'zoom_in' : 'zoom_out',
+        onPressed: onTap,
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 2,
+        child: Icon(icon, size: 20),
       ),
     );
   }
