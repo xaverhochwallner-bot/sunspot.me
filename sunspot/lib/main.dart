@@ -295,9 +295,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _ignoreNextMapClick = false;
       return;
     }
-    // Reject clicks in the panel/toggle zone (desktop only)
-    final panelZone = _isMobile ? 0.0 : (_panelOpen ? 300.0 : 22.0);
-    if (panelZone > 0 && point.x > _screenWidth - panelZone) return;
+    // Reject clicks in the sidebar zone (desktop only)
+    if (!_isMobile && point.x > _screenWidth - 280) return;
     if (_searchResults.isNotEmpty) {
       setState(() => _searchResults = []);
       return;
@@ -1891,7 +1890,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _screenWidth  = MediaQuery.of(context).size.width;
     _screenHeight = MediaQuery.of(context).size.height;
     final isMobile = _isMobile;
-    final panelRightPad = isMobile ? 0 : ((_panelOpen ? 280 : 0));
+    final panelRightPad = isMobile ? 0 : 280;
 
     // Map area — used as Expanded child on mobile, full Scaffold body on desktop
     final mapArea = Stack(
@@ -1967,7 +1966,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeInOut,
-          top: 12, left: 12, right: isMobile ? 12 : (_panelOpen ? 292 : 12),
+          top: 12, left: 12, right: isMobile ? 12 : 292,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2213,7 +2212,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         if (_errorMessage != null)
           Positioned(
             bottom: 80, left: 16,
-            right: isMobile ? 16 : (_panelOpen ? 296 : 16),
+            right: isMobile ? 16 : 296,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(color: Colors.red.shade700, borderRadius: BorderRadius.circular(8)),
@@ -2221,8 +2220,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
-        // Desktop panel
-        if (!isMobile) ...[
+        // Desktop sidebar
+        if (!isMobile)
           Positioned(
             top: 0, right: 0, bottom: 0, width: 280,
             child: Listener(
@@ -2230,41 +2229,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               onPointerDown: (_) => _setMapCanvasInteractive(false),
               onPointerUp:   (_) => _setMapCanvasInteractive(true),
               onPointerCancel: (_) => _setMapCanvasInteractive(true),
-              child: AnimatedSlide(
-                duration: const Duration(milliseconds: 300),
-                curve: Curves.easeInOut,
-                offset: _panelOpen ? Offset.zero : const Offset(1.0, 0),
-                child: _buildPanel(),
-              ),
+              child: _buildDesktopSidebar(),
             ),
           ),
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeInOut,
-            top: 0, bottom: 0,
-            right: _panelOpen ? 280 : 0,
-            width: 36,
-            child: Align(
-              alignment: Alignment.center,
-              child: MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () => setState(() => _panelOpen = !_panelOpen),
-                  child: Container(
-                    width: 36, height: 64,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: const BorderRadius.horizontal(left: Radius.circular(8)),
-                      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 6, offset: const Offset(-2, 0))],
-                    ),
-                    child: Icon(_panelOpen ? Icons.chevron_right : Icons.chevron_left,
-                        size: 20, color: Colors.grey.shade600),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
       ],
     );
 
@@ -2375,6 +2342,93 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildDesktopSidebar() {
+    const tabs = [
+      (Icons.access_time,       'Time'),
+      (Icons.wb_sunny_outlined, 'Spots'),
+      (Icons.route,             'Tour'),
+      (Icons.favorite_outline,  'Saved'),
+    ];
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 12,
+            offset: const Offset(-4, 0),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          // Content area
+          Expanded(
+            child: SingleChildScrollView(
+              controller: _panelScroll,
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              child: _buildMobileTabContent(),
+            ),
+          ),
+          // Tab bar
+          Divider(height: 1, color: Colors.grey.shade200),
+          SizedBox(
+            height: 56,
+            child: Row(
+              children: tabs.asMap().entries.map((entry) {
+                final i     = entry.key;
+                final icon  = entry.value.$1;
+                final label = entry.value.$2;
+                final sel   = _mobileTab == i;
+                return Expanded(
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      onTap: () {
+                        if (i != 1) {
+                          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
+                          _clearSunnySpots();
+                          _clearPoiMarkers();
+                          _lastSearchCenter = null;
+                          _lastSearchZoom   = null;
+                        }
+                        setState(() => _mobileTab = i);
+                        _panelScroll.jumpTo(0);
+                        if (i == 3) _refreshSavedSunny();
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: sel ? Colors.orange.withValues(alpha: 0.12) : Colors.transparent,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Icon(icon, size: 22,
+                                color: sel ? Colors.orange : Colors.grey.shade400),
+                          ),
+                          const SizedBox(height: 1),
+                          Text(label,
+                              style: TextStyle(
+                                fontSize: 10, fontWeight: FontWeight.w600,
+                                color: sel ? Colors.orange : Colors.grey.shade400,
+                              )),
+                        ],
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+        ],
       ),
     );
   }
