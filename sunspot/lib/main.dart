@@ -2224,7 +2224,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       body: isMobile
           ? LayoutBuilder(builder: (ctx, constraints) {
               final totalH    = constraints.maxHeight;
-              const collapsedH = 210.0;
+              const collapsedH = 240.0;
               final bottomH   = _panelExpanded ? totalH : collapsedH;
               final mapH      = totalH - bottomH;
               return Column(children: [
@@ -2524,73 +2524,80 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
     );
 
-    // LIVE · sunrise · (noon) · sunset · 24h — all on one row
-    final labelsRow = Row(
-      children: [
-        // LIVE button
-        GestureDetector(
-          onTap: _toggleLiveMode,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(12),
+    // LIVE | 24h — prominent row between slider and labels
+    final buttonsRow = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          GestureDetector(
+            onTap: _toggleLiveMode,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (_liveMode)
+                  Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 5),
+                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
+                Text('LIVE', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                    color: _liveMode ? Colors.white : Colors.black54, letterSpacing: 0.5)),
+              ]),
             ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              if (_liveMode)
-                Container(width: 5, height: 5, margin: const EdgeInsets.only(right: 3),
-                    decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
-              Text('LIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
-                  color: _liveMode ? Colors.white : Colors.black54, letterSpacing: 0.5)),
-            ]),
           ),
-        ),
-        const SizedBox(width: 6),
-        // sunrise label
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
-          const SizedBox(width: 2),
-          Text(_formatSliderHour(minH),
-              style: TextStyle(fontSize: 10, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
-        ]),
-        // noon label (centered)
-        if (noonInRange) ...[
-          const Spacer(),
-          const Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey)),
+          GestureDetector(
+            onTap: _toggle24h,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+              decoration: BoxDecoration(
+                color: _animating ? Colors.orange : Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(_animating ? Icons.stop : Icons.play_arrow, size: 13,
+                    color: _animating ? Colors.white : Colors.black54),
+                const SizedBox(width: 4),
+                Text('24h', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                    color: _animating ? Colors.white : Colors.black54)),
+              ]),
+            ),
+          ),
         ],
-        const Spacer(),
-        // sunset label
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade400),
-          const SizedBox(width: 2),
-          Text(_formatSliderHour(maxH),
-              style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade500, fontWeight: FontWeight.w600)),
-        ]),
-        const SizedBox(width: 6),
-        // 24h button
-        GestureDetector(
-          onTap: _toggle24h,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: _animating ? Colors.orange : Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              Icon(_animating ? Icons.stop : Icons.play_arrow, size: 11,
-                  color: _animating ? Colors.white : Colors.black54),
-              const SizedBox(width: 2),
-              Text('24h', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
-                  color: _animating ? Colors.white : Colors.black54)),
-            ]),
-          ),
-        ),
-      ],
+      ),
+    );
+
+    // sunrise · (noon) · sunset labels
+    final labelsRow = Padding(
+      padding: const EdgeInsets.only(left: 4, right: 4, top: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
+            const SizedBox(width: 2),
+            Text(_formatSliderHour(minH),
+                style: TextStyle(fontSize: 10, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
+          ]),
+          if (noonInRange)
+            const Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey)),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade400),
+            const SizedBox(width: 2),
+            Text(_formatSliderHour(maxH),
+                style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade500, fontWeight: FontWeight.w600)),
+          ]),
+        ],
+      ),
     );
 
     return Column(children: [
       slider,
-      Padding(padding: const EdgeInsets.only(left: 4, right: 4, top: 0), child: labelsRow),
+      buttonsRow,
+      labelsRow,
     ]);
   }
 
