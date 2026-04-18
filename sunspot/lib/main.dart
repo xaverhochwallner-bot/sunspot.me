@@ -2586,13 +2586,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // ---- Time header ----
   Widget _buildTimeHeader() {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
       children: [
-        Icon(_timePeriodIcon, color: Colors.orange, size: 18),
-        const SizedBox(width: 6),
+        Icon(_timePeriodIcon, color: Colors.orange.shade300, size: 14),
+        const SizedBox(width: 5),
         Text(_timePeriod,
-            style: const TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w700,
-                color: Colors.grey, letterSpacing: 1.2)),
+            style: TextStyle(
+                fontSize: 10, fontWeight: FontWeight.w600,
+                color: Colors.grey.shade400, letterSpacing: 1.1)),
         const Spacer(),
         TweenAnimationBuilder<double>(
           tween: Tween(begin: _hour, end: _hour),  // begin=_hour: no sweep-from-midnight on load; subsequent changes animate from current value
@@ -2601,8 +2603,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             return Text(
               _formatDisplayHour(value),
               style: TextStyle(
-                fontSize: 18, fontWeight: FontWeight.bold,
+                fontSize: 22, fontWeight: FontWeight.w300,
                 color: _draggingSlider ? Colors.orange : Colors.black87,
+                letterSpacing: -0.5,
               ),
             );
           },
@@ -2650,44 +2653,65 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final buttonsRow = Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-          GestureDetector(
-            onTap: _toggleLiveMode,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-              decoration: BoxDecoration(
-                color: _liveMode ? Colors.red.shade400 : Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(14),
+        GestureDetector(
+          onTap: _toggleLiveMode,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: _liveMode ? Colors.red.shade400 : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: _liveMode ? Colors.red.shade400 : Colors.grey.shade300,
+                width: 1,
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                if (_liveMode)
-                  Container(width: 6, height: 6, margin: const EdgeInsets.only(right: 5),
-                      decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
-                Text('LIVE', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
-                    color: _liveMode ? Colors.white : Colors.black54, letterSpacing: 0.5)),
-              ]),
             ),
-          ),
-          GestureDetector(
-            onTap: _toggle24h,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-              decoration: BoxDecoration(
-                color: _animating ? Colors.orange : Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(14),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Container(
+                width: 5, height: 5,
+                margin: const EdgeInsets.only(right: 5),
+                decoration: BoxDecoration(
+                  color: _liveMode ? Colors.white : Colors.red.shade300,
+                  shape: BoxShape.circle,
+                ),
               ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(_animating ? Icons.stop : Icons.play_arrow, size: 13,
-                    color: _animating ? Colors.white : Colors.black54),
-                const SizedBox(width: 4),
-                Text(_animating ? '${_animSpeed}×' : '24h',
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
-                    color: _animating ? Colors.white : Colors.black54)),
-              ]),
-            ),
+              Text('LIVE', style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w600,
+                color: _liveMode ? Colors.white : Colors.grey.shade500,
+                letterSpacing: 0.8,
+              )),
+            ]),
           ),
-        ],
+        ),
+        GestureDetector(
+          onTap: _toggle24h,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: _animating ? Colors.orange.shade400 : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: _animating ? Colors.orange.shade400 : Colors.grey.shade300,
+                width: 1,
+              ),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(
+                _animating ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                size: 11,
+                color: _animating ? Colors.white : Colors.grey.shade500,
+              ),
+              const SizedBox(width: 3),
+              Text(_animating ? '${_animSpeed}×' : '24h',
+                  style: TextStyle(
+                    fontSize: 11, fontWeight: FontWeight.w600,
+                    color: _animating ? Colors.white : Colors.grey.shade500,
+                  )),
+            ]),
+          ),
+        ),
+      ],
     );
 
     // sunrise · (noon) · sunset labels
@@ -2696,20 +2720,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
-            const SizedBox(width: 2),
-            Text(_formatSliderHour(minH),
-                style: TextStyle(fontSize: 10, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
-          ]),
+          Text(_formatSliderHour(minH),
+              style: TextStyle(fontSize: 10, color: Colors.orange.shade400, fontWeight: FontWeight.w500)),
           if (noonInRange)
-            const Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey)),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade400),
-            const SizedBox(width: 2),
-            Text(_formatSliderHour(maxH),
-                style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade500, fontWeight: FontWeight.w600)),
-          ]),
+            Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
+          Text(_formatSliderHour(maxH),
+              style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade300, fontWeight: FontWeight.w500)),
         ],
       ),
     );
