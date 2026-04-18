@@ -1831,12 +1831,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
     if (_shadowLayersReady) {
-      // Update source data + opacity in-place — no remove/re-add, no flicker
-      await ctrl.setGeoJsonSource('dark-area', geoJson);
-      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0));
-      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1));
-      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2));
-      return;
+      try {
+        // Update source data + opacity in-place — no remove/re-add, no flicker
+        await ctrl.setGeoJsonSource('dark-area', geoJson);
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2));
+        return;
+      } catch (_) {
+        // Source was removed (style reload) — fall through to re-create
+        _shadowLayersReady = false;
+      }
     }
 
     // First time (or after style reload): create source and layers
@@ -2023,7 +2028,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _screenWidth  = MediaQuery.of(context).size.width;
     _screenHeight = MediaQuery.of(context).size.height;
     final isMobile = _isMobile;
-    final panelRightPad = isMobile ? 0 : 280;
+    const panelRightPad = 0;
 
     // Map area — used as Expanded child on mobile, full Scaffold body on desktop
     final mapArea = Stack(
@@ -2107,7 +2112,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeInOut,
-          top: 12, left: 12, right: isMobile ? 12 : 292,
+          top: 12, left: 12, right: 12,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2245,7 +2250,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // Heatmap toggle — bottom-right, above GPS
         Positioned(
-          bottom: 68, right: isMobile ? 16 : 296,
+          bottom: 68, right: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2273,7 +2278,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // GPS button — bottom-right
         Positioned(
-          bottom: 16, right: isMobile ? 16 : 296,
+          bottom: 16, right: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2321,8 +2326,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         // Error banner
         if (_errorMessage != null)
           Positioned(
-            bottom: 80, left: 16,
-            right: isMobile ? 16 : 296,
+            bottom: 80, left: 16, right: 16,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(color: Colors.red.shade700, borderRadius: BorderRadius.circular(8)),
@@ -2330,18 +2334,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
-        // Desktop sidebar
-        if (!isMobile)
-          Positioned(
-            top: 0, right: 0, bottom: 0, width: 280,
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (_) => _setMapCanvasInteractive(false),
-              onPointerUp:   (_) => _setMapCanvasInteractive(true),
-              onPointerCancel: (_) => _setMapCanvasInteractive(true),
-              child: _buildDesktopSidebar(),
-            ),
-          ),
       ],
     );
 
@@ -2367,7 +2359,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ),
               ]);
             })
-          : mapArea,
+          : Row(children: [
+              Expanded(child: mapArea),
+              SizedBox(width: 280, child: _buildDesktopSidebar()),
+            ]),
     );
   }
 
@@ -2919,7 +2914,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Duration chips + clear
-        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+        Wrap(alignment: WrapAlignment.center, runSpacing: 6, children: [
           ...[15, 30, 60].map((min) {
             final sel = _tourDuration == min;
             return Padding(
