@@ -105,6 +105,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Map<String, dynamic>> _sunnySpots          = [];
   bool                       _sunnySpotsLayerReady = false;
   bool                       _findingSunnySpots    = false;
+  bool                       _spotsNoResults       = false;
+  bool                       _poisNoResults        = false;
+  bool                       _tourNoResults        = false;
   List<Offset>               _sunnySpotScreenPos   = [];
   List<Offset>               _tourMarkerScreenPos  = [];
   List<Offset>               _poiScreenPos         = [];
@@ -434,7 +437,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
 
-    setState(() { _findingSunnySpots = true; _spotsZoomHint = false; });
+    setState(() { _findingSunnySpots = true; _spotsZoomHint = false; _spotsNoResults = false; });
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
     await _clearTourLine();
@@ -512,7 +515,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           .compareTo((a['sun_hours_left'] as int?) ?? 0));
       final allSpots = merged.take(8).toList();
 
-      setState(() => _sunnySpots = allSpots);
+      setState(() { _sunnySpots = allSpots; _spotsNoResults = allSpots.isEmpty && !zoomIn; });
       _geocodeSpots(allSpots);
       await _showSunnySpotMarkers(allSpots);
       await _refreshSunnySpotPositions();
@@ -604,7 +607,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     _lastSearchCenter = ctrl.cameraPosition?.target;
     _lastSearchZoom   = ctrl.cameraPosition?.zoom;
-    setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; });
+    setState(() { _loadingPois = true; _sunnyPois = []; _poiScreenPos = []; _poisNoResults = false; });
     try {
       final bounds  = await ctrl.getVisibleRegion();
       final d       = _selectedDate;
@@ -631,7 +634,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         }
         final list = data['spots'] as List<dynamic>? ?? [];
         final pois = list.cast<Map<String, dynamic>>();
-        setState(() => _sunnyPois = pois);
+        setState(() { _sunnyPois = pois; _poisNoResults = pois.isEmpty; });
         await _showPoiMarkers(pois);
         await _refreshPoiPositions();
       } else if (mounted) {
@@ -2763,7 +2766,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _buildTour() async {
     if (_tourBuilding) return;
-    setState(() { _tourBuilding = true; _tourSpots = []; });
+    setState(() { _tourBuilding = true; _tourSpots = []; _tourNoResults = false; });
     await _clearSunnySpots();
 
     try {
@@ -2789,8 +2792,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           .toList();
 
       if (raw.isEmpty) {
-        setState(() => _tourBuilding = false);
-        _showError('No sunny spots found nearby');
+        setState(() { _tourBuilding = false; _tourNoResults = true; });
         return;
       }
 
@@ -2938,7 +2940,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (_tourSpots.isNotEmpty || _tourBuilding)
             GestureDetector(
               onTap: () {
-                setState(() { _tourSpots = []; _tourMarkerScreenPos = []; });
+                setState(() { _tourSpots = []; _tourMarkerScreenPos = []; _tourNoResults = false; });
                 _clearTourLine();
               },
               child: Container(
@@ -2976,6 +2978,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ]),
+
+        if (_tourNoResults) ...[
+          const SizedBox(height: 16),
+          _buildNoResultsMessage(),
+        ],
 
         // Results
         if (_tourSpots.isNotEmpty) ...[
@@ -3255,9 +3262,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Widget _buildFindSunnySpotsSection() {
     // Mode toggle
     Widget modeToggle = Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-      _modeBtn('Spots', Icons.wb_sunny_outlined, !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; }); _clearPoiMarkers(); }),
+      _modeBtn('Spots', Icons.wb_sunny_outlined, !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; _poisNoResults = false; }); _clearPoiMarkers(); }),
       const SizedBox(width: 8),
-      _modeBtn('Places', Icons.storefront_outlined, _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; }); _clearSunnySpots(); }),
+      _modeBtn('Places', Icons.storefront_outlined, _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; _spotsNoResults = false; }); _clearSunnySpots(); }),
     ]);
 
     if (!_placesMode) {
@@ -3311,42 +3318,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             Text('Zoom in to see results', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
           ]),
         ],
-        // Actionable empty state — shown after a search completes with 0 results
-        if (!_findingSunnySpots && !_spotsZoomHint && _sunnySpots.isEmpty && _lastSearchCenter != null) ...[
+        if (_spotsNoResults) ...[
           const SizedBox(height: 16),
-          Column(children: [
-            Icon(Icons.wb_cloudy_outlined, size: 32, color: Colors.grey.shade300),
-            const SizedBox(height: 8),
-            Text('No sunny spots found here',
-                style: TextStyle(fontSize: 13, color: Colors.grey.shade500, fontWeight: FontWeight.w500)),
-            const SizedBox(height: 4),
-            Text('Everything is in shadow right now.',
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
-            const SizedBox(height: 12),
-            GestureDetector(
-              onTap: () {
-                final noon = (_sunriseHour != null && _sunsetHour != null)
-                    ? ((_sunriseHour! + _sunsetHour!) / 2).roundToDouble()
-                    : 12.0;
-                setState(() { _hour = noon; _liveMode = false; });
-                fetchShadows();
-                Future.delayed(const Duration(milliseconds: 700), _findSunnySpots);
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.orange.shade200),
-                ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.schedule, size: 13, color: Colors.orange.shade600),
-                  const SizedBox(width: 6),
-                  Text('Try solar noon', style: TextStyle(fontSize: 12, color: Colors.orange.shade700, fontWeight: FontWeight.w600)),
-                ]),
-              ),
-            ),
-          ]),
+          _buildNoResultsMessage(),
         ],
         if (_sunnySpots.isNotEmpty) ...[
           const SizedBox(height: 10),
@@ -3432,6 +3406,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
         ],
       ]),
+      if (_poisNoResults) ...[
+        const SizedBox(height: 16),
+        _buildNoResultsMessage(),
+      ],
       if (_sunnyPois.isNotEmpty) ...[
         const SizedBox(height: 10),
         ..._sunnyPois.asMap().entries.map((e) {
@@ -3689,6 +3667,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
       ]),
     );
+  }
+
+  Widget _buildNoResultsMessage() {
+    return Column(children: [
+      Icon(Icons.wb_cloudy_outlined, size: 32, color: Colors.grey.shade300),
+      const SizedBox(height: 8),
+      Text('No sunny spots found here',
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade500, fontWeight: FontWeight.w500)),
+      const SizedBox(height: 4),
+      Text('Everything is in shadow right now.',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+    ]);
   }
 
   // =========================================================================
