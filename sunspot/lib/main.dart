@@ -2250,9 +2250,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           child: Center(child: _buildLoadingPill()),
         ),
 
-        // Heatmap toggle — bottom-right, above GPS
+        // Heatmap toggle — top-left, below search bar
         Positioned(
-          bottom: 68, right: 16,
+          top: 68, left: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2654,9 +2654,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
     );
 
-    // LIVE | 24h — centered below time header
+    // LIVE | 24h — left/right below time header
     final buttonsRow = Row(
-      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
           GestureDetector(
             onTap: _toggleLiveMode,
@@ -2676,7 +2676,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ]),
             ),
           ),
-          const SizedBox(width: 12),
           GestureDetector(
             onTap: _toggle24h,
             child: AnimatedContainer(
