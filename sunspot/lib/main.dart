@@ -255,8 +255,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _injectAttributionCss() {
     final style = html.StyleElement();
-    style.text = '.maplibregl-ctrl-bottom-right { padding-right: 4px !important; }'
-        '.maplibregl-ctrl-attrib { font-size: 10px !important; }';
+    style.text =
+        // Collapse attribution text — show only the compact ⓘ button
+        '.maplibregl-ctrl-attrib.maplibregl-compact { min-height: 20px; }'
+        '.maplibregl-ctrl-attrib-inner { display: none !important; }'
+        '.maplibregl-ctrl-attrib-button { opacity: 0.4; }'
+        // Hide the MapLibre logo
+        '.maplibregl-ctrl-logo { display: none !important; }'
+        // Move the control area above the mobile bottom bar (avoids overlap)
+        '.maplibregl-ctrl-bottom-right { bottom: 4px !important; right: 4px !important; }';
     html.document.head!.append(style);
   }
 
@@ -3172,7 +3179,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // ---- Find sunny spots / places ----
   Widget _buildFindSunnySpotsSection() {
     // Mode toggle
-    Widget modeToggle = Row(children: [
+    Widget modeToggle = Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       _modeBtn('Spots', Icons.wb_sunny_outlined, !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; }); _clearPoiMarkers(); }),
       const SizedBox(width: 8),
       _modeBtn('Places', Icons.storefront_outlined, _placesMode, () { setState(() { _placesMode = true; _sunnySpots = []; }); _clearSunnySpots(); }),
@@ -3404,6 +3411,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           onTap: onTap,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            clipBehavior: Clip.hardEdge,
             decoration: BoxDecoration(
               color: Colors.grey.shade50,
               borderRadius: BorderRadius.circular(10),
