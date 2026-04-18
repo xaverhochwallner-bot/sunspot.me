@@ -1689,6 +1689,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (_shadowResultCache.length > _shadowCacheMax) {
             _shadowResultCache.remove(_shadowResultCache.keys.first);
           }
+          // Prefetch adjacent hours silently after a short idle delay
+          Future.delayed(const Duration(milliseconds: 600), () {
+            if (!mounted || _draggingSlider || _loading) return;
+            final sr = _sunriseHour ?? 6.0;
+            final ss = _sunsetHour ?? 20.0;
+            for (final dh in [1, -1]) {
+              final h = (_hour + dh).clamp(sr, ss).toInt();
+              if (h != _hour.toInt()) _prefetchSilent(h, zoom);
+            }
+          });
           _pillTimer?.cancel();
           if (mounted) {
             setState(() {
@@ -1744,6 +1754,47 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
       if (!completer.isCompleted) completer.complete();
     }
+  }
+
+  // Silently pre-fetch an adjacent hour into the client cache.
+  // Does not touch UI state or _fetchGen — pure background work.
+  Future<void> _prefetchSilent(int hour, int zoom) async {
+    if (!_mapReady || _mapController == null) return;
+    final bounds = await _mapController!.getVisibleRegion();
+    final prefetchKey = '${zoom}_${hour}_${_selectedDate.month}_${_selectedDate.day}'
+        '_${_currentCenter.latitude.toStringAsFixed(3)}'
+        '_${_currentCenter.longitude.toStringAsFixed(3)}';
+    if (_shadowResultCache.containsKey(prefetchKey)) return;
+
+    final uri = Uri.parse(
+      '$flaskBaseUrl/shadow/stream'
+      '?lat=${_currentCenter.latitude}'
+      '&lon=${_currentCenter.longitude}'
+      '&hour=$hour&minute=0'
+      '&month=${_selectedDate.month}&day=${_selectedDate.day}'
+      '&zoom=$zoom'
+      '&minLat=${bounds.southwest.latitude}'
+      '&minLon=${bounds.southwest.longitude}'
+      '&maxLat=${bounds.northeast.latitude}'
+      '&maxLon=${bounds.northeast.longitude}',
+    );
+
+    final es = html.EventSource(uri.toString());
+    es.onMessage.listen((event) {
+      final data = jsonDecode(event.data as String) as Map<String, dynamic>;
+      if (data.containsKey('result')) {
+        es.close();
+        if (!_shadowResultCache.containsKey(prefetchKey)) {
+          _shadowResultCache[prefetchKey] = data['result'] as Map<String, dynamic>;
+          if (_shadowResultCache.length > _shadowCacheMax) {
+            _shadowResultCache.remove(_shadowResultCache.keys.first);
+          }
+        }
+      } else if (data.containsKey('error')) {
+        es.close();
+      }
+    });
+    es.onError.listen((_) => es.close());
   }
 
   Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
