@@ -2605,6 +2605,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 fontSize: 10, fontWeight: FontWeight.w600,
                 color: Colors.grey.shade400, letterSpacing: 1.1)),
         const Spacer(),
+        if (!_isToday(_selectedDate))
+          Container(
+            margin: const EdgeInsets.only(right: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.blueGrey.shade50,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: Colors.blueGrey.shade200, width: 1),
+            ),
+            child: Text('Historical',
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500,
+                    color: Colors.blueGrey.shade400)),
+          ),
         TweenAnimationBuilder<double>(
           tween: Tween(begin: _hour, end: _hour),  // begin=_hour: no sweep-from-midnight on load; subsequent changes animate from current value
           duration: const Duration(milliseconds: 350),
@@ -3601,22 +3614,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 children: [
                   Text(_formattedDate,
                       style: const TextStyle(fontSize: 14)),
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    if (!_isToday(_selectedDate))
-                      Container(
-                        margin: const EdgeInsets.only(right: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.blueGrey.shade50,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Colors.blueGrey.shade200, width: 1),
-                        ),
-                        child: Text('Historical',
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500,
-                                color: Colors.blueGrey.shade400)),
-                      ),
-                    const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
-                  ]),
+                  const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
                 ],
               ),
             ),
