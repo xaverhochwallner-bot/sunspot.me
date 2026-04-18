@@ -2161,7 +2161,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // Heatmap toggle — above GPS button
         Positioned(
-          bottom: 120, right: 16,
+          bottom: 120, right: isMobile ? 16 : 296,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
@@ -2188,7 +2188,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
         // GPS button — right side; Listener blocks map-click from firing underneath
         Positioned(
-          bottom: 68, right: 16,
+          bottom: 68, right: isMobile ? 16 : 296,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
