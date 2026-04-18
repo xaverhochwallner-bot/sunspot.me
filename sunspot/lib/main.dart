@@ -236,6 +236,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
            '${_selectedDate.year}';
   }
 
+  bool _isToday(DateTime d) {
+    final now = DateTime.now();
+    return d.year == now.year && d.month == now.month && d.day == now.day;
+  }
+
   // -------------------------------------------------------------------------
   // Map callbacks
   // -------------------------------------------------------------------------
@@ -2626,25 +2631,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final sliderVal = _hour.clamp(minH, maxH);
     final noonInRange = minH < 12.0 && maxH > 12.0;
 
-    // Slider full width
+    // Slider full width — locked when LIVE is active
     final slider = SliderTheme(
       data: SliderTheme.of(context).copyWith(
         activeTrackColor: _liveMode ? Colors.red.shade300 : Colors.orange,
         inactiveTrackColor: _liveMode ? Colors.red.shade100 : Colors.orange.shade100,
-        thumbColor: _liveMode ? Colors.red.shade400 : Colors.white,
+        thumbColor: _liveMode ? Colors.grey.shade400 : Colors.white,
         thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-        overlayColor: (_liveMode ? Colors.red : Colors.orange).withValues(alpha: 0.2),
+        overlayColor: _liveMode ? Colors.transparent : Colors.orange.withValues(alpha: 0.2),
+        disabledThumbColor: Colors.grey.shade400,
+        disabledActiveTrackColor: Colors.red.shade200,
+        disabledInactiveTrackColor: Colors.red.shade100,
       ),
       child: Slider(
         value: sliderVal,
         min: minH, max: maxH, divisions: divisions,
-        onChangeStart: (_) {
+        onChangeStart: _liveMode ? null : (_) {
           _liveTimer?.cancel();
           setState(() { _draggingSlider = true; _liveMode = false; });
           _setMapPointerEvents(false);
         },
-        onChanged:   (v) => setState(() => _hour = v),
-        onChangeEnd: (_) {
+        onChanged:  _liveMode ? null : (v) => setState(() => _hour = v),
+        onChangeEnd: _liveMode ? null : (_) {
           setState(() => _draggingSlider = false);
           _setMapPointerEvents(true);
           fetchShadows();
@@ -3593,7 +3601,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 children: [
                   Text(_formattedDate,
                       style: const TextStyle(fontSize: 14)),
-                  const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (!_isToday(_selectedDate))
+                      Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.blueGrey.shade50,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.blueGrey.shade200, width: 1),
+                        ),
+                        child: Text('Historical',
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500,
+                                color: Colors.blueGrey.shade400)),
+                      ),
+                    const Icon(Icons.calendar_month, size: 18, color: Colors.grey),
+                  ]),
                 ],
               ),
             ),
