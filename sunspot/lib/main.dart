@@ -2163,29 +2163,33 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
         ),
 
-        // Zoom buttons — bottom-left
+        // Zoom + — mirrors heatmap toggle position
+        Positioned(
+          bottom: 68, left: 16,
+          child: Listener(
+            behavior: HitTestBehavior.opaque,
+            onPointerDown: (_) => _ignoreNextMapClick = true,
+            child: _buildZoomButton(Icons.add, () async {
+              final cam = _mapController?.cameraPosition;
+              if (cam == null) return;
+              await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                  CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
+            }),
+          ),
+        ),
+
+        // Zoom − — mirrors GPS button position
         Positioned(
           bottom: 16, left: 16,
           child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
-            child: Column(
-              children: [
-                _buildZoomButton(Icons.add, () async {
-                  final cam = _mapController?.cameraPosition;
-                  if (cam == null) return;
-                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
-                }),
-                const SizedBox(height: 4),
-                _buildZoomButton(Icons.remove, () async {
-                  final cam = _mapController?.cameraPosition;
-                  if (cam == null) return;
-                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
-                }),
-              ],
-            ),
+            child: _buildZoomButton(Icons.remove, () async {
+              final cam = _mapController?.cameraPosition;
+              if (cam == null) return;
+              await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                  CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
+            }),
           ),
         ),
 
