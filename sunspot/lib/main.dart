@@ -1877,19 +1877,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _run24hStep() async {
-    if (!_animating) return;
-    await fetchShadows();
-    if (_heatmapMode) await _fetchAndShowHeatmap();
-    final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
-    await Future.delayed(Duration(milliseconds: ms));
-    if (!_animating) return;
-    final end = _sunsetHour ?? 20.0;
-    if (_hour >= end) {
-      setState(() => _animating = false);
-      return;
+    while (_animating) {
+      await fetchShadows();
+      if (_heatmapMode) await _fetchAndShowHeatmap();
+      if (!_animating) break;
+      final end = _sunsetHour ?? 20.0;
+      if (_hour >= end) {
+        setState(() => _animating = false);
+        break;
+      }
+      // In heatmap mode the server is the bottleneck — no extra delay needed
+      if (!_heatmapMode) {
+        final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
+        await Future.delayed(Duration(milliseconds: ms));
+      }
+      if (!_animating) break;
+      setState(() => _hour = _hour + 1.0);
     }
-    setState(() => _hour = _hour + 1.0);
-    _run24hStep();
   }
 
   // -------------------------------------------------------------------------
