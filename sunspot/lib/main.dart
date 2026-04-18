@@ -1631,6 +1631,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final es = html.EventSource(uri.toString());
       _activeEventSource = es;
 
+      var resultReceived = false;
+
       es.onMessage.listen((event) async {
         if (gen != _fetchGen) { es.close(); return; }
 
@@ -1644,6 +1646,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         });
 
         if (data.containsKey('result')) {
+          resultReceived = true;
           es.close();
           _activeEventSource = null;
           final result  = data['result'] as Map<String, dynamic>;
@@ -1689,6 +1692,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         es.close();
         _activeEventSource = null;
         _pillTimer?.cancel();
+        // If stream dropped before result arrived, restore shadow layers to
+        // their pre-dim state so stale dimmed overlay doesn't persist.
+        if (!resultReceived && _shadowLayersReady && _mapController != null) {
+          _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.0));
+        }
         _showError('Could not load shadows — is the server running?');
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         if (!completer.isCompleted) completer.complete();

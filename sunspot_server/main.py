@@ -554,12 +554,22 @@ def parallel_union(geoms, chunk_size=150, max_workers=8):
     """Union a large list of geometries in parallel chunks, then merge results."""
     if not geoms:
         return None
-    if len(geoms) <= chunk_size:
-        return unary_union(geoms)
-    chunks = [geoms[i:i + chunk_size] for i in range(0, len(geoms), chunk_size)]
+    valid = []
+    for g in geoms:
+        if g is None or g.is_empty:
+            continue
+        if not g.is_valid:
+            g = g.buffer(0)
+        if g is not None and not g.is_empty:
+            valid.append(g)
+    if not valid:
+        return None
+    if len(valid) <= chunk_size:
+        return unary_union(valid)
+    chunks = [valid[i:i + chunk_size] for i in range(0, len(valid), chunk_size)]
     with ThreadPoolExecutor(max_workers=min(len(chunks), max_workers)) as ex:
         partial = list(ex.map(_union_chunk, chunks))
-    return unary_union(partial)
+    return unary_union([p for p in partial if p is not None and not p.is_empty])
 
 
 def round_coords(obj, precision=5):
@@ -1026,9 +1036,15 @@ def shadow_stream():
             if ck not in _shadow_cache:
                 compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
                 min_bld_area = _min_building_area(zoom)
-                buildings = [(p, h) for p, h in
-                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                             if p.area >= min_bld_area]
+                raw_buildings = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+                buildings = []
+                for p, h in raw_buildings:
+                    if p is None or p.is_empty:
+                        continue
+                    if not p.is_valid:
+                        p = p.buffer(0)
+                    if p is not None and not p.is_empty and p.area >= min_bld_area:
+                        buildings.append((p, h))
                 n = len(buildings)
 
                 yield _evt(15, f"Projecting {n} buildings")
@@ -1079,9 +1095,17 @@ def shadow_stream():
                     merged = parallel_union(all_parts)
                     gfill  = _gap_fill(zoom)
                     stol   = _simplify_tolerance(zoom)
-                    merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-                    merged = merged.simplify(stol, preserve_topology=True)
-                    sunlit = compute_bbox.difference(merged)
+                    if merged is not None and not merged.is_empty:
+                        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                        if not merged.is_valid:
+                            merged = merged.buffer(0)
+                        merged = merged.simplify(stol, preserve_topology=True)
+                        try:
+                            sunlit = compute_bbox.difference(merged)
+                        except Exception:
+                            sunlit = compute_bbox
+                    else:
+                        sunlit = compute_bbox
                 else:
                     sunlit = compute_bbox
 
