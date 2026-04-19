@@ -288,7 +288,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _buildTour();
     }
 
-    fetchShadows();
+    if (_heatmapMode) {
+      _fetchAndShowHeatmap();
+    } else {
+      fetchShadows();
+    }
     _initGpsOnStart();
     _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
   }
@@ -866,15 +870,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
 
   Future<void> _setShadowLayersVisible(bool visible) async {
-    if (!_shadowLayersReady) return;
-    await _mapController?.setLayerProperties(
-        'shadow-l0-fill', FillLayerProperties(fillOpacity: visible ? 0.3 : 0.0));
-    await _mapController?.setLayerProperties(
-        'shadow-l1-fill', FillLayerProperties(fillOpacity: visible ? 0.2 : 0.0));
-    await _mapController?.setLayerProperties(
-        'shadow-l2-fill', FillLayerProperties(fillOpacity: visible ? 0.1 : 0.0));
-    // Trigger a full shadow refresh when re-enabling so correct opacities are restored
-    if (visible) fetchShadows();
+    final ctrl = _mapController;
+    if (ctrl == null) return;
+    if (!visible) {
+      // Nuclear option: remove layers + source entirely so MapLibre can't
+      // resurrect them on tile reload. _shadowLayersReady = false means
+      // _updateMapLayers will recreate them from scratch when needed.
+      if (_shadowLayersReady) {
+        try { await ctrl.removeLayer('shadow-l2-fill'); } catch (_) {}
+        try { await ctrl.removeLayer('shadow-l1-fill'); } catch (_) {}
+        try { await ctrl.removeLayer('shadow-l0-fill'); } catch (_) {}
+        try { await ctrl.removeSource('dark-area'); } catch (_) {}
+        _shadowLayersReady = false;
+      }
+    } else {
+      // Re-enable: fetchShadows will recreate layers via _updateMapLayers
+      fetchShadows();
+    }
   }
 
   Future<void> _toggleHeatmap() async {
@@ -885,11 +897,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _clearHeatmapLayers();
       await _setShadowLayersVisible(true);
     } else {
-      // Switch to heatmap
-      await _setShadowLayersVisible(false);
+      // Set _heatmapMode = true FIRST so any events that fire during the
+      // subsequent awaits (e.g. _onCameraIdle) see the correct mode and
+      // don't re-create shadow layers in the race window.
+      _activeEventSource?.close();
+      _activeEventSource = null;
+      ++_fetchGen;
       setState(() { _heatmapMode = true; _heatmapLoading = true; });
+      await _setShadowLayersVisible(false);
       await _fetchAndShowHeatmap();
-      setState(() => _heatmapLoading = false);
+      if (mounted) setState(() => _heatmapLoading = false);
     }
   }
 
@@ -927,6 +944,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _showHeatmapLayers(Map<String, dynamic> geojson) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
+
+    // Remove shadow layers+source entirely on every heatmap render —
+    // tile reloads can't resurrect what doesn't exist in the style.
+    if (_shadowLayersReady) {
+      try { await ctrl.removeLayer('shadow-l2-fill'); } catch (_) {}
+      try { await ctrl.removeLayer('shadow-l1-fill'); } catch (_) {}
+      try { await ctrl.removeLayer('shadow-l0-fill'); } catch (_) {}
+      try { await ctrl.removeSource('dark-area'); } catch (_) {}
+      _shadowLayersReady = false;
+    }
 
     // Fade opacity with sun elevation: 0° → 0.0, 45°+ → 0.50
     final opacity = (_elevation <= 0)
@@ -1485,13 +1512,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.lowest,
-          timeLimit: Duration(seconds: 8),
+          timeLimit: Duration(seconds: 25),
         ),
-      ).timeout(const Duration(seconds: 10)).catchError((_) async {
-        final last = await Geolocator.getLastKnownPosition();
-        if (last != null) return last;
-        throw Exception('no position');
-      });
+      ).timeout(const Duration(seconds: 30));
       return LatLng(pos.latitude, pos.longitude);
     } on TimeoutException {
       _showError('GPS: location timed out — try again');
@@ -1643,24 +1666,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         return;
       }
 
-      if (_shadowLayersReady && _lastFetchZoom != -1 && zoom != _lastFetchZoom) {
-        final zoomDelta = (zoom - _lastFetchZoom).abs();
-        if (zoomDelta >= 2) {
-          // Large jump — old rectangle looks obviously wrong: clear it.
-          final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
-          await _mapController!.setGeoJsonSource('dark-area', empty);
-        } else {
-          // Small step — delay 200ms before dimming so fast cache hits
-          // never show a flash of dim (user won't notice the wait).
-          Future.delayed(const Duration(milliseconds: 200), () async {
-            if (!mounted || !_loading) return;
-            await _mapController?.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: 0.15));
-            await _mapController?.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: 0.10));
-            await _mapController?.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: 0.08));
-          });
-        }
-      }
-
       _lastFetchZoom = zoom;
 
       // Cache lookup — key matches server's _cache_key(hour, month, day, lat, lon, zoom)
@@ -1684,6 +1689,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         });
         if (!completer.isCompleted) completer.complete();
         return;
+      }
+
+      // Dim existing shadows while new data loads — keeps the map readable
+      // instead of going blank. Opacity is restored by _updateMapLayers.
+      if (_shadowLayersReady) {
+        _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.15));
+        _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.10));
+        _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.08));
       }
 
       final uri = Uri.parse(
@@ -1850,6 +1863,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
+    if (_heatmapMode) return; // never let shadow data bleed into heatmap mode
     final ctrl = _mapController;
     if (ctrl == null) return;
 
@@ -1862,9 +1876,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       try {
         // Update source data + opacity in-place — no remove/re-add, no flicker
         await ctrl.setGeoJsonSource('dark-area', geoJson);
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2));
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3d5a70', fillOpacity: opL0));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2e4d64', fillOpacity: opL1));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1e3a52', fillOpacity: opL2));
         return;
       } catch (_) {
         // Source was removed (style reload) — fall through to re-create
@@ -2705,83 +2719,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
     );
 
-    // Single row: ☀ sunrise · [LIVE] · 12 PM · [24h] · 🌙 sunset
+    // Row 1: ☀ sunrise · 12 PM · 🌙 sunset
     final labelsRow = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // sunrise
           Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
             const SizedBox(width: 3),
             Text(_formatSliderHour(minH),
                 style: TextStyle(fontSize: 10, color: Colors.orange.shade400, fontWeight: FontWeight.w500)),
           ]),
-          // LIVE button
-          GestureDetector(
-            onTap: _toggleLiveMode,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-              decoration: BoxDecoration(
-                color: _liveMode ? Colors.red.shade400 : Colors.transparent,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: _liveMode ? Colors.red.shade400 : Colors.grey.shade300,
-                  width: 1,
-                ),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Container(
-                  width: 5, height: 5,
-                  margin: const EdgeInsets.only(right: 4),
-                  decoration: BoxDecoration(
-                    color: _liveMode ? Colors.white : Colors.red.shade300,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-                Text('LIVE', style: TextStyle(
-                  fontSize: 11, fontWeight: FontWeight.w600,
-                  color: _liveMode ? Colors.white : Colors.grey.shade500,
-                  letterSpacing: 0.6,
-                )),
-              ]),
-            ),
-          ),
-          // noon
           if (noonInRange)
             Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
-          // 24h button
-          GestureDetector(
-            onTap: _toggle24h,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
-              decoration: BoxDecoration(
-                color: _animating ? Colors.orange.shade400 : Colors.transparent,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: _animating ? Colors.orange.shade400 : Colors.grey.shade300,
-                  width: 1,
-                ),
-              ),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(
-                  _animating ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                  size: 11,
-                  color: _animating ? Colors.white : Colors.grey.shade500,
-                ),
-                const SizedBox(width: 2),
-                Text(_animating ? '${_animSpeed}×' : '24h',
-                    style: TextStyle(
-                      fontSize: 11, fontWeight: FontWeight.w600,
-                      color: _animating ? Colors.white : Colors.grey.shade500,
-                    )),
-              ]),
-            ),
-          ),
-          // sunset
           Row(mainAxisSize: MainAxisSize.min, children: [
             Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade300),
             const SizedBox(width: 3),
@@ -2792,10 +2743,86 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ),
     );
 
+    // Row 2: [LIVE] · [24h] pills
+    final pillsRow = Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // LIVE button — disabled while Sun Map (heatmap) is active
+        GestureDetector(
+          onTap: _heatmapMode ? null : _toggleLiveMode,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+            decoration: BoxDecoration(
+              color: _liveMode && !_heatmapMode ? Colors.red.shade400 : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: _heatmapMode ? Colors.grey.shade200
+                    : _liveMode ? Colors.red.shade400 : Colors.grey.shade300,
+                width: 1,
+              ),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Container(
+                width: 5, height: 5,
+                margin: const EdgeInsets.only(right: 4),
+                decoration: BoxDecoration(
+                  color: _heatmapMode ? Colors.grey.shade300
+                      : _liveMode ? Colors.white : Colors.red.shade300,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              Text('LIVE', style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w600,
+                color: _heatmapMode ? Colors.grey.shade300
+                    : _liveMode ? Colors.white : Colors.grey.shade500,
+                letterSpacing: 0.6,
+              )),
+            ]),
+          ),
+        ),
+        const SizedBox(width: 10),
+        // 24h button — also disabled while Sun Map is active
+        GestureDetector(
+          onTap: _heatmapMode ? null : _toggle24h,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+            decoration: BoxDecoration(
+              color: _animating ? Colors.orange.shade400 : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: _heatmapMode ? Colors.grey.shade200
+                    : _animating ? Colors.orange.shade400 : Colors.grey.shade300,
+                width: 1,
+              ),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(
+                _animating && !_heatmapMode ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                size: 11,
+                color: _heatmapMode ? Colors.grey.shade300
+                    : _animating ? Colors.white : Colors.grey.shade500,
+              ),
+              const SizedBox(width: 2),
+              Text(_animating && !_heatmapMode ? '${_animSpeed}×' : '24h',
+                  style: TextStyle(
+                    fontSize: 11, fontWeight: FontWeight.w600,
+                    color: _heatmapMode ? Colors.grey.shade300
+                        : _animating ? Colors.white : Colors.grey.shade500,
+                  )),
+            ]),
+          ),
+        ),
+      ],
+    );
+
     return Column(children: [
       slider,
       const SizedBox(height: 6),
       labelsRow,
+      const SizedBox(height: 8),
+      pillsRow,
     ]);
   }
 
@@ -4046,29 +4073,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
 }
 
-// Radial vignette overlay — fades the map edge to mask the rectangular
-// shadow boundary. Drawn above MapLibre, below all UI widgets.
 class _VignettePainter extends CustomPainter {
   @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    // Use the longer axis so the gradient always reaches the corners.
-    final radius = sqrt(size.width * size.width + size.height * size.height) / 2;
-    final paint = Paint()
-      ..shader = RadialGradient(
-        center: Alignment.center,
-        radius: 1.0,
-        colors: const [
-          Color(0x00F5F0EB), // transparent centre
-          Color(0x00F5F0EB), // still transparent at 50%
-          Color(0x55F5F0EB), // soft at 75%
-          Color(0xCCF5F0EB), // ~80% warm cream at edge
-        ],
-        stops: const [0.0, 0.50, 0.75, 1.0],
-      ).createShader(Rect.fromCircle(center: center, radius: radius));
-    canvas.drawRect(Offset.zero & size, paint);
-  }
-
+  void paint(Canvas canvas, Size size) {}
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
