@@ -710,22 +710,14 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance (deg) — lookup table for controlled ramp.
-      zoom ≥17 → ~1.5 m
-      zoom 16  → ~3.6 m  — individual building shadows
-      zoom 15  → ~8 m    — fine street detail
-      zoom 14  → ~11 m   — main streets visible
-      zoom 13  → ~35 m   — merge across typical street widths
-      zoom 12  → ~67 m   — district-scale merging
-      zoom ≤11 → ~134 m  — city-scale merging
-    """
+    """Morphological close distance — fills small gaps between shadow patches."""
     if zoom >= 17: return 0.000014
     if zoom == 16: return 0.000033
     if zoom == 15: return 0.000072
     if zoom == 14: return 0.000100
     if zoom == 13: return 0.000100   # ~11m — same as z14 for consistent look
-    if zoom == 12: return 0.000180   # ~20m — fills typical streets
-    return                0.000350   # ~39m — city-block scale
+    if zoom == 12: return 0.000130   # ~14m — slightly wider than z13
+    return                0.000160   # ~18m — z11 and below
 
 
 def _shadow_erosion_steps(zoom):
@@ -743,9 +735,9 @@ def _shadow_erosion_steps(zoom):
     if zoom >= 16: return (0.000022, 0.000055)
     if zoom == 15: return (0.000045, 0.000110)
     if zoom == 14: return (0.000090, 0.000220)
-    if zoom == 13: return (0.000060, 0.000140)   # slightly smaller than z14
-    if zoom == 12: return (0.000030, 0.000070)
-    return               (0.00017,  0.00043)
+    if zoom == 13: return (0.000060, 0.000140)
+    if zoom == 12: return (0.000060, 0.000140)   # same as z13
+    return               (0.000060, 0.000140)    # z11 and below — same
 
 
 def filter_small_polygons(geom, min_area):
