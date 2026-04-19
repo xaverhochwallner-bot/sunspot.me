@@ -2723,7 +2723,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             onTap: _toggleLiveMode,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
               decoration: BoxDecoration(
                 color: _liveMode ? Colors.red.shade400 : Colors.transparent,
                 borderRadius: BorderRadius.circular(20),
@@ -2742,7 +2742,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                 ),
                 Text('LIVE', style: TextStyle(
-                  fontSize: 10, fontWeight: FontWeight.w600,
+                  fontSize: 11, fontWeight: FontWeight.w600,
                   color: _liveMode ? Colors.white : Colors.grey.shade500,
                   letterSpacing: 0.6,
                 )),
@@ -2757,7 +2757,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             onTap: _toggle24h,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
               decoration: BoxDecoration(
                 color: _animating ? Colors.orange.shade400 : Colors.transparent,
                 borderRadius: BorderRadius.circular(20),
@@ -2769,13 +2769,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(
                   _animating ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                  size: 10,
+                  size: 11,
                   color: _animating ? Colors.white : Colors.grey.shade500,
                 ),
                 const SizedBox(width: 2),
                 Text(_animating ? '${_animSpeed}×' : '24h',
                     style: TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.w600,
+                      fontSize: 11, fontWeight: FontWeight.w600,
                       color: _animating ? Colors.white : Colors.grey.shade500,
                     )),
               ]),
@@ -2794,6 +2794,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     return Column(children: [
       slider,
+      const SizedBox(height: 6),
       labelsRow,
     ]);
   }
