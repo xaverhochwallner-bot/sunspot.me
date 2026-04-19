@@ -1707,7 +1707,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       var resultReceived = false;
 
       es.onMessage.listen((event) async {
-        if (gen != _fetchGen) { es.close(); return; }
+        if (gen != _fetchGen) {
+          es.close();
+          if (mounted) setState(() { _showPill = false; _loadingProgress = 0.0; _loadingStage = ''; });
+          return;
+        }
 
         final data  = jsonDecode(event.data as String) as Map<String, dynamic>;
         final pct   = (data['progress'] as num?)?.toDouble() ?? 0.0;
@@ -1756,8 +1760,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               if (srHour != null && ssHour != null) {
                 _hour = _hour.clamp(srHour, ssHour);
               }
-              _loading     = false;
-              _showPill    = false;
+              _loading         = false;
+              _showPill        = false;
+              _loadingProgress = 0.0;
+              _loadingStage    = '';
             });
           }
           if (!completer.isCompleted) completer.complete();
