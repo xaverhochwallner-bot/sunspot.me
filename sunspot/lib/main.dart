@@ -1480,11 +1480,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           return null;
         }
       }
+      // Try fast network/IP location first (works on desktop Chrome);
+      // fall back to last known position if available.
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.low,
+          accuracy: LocationAccuracy.lowest,
+          timeLimit: Duration(seconds: 8),
         ),
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 10)).catchError((_) async {
+        final last = await Geolocator.getLastKnownPosition();
+        if (last != null) return last;
+        throw Exception('no position');
+      });
       return LatLng(pos.latitude, pos.longitude);
     } on TimeoutException {
       _showError('GPS: location timed out — try again');
@@ -1516,9 +1523,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _gpsPosition   = newPos;
       _currentCenter = newPos;
     });
-    final zoom = _mapController?.cameraPosition?.zoom ?? 16.0;
+    // Each tap zooms in one step: first tap → 15, second → 16, third → 17, then caps
+    final currentZoom = _mapController?.cameraPosition?.zoom ?? 0;
+    final targetZoom  = currentZoom < 15 ? 15.0
+                      : currentZoom < 16 ? 16.0
+                      : 17.0;
     await _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: zoom)),
+      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: targetZoom)),
     );
     await _showMyLocationDot(newPos);
     fetchShadows();
