@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:pointer_interceptor/pointer_interceptor.dart';
 
 void main() {
   runApp(const MyApp());
@@ -43,8 +44,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
     return '${uri.scheme}://${uri.host}:5000';
   }
-  static const String mapStyle     = 'https://tiles.openfreemap.org/styles/bright';
+  static const String mapStyle     = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
 
+  final GlobalKey _mapKey = GlobalKey();
   MapLibreMapController? _mapController;
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
   LatLng? _lastSearchCenter;
@@ -52,13 +54,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool    _suppressResultClear = false;
   Timer? _debounceTimer;
 
-  double   _hour          = DateTime.now().toUtc().add(const Duration(hours: 1)).hour.toDouble(); // Vienna CET fallback
+  double   _hour          = 12.0; // overridden in initState with correct Vienna time
   DateTime _selectedDate  = DateTime.now();
   double   _elevation     = 0.0;
   double   _azimuth       = 0.0;
   bool     _loading       = false;
   bool     _mapReady      = false;
   bool     _animating      = false;
+  bool     _preloading24h  = false;
+  bool     _bgPreloading   = false;
   bool     _draggingSlider = false;
   String?  _errorMessage;
 
@@ -74,7 +78,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3'
   final Map<String, Map<String, dynamic>> _shadowResultCache = {};
-  static const int _shadowCacheMax = 30;
+  static const int _shadowCacheMax = 50;
 
   // Panel
   bool _panelOpen = true;
@@ -112,6 +116,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Offset>               _tourMarkerScreenPos  = [];
   List<Offset>               _poiScreenPos         = [];
 
+  // Search result marker
+  LatLng?                    _searchMarkerPos;
+  String?                    _searchMarkerName;
+  Offset?                    _searchMarkerScreenPos;
+  bool                       _showSearchMarkerDetail = false;
+  Map<String, dynamic>?      _searchMarkerInfo;
+
   // Places (POI) mode
   bool                       _placesMode        = false;
   List<Map<String, dynamic>> _sunnyPois         = [];
@@ -124,10 +135,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Weather overlay
   Map<String, dynamic>? _weatherData;
 
-  // Heatmap layer
-  bool _heatmapMode        = false;
-  bool _heatmapLoading     = false;
-  bool _heatmapLayerReady  = false;
+
 
   // Reverse-geocoded addresses — keyed by "lat,lon"
   Map<String, String> _spotAddresses = {};
@@ -170,6 +178,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Map<String, dynamic>>  _searchResults    = [];
   bool                        _searchLoading    = false;
   Timer?                      _searchDebounce;
+  Map<String, dynamic>?       _homeAddress;
 
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
@@ -192,17 +201,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   String get _timePeriod {
     final h = _hour.toInt();
-    if (h >= 5  && h < 12) return 'MORNING';
-    if (h >= 12 && h < 17) return 'AFTERNOON';
-    if (h >= 17 && h < 21) return 'EVENING';
-    return 'NIGHT';
+    if (h >= 5  && h < 12) return 'Morning';
+    if (h >= 12 && h < 17) return 'Afternoon';
+    if (h >= 17 && h < 21) return 'Evening';
+    return 'Night';
   }
 
   IconData get _timePeriodIcon {
     switch (_timePeriod) {
-      case 'MORNING':   return Icons.wb_sunny_outlined;
-      case 'AFTERNOON': return Icons.wb_sunny;
-      case 'EVENING':   return Icons.wb_twilight;
+      case 'Morning':   return Icons.wb_sunny_outlined;
+      case 'Afternoon': return Icons.wb_sunny;
+      case 'Evening':   return Icons.wb_twilight;
       default:          return Icons.nightlight_round;
     }
   }
@@ -225,6 +234,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     var d = DateTime.utc(year, month + 1, 0); // last day of month
     while (d.weekday != DateTime.sunday) d = d.subtract(const Duration(days: 1));
     return d.day;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final now = _viennaNow();
+    _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
+    _selectedDate = DateTime(now.year, now.month, now.day);
+    _searchFocus.addListener(() { if (mounted) setState(() {}); });
   }
 
   String _azimuthDirection(double az) {
@@ -264,11 +282,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
-    _heatmapLayerReady    = false;
     _tourLayerReady       = false;
     _poiMarkersReady      = false;
     _injectAttributionCss();
     _loadSaved();
+    _loadHomeAddress();
     Future.delayed(const Duration(milliseconds: 500), _refreshSavedSunny);
 
     // Handle shared tour link: ?tour_lat=...&tour_lon=...&tour_duration=...
@@ -288,11 +306,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _buildTour();
     }
 
-    if (_heatmapMode) {
-      _fetchAndShowHeatmap();
-    } else {
-      fetchShadows();
-    }
+    fetchShadows();
     _initGpsOnStart();
     _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
   }
@@ -324,17 +338,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_sunnySpots.isNotEmpty) _refreshSunnySpotPositions();
     if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
     if (_sunnyPois.isNotEmpty) _refreshPoiPositions();
+    if (_searchMarkerPos != null) _refreshSearchMarkerPosition();
+    _bgPreloading = false;
     _debounceTimer?.cancel();
-    if (_heatmapMode) {
-      _debounceTimer = Timer(const Duration(milliseconds: 600), () {
-        setState(() => _heatmapLoading = true);
-        _fetchAndShowHeatmap().then((_) {
-          if (mounted) setState(() => _heatmapLoading = false);
-        });
-      });
-    } else {
-      _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
-    }
+    _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
   }
 
   void _onMapClick(Point<double> point, LatLng coordinates) {
@@ -739,6 +746,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
   }
 
+  Future<void> _refreshSearchMarkerPosition() async {
+    final ctrl = _mapController;
+    if (ctrl == null || _searchMarkerPos == null) return;
+    final pt = await ctrl.toScreenLocation(_searchMarkerPos!);
+    if (mounted) setState(() {
+      _searchMarkerScreenPos = Offset(pt.x.toDouble(), pt.y.toDouble());
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Saved spots — localStorage persistence
   // -------------------------------------------------------------------------
@@ -756,6 +772,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _persistSaved() {
     html.window.localStorage['sunspot_saved'] = jsonEncode(_savedSpots);
+  }
+
+  void _loadHomeAddress() {
+    try {
+      final raw = html.window.localStorage['sunspot_home'];
+      if (raw != null) setState(() => _homeAddress = jsonDecode(raw) as Map<String, dynamic>);
+    } catch (_) {}
+  }
+
+  void _setHomeAddress(Map<String, dynamic> result) {
+    final home = {
+      'lat': result['lat'],
+      'lon': result['lon'],
+      'display_name': result['display_name'],
+    };
+    html.window.localStorage['sunspot_home'] = jsonEncode(home);
+    setState(() => _homeAddress = home);
+  }
+
+  void _navigateToHome() {
+    if (_homeAddress == null) return;
+    _selectSearchResult(_homeAddress!);
   }
 
   Future<void> _refreshSavedSunny() async {
@@ -853,21 +891,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               shape: BoxShape.circle,
             ),
           ),
-          if (_elevation > 0) ...[
-            const SizedBox(width: 8),
-            Transform.rotate(
-              angle: (_azimuth - 180) * 3.14159265 / 180,
-              child: Icon(Icons.navigation, size: 13, color: Colors.orange.shade400),
-            ),
-          ],
         ],
       ),
     );
   }
-
-  // -------------------------------------------------------------------------
-  // Heatmap layer
-  // -------------------------------------------------------------------------
 
   Future<void> _setShadowLayersVisible(bool visible) async {
     final ctrl = _mapController;
@@ -887,97 +914,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Re-enable: fetchShadows will recreate layers via _updateMapLayers
       fetchShadows();
     }
-  }
-
-  Future<void> _toggleHeatmap() async {
-    if (_heatmapLoading) return;
-    if (_heatmapMode) {
-      // Switch back to shadow
-      setState(() => _heatmapMode = false);
-      await _clearHeatmapLayers();
-      await _setShadowLayersVisible(true);
-    } else {
-      // Set _heatmapMode = true FIRST so any events that fire during the
-      // subsequent awaits (e.g. _onCameraIdle) see the correct mode and
-      // don't re-create shadow layers in the race window.
-      _activeEventSource?.close();
-      _activeEventSource = null;
-      ++_fetchGen;
-      setState(() { _heatmapMode = true; _heatmapLoading = true; });
-      await _setShadowLayersVisible(false);
-      await _fetchAndShowHeatmap();
-      if (mounted) setState(() => _heatmapLoading = false);
-    }
-  }
-
-  Future<void> _fetchAndShowHeatmap() async {
-    final ctrl = _mapController;
-    if (ctrl == null) return;
-    try {
-      final bounds = await ctrl.getVisibleRegion();
-      final zoom   = (ctrl.cameraPosition?.zoom ?? 12.0).clamp(1.0, 13.0);
-      final date   = _selectedDate;
-      final h      = _hour.toInt();
-      final min    = ((_hour * 60).toInt() % 60);
-      final uri    = Uri.parse(
-        '$flaskBaseUrl/heatmap'
-        '?minLat=${bounds.southwest.latitude}'
-        '&minLon=${bounds.southwest.longitude}'
-        '&maxLat=${bounds.northeast.latitude}'
-        '&maxLon=${bounds.northeast.longitude}'
-        '&month=${date.month}&day=${date.day}'
-        '&hour=$h&minute=$min'
-        '&zoom=${zoom.round()}',
-      );
-      final res = await http.get(uri).timeout(const Duration(seconds: 90));
-      if (res.statusCode != 200 || !mounted || !_heatmapMode) return;
-      final geojson = jsonDecode(res.body) as Map<String, dynamic>;
-      await _showHeatmapLayers(geojson);
-    } catch (e) {
-      if (mounted) {
-        _showError('Sun Map error: ${e.toString().split('\n').first}');
-        setState(() => _heatmapMode = false);
-      }
-    }
-  }
-
-  Future<void> _showHeatmapLayers(Map<String, dynamic> geojson) async {
-    final ctrl = _mapController;
-    if (ctrl == null) return;
-
-    // Remove shadow layers+source entirely on every heatmap render —
-    // tile reloads can't resurrect what doesn't exist in the style.
-    if (_shadowLayersReady) {
-      try { await ctrl.removeLayer('shadow-l2-fill'); } catch (_) {}
-      try { await ctrl.removeLayer('shadow-l1-fill'); } catch (_) {}
-      try { await ctrl.removeLayer('shadow-l0-fill'); } catch (_) {}
-      try { await ctrl.removeSource('dark-area'); } catch (_) {}
-      _shadowLayersReady = false;
-    }
-
-    // Fade opacity with sun elevation: 0° → 0.0, 45°+ → 0.50
-    final opacity = (_elevation <= 0)
-        ? 0.0
-        : (_elevation / 45.0).clamp(0.0, 1.0) * 0.50;
-
-    if (!_heatmapLayerReady) {
-      await ctrl.addGeoJsonSource('sunmap-src', geojson);
-      await ctrl.addFillLayer(
-        'sunmap-src', 'sunmap-fill',
-        FillLayerProperties(fillColor: '#FFD700', fillOpacity: opacity),
-      );
-      _heatmapLayerReady = true;
-    } else {
-      await ctrl.setGeoJsonSource('sunmap-src', geojson);
-      await ctrl.setLayerProperties(
-          'sunmap-fill', FillLayerProperties(fillOpacity: opacity));
-    }
-  }
-
-  Future<void> _clearHeatmapLayers() async {
-    if (!_heatmapLayerReady) return;
-    final empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
-    await _mapController?.setGeoJsonSource('sunmap-src', empty);
   }
 
   // -------------------------------------------------------------------------
@@ -1102,13 +1038,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // Back + title row
+        // Title + close row
         Row(children: [
-          GestureDetector(
-            onTap: _closeSpotDetail,
-            child: Icon(Icons.arrow_back, size: 20, color: Colors.grey.shade600),
-          ),
-          const SizedBox(width: 10),
           Container(width: 26, height: 26,
             decoration: BoxDecoration(color: circColor, shape: BoxShape.circle),
             child: Center(child: Text('${idx + 1}',
@@ -1118,6 +1049,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           Expanded(child: Text(address,
               style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
               maxLines: 1, overflow: TextOverflow.ellipsis)),
+          GestureDetector(
+            onTap: _closeSpotDetail,
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
+            ),
+          ),
         ]),
         const SizedBox(height: 10),
         // Subtitle
@@ -1331,8 +1269,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         child: GestureDetector(
                           onTap: () => Navigator.of(ctx).pop(),
                           child: Padding(
-                            padding: const EdgeInsets.only(bottom: 10, left: 8),
-                            child: Icon(Icons.close, size: 20, color: Colors.grey.shade400),
+                            padding: const EdgeInsets.all(8),
+                            child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
                           ),
                         ),
                       ),
@@ -1512,9 +1450,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final pos = await Geolocator.getCurrentPosition(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.lowest,
-          timeLimit: Duration(seconds: 25),
         ),
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 10));
       return LatLng(pos.latitude, pos.longitude);
     } on TimeoutException {
       _showError('GPS: location timed out — try again');
@@ -1624,7 +1561,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> fetchShadows() async {
     if (!_mapReady || _mapController == null) return;
-    if (_heatmapMode) return; // heatmap is shown — don't touch shadow layers
 
     _activeEventSource?.close();
     _activeEventSource = null;
@@ -1669,9 +1605,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _lastFetchZoom = zoom;
 
       // Cache lookup — key matches server's _cache_key(hour, month, day, lat, lon, zoom)
+      // Include viewport span in key so desktop (wide) and mobile (narrow)
+      // don't share cached results computed for a different aspect ratio.
+      final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
       final cacheKey = '${zoom}_${_hour.toInt()}_${_selectedDate.month}_${_selectedDate.day}'
           '_${_currentCenter.latitude.toStringAsFixed(3)}'
-          '_${_currentCenter.longitude.toStringAsFixed(3)}';
+          '_${_currentCenter.longitude.toStringAsFixed(3)}'
+          '_$lonSpan';
       final cached = _shadowResultCache[cacheKey];
       if (cached != null) {
         final elev   = (cached['elevation'] as num?)?.toDouble() ?? 0.0;
@@ -1708,10 +1648,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&month=${_selectedDate.month}'
         '&day=${_selectedDate.day}'
         '&zoom=$zoom'
-        '&minLat=${bounds.southwest.latitude}'
-        '&minLon=${bounds.southwest.longitude}'
-        '&maxLat=${bounds.northeast.latitude}'
-        '&maxLon=${bounds.northeast.longitude}',
+        '&minLat=${bounds.southwest.latitude  - (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
+        '&minLon=${bounds.southwest.longitude - (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}'
+        '&maxLat=${bounds.northeast.latitude  + (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
+        '&maxLon=${bounds.northeast.longitude + (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}',
       );
 
       final es = html.EventSource(uri.toString());
@@ -1752,15 +1692,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (_shadowResultCache.length > _shadowCacheMax) {
             _shadowResultCache.remove(_shadowResultCache.keys.first);
           }
-          // Prefetch adjacent hours silently after a short idle delay
-          Future.delayed(const Duration(milliseconds: 600), () {
+          // Background-preload all hours so 24h animation starts instantly
+          Future.delayed(const Duration(milliseconds: 800), () {
             if (!mounted || _draggingSlider || _loading) return;
-            final sr = _sunriseHour ?? 6.0;
-            final ss = _sunsetHour ?? 20.0;
-            for (final dh in [1, -1]) {
-              final h = (_hour + dh).clamp(sr, ss).toInt();
-              if (h != _hour.toInt()) _prefetchSilent(h, zoom);
-            }
+            _triggerBackgroundPreload();
           });
           _pillTimer?.cancel();
           if (mounted) {
@@ -1863,7 +1798,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
-    if (_heatmapMode) return; // never let shadow data bleed into heatmap mode
     final ctrl = _mapController;
     if (ctrl == null) return;
 
@@ -1876,9 +1810,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       try {
         // Update source data + opacity in-place — no remove/re-add, no flicker
         await ctrl.setGeoJsonSource('dark-area', geoJson);
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3d5a70', fillOpacity: opL0));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2e4d64', fillOpacity: opL1));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1e3a52', fillOpacity: opL2));
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3B4A', fillOpacity: opL0));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2E2B3A', fillOpacity: opL1));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1F1C2E', fillOpacity: opL2));
         return;
       } catch (_) {
         // Source was removed (style reload) — fall through to re-create
@@ -1896,19 +1830,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(fillColor: '#3d5a70', fillOpacity: opL0),
+      FillLayerProperties(fillColor: '#3D3B4A', fillOpacity: opL0),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(fillColor: '#2e4d64', fillOpacity: opL1),
+      FillLayerProperties(fillColor: '#2E2B3A', fillOpacity: opL1),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(fillColor: '#1e3a52', fillOpacity: opL2),
+      FillLayerProperties(fillColor: '#1F1C2E', fillOpacity: opL2),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
@@ -1920,33 +1854,110 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
 
   void _toggle24h() {
+    if (_preloading24h) {
+      setState(() { _preloading24h = false; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
+      return;
+    }
     if (_animating) {
-      // Cycle speed: 1×→2×→4×→stop
       if (_animSpeed == 1) { setState(() => _animSpeed = 2); return; }
       if (_animSpeed == 2) { setState(() => _animSpeed = 4); return; }
       setState(() { _animating = false; _animSpeed = 1; });
       return;
     }
     final start = _sunriseHour ?? 6.0;
-    setState(() { _animating = true; _liveMode = false; _animSpeed = 1; _hour = start; });
-    _run24hStep();
+    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Pre-loading'; _loadingProgress = 0; });
+    _preload24h().then((_) {
+      if (!mounted || !_preloading24h) return;
+      setState(() { _preloading24h = false; _animating = true; _animSpeed = 1; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
+      _run24hStep();
+    });
+  }
+
+  Future<void> _preload24h() async {
+    if (!_mapReady || _mapController == null) return;
+    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).round();
+    final bounds = await _mapController!.getVisibleRegion();
+    final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
+    final start  = (_sunriseHour ?? 6.0).toInt();
+    final end    = (_sunsetHour ?? 21.0).toInt();
+    final total  = end - start + 1;
+    for (int h = start; h <= end; h++) {
+      if (!mounted || !_preloading24h) return;
+      await _prefetchHourAwaitable(h, zoom, lonSpan, bounds);
+      if (mounted) setState(() { _loadingProgress = (h - start + 1) / total; _loadingStage = 'Pre-loading ${h - start + 1}/$total'; });
+    }
+  }
+
+  Future<void> _prefetchHourAwaitable(int hour, int zoom, String lonSpan, dynamic bounds) async {
+    final cacheKey = '${zoom}_${hour}_${_selectedDate.month}_${_selectedDate.day}'
+        '_${_currentCenter.latitude.toStringAsFixed(3)}'
+        '_${_currentCenter.longitude.toStringAsFixed(3)}'
+        '_$lonSpan';
+    if (_shadowResultCache.containsKey(cacheKey)) return;
+    final completer = Completer<void>();
+    final uri = Uri.parse(
+      '$flaskBaseUrl/shadow/stream'
+      '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
+      '&hour=$hour&minute=0'
+      '&month=${_selectedDate.month}&day=${_selectedDate.day}'
+      '&zoom=$zoom'
+      '&minLat=${bounds.southwest.latitude  - (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
+      '&minLon=${bounds.southwest.longitude - (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}'
+      '&maxLat=${bounds.northeast.latitude  + (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
+      '&maxLon=${bounds.northeast.longitude + (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}',
+    );
+    final es = html.EventSource(uri.toString());
+    es.onMessage.listen((event) {
+      final data = jsonDecode(event.data as String) as Map<String, dynamic>;
+      if (data.containsKey('result')) {
+        es.close();
+        _shadowResultCache[cacheKey] = data['result'] as Map<String, dynamic>;
+        if (_shadowResultCache.length > _shadowCacheMax) _shadowResultCache.remove(_shadowResultCache.keys.first);
+        if (!completer.isCompleted) completer.complete();
+      } else if (data.containsKey('error')) {
+        es.close();
+        if (!completer.isCompleted) completer.complete();
+      }
+    });
+    es.onError.listen((_) { es.close(); if (!completer.isCompleted) completer.complete(); });
+    return completer.future;
+  }
+
+  void _triggerBackgroundPreload() {
+    if (_bgPreloading || _animating || _preloading24h) return;
+    _bgPreloading = true;
+    Future.microtask(() async {
+      try {
+        if (!_mapReady || _mapController == null) return;
+        final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).round();
+        final bounds = await _mapController!.getVisibleRegion();
+        final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
+        final start  = (_sunriseHour ?? 6.0).toInt();
+        final end    = (_sunsetHour ?? 21.0).toInt();
+        // Fetch 3 hours in parallel, batch by batch
+        final hours  = List.generate(end - start + 1, (i) => start + i);
+        for (var i = 0; i < hours.length; i += 3) {
+          if (!mounted || _animating || _preloading24h) break;
+          final batch = hours.skip(i).take(3).toList();
+          await Future.wait(batch.map((h) => _prefetchHourAwaitable(h, zoom, lonSpan, bounds)));
+        }
+      } finally {
+        _bgPreloading = false;
+      }
+    });
   }
 
   Future<void> _run24hStep() async {
     while (_animating) {
       await fetchShadows();
-      if (_heatmapMode) await _fetchAndShowHeatmap();
       if (!_animating) break;
       final end = _sunsetHour ?? 20.0;
       if (_hour >= end) {
         setState(() => _animating = false);
         break;
       }
-      // In heatmap mode the server is the bottleneck — no extra delay needed
-      if (!_heatmapMode) {
-        final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
-        await Future.delayed(Duration(milliseconds: ms));
-      }
+      final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
+      await Future.delayed(Duration(milliseconds: ms));
       if (!_animating) break;
       setState(() => _hour = _hour + 1.0);
     }
@@ -1986,7 +1997,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
       });
       fetchShadows();
-      if (_heatmapMode) _fetchAndShowHeatmap();
       _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
         if (!mounted || !_liveMode) return;
         setState(() {
@@ -1995,7 +2005,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
         });
         fetchShadows();
-        if (_heatmapMode) _fetchAndShowHeatmap();
       });
     }
   }
@@ -2030,6 +2039,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _searchDebounce?.cancel();
     if (query.trim().isEmpty) {
       setState(() => _searchResults = []);
+      _setMapPointerEvents(true);
       return;
     }
     _searchDebounce = Timer(const Duration(milliseconds: 400), () => _runSearch(query.trim()));
@@ -2040,12 +2050,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     try {
       final uri = Uri.parse(
         'https://nominatim.openstreetmap.org/search'
-        '?q=${Uri.encodeComponent(query)}&format=json&limit=5&addressdetails=1',
+        '?q=${Uri.encodeComponent(query)}&format=json&limit=5&addressdetails=1'
+        '&viewbox=16.18,48.33,16.58,48.12&bounded=1',
       );
       final resp = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
       if (resp.statusCode == 200) {
         final data = jsonDecode(resp.body) as List;
         setState(() => _searchResults = data.cast<Map<String, dynamic>>());
+        if (_searchResults.isNotEmpty) _setMapPointerEvents(false);
       }
     } catch (_) {
       // silently ignore network errors during search
@@ -2054,22 +2066,117 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
+  Widget _buildSearchDropdown(List<Map<String, dynamic>> results, {bool isHomeSuggestion = false}) {
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 10, offset: const Offset(0, 4))],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: results.asMap().entries.map((entry) {
+          final i      = entry.key;
+          final result = entry.value;
+          final parts  = (result['display_name'] as String).split(',');
+          final title  = isHomeSuggestion ? 'Home' : parts.first.trim();
+          // For home: display_name is "number, street, ..." → show "Street Number"
+          final sub    = isHomeSuggestion
+              ? (parts.length > 1 ? '${parts[1].trim()} ${parts[0].trim()}' : parts.first.trim())
+              : (parts.length > 1 ? parts.skip(1).take(2).map((s) => s.trim()).join(', ') : '');
+          final isHome = isHomeSuggestion || (
+            _homeAddress != null &&
+            result['lat'] == _homeAddress!['lat'] &&
+            result['lon'] == _homeAddress!['lon']
+          );
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
+              GestureDetector(
+                onTap: () => _selectSearchResult(result),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  child: Row(
+                    children: [
+                      Icon(
+                        isHome ? Icons.home : Icons.location_on_outlined,
+                        size: 16,
+                        color: isHome ? Colors.orange.shade400 : Colors.grey.shade500,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                            if (sub.isNotEmpty)
+                              Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                      if (!isHomeSuggestion)
+                        GestureDetector(
+                          onTap: () => _setHomeAddress(result),
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: Icon(
+                              isHome ? Icons.home : Icons.home_outlined,
+                              size: 18,
+                              color: isHome ? Colors.orange.shade400 : Colors.grey.shade400,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        }).toList(),
+      ),
+    );
+  }
+
   void _selectSearchResult(Map<String, dynamic> result) {
     final lat = double.parse(result['lat'] as String);
     final lon = double.parse(result['lon'] as String);
-    final name = result['display_name'] as String;
+    final name = (result['display_name'] as String).split(',').first.trim();
     final target = LatLng(lat, lon);
-    _searchController.text = name.split(',').first.trim();
+    _searchController.text = name;
     setState(() {
       _searchResults = [];
       _currentCenter = target;
+      _searchMarkerPos = target;
+      _searchMarkerName = name;
+      _searchMarkerScreenPos = null;
+      _showSearchMarkerDetail = false;
+      _searchMarkerInfo = null;
     });
+    _setMapPointerEvents(true);
     _searchFocus.unfocus();
-    _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(CameraPosition(target: target, zoom: 16.0)),
-    );
-    fetchShadows();
-    _fetchWeather(target.latitude, target.longitude);
+    Future.delayed(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(CameraPosition(target: target, zoom: 16.0)),
+      );
+      fetchShadows();
+      _fetchWeather(target.latitude, target.longitude);
+      _refreshSearchMarkerPosition();
+      _fetchSearchMarkerInfo(lat, lon);
+    });
+  }
+
+  Future<void> _fetchSearchMarkerInfo(double lat, double lon) async {
+    try {
+      final uri = Uri.parse('$flaskBaseUrl/point_info?lat=$lat&lon=$lon&hour=${_hour.toInt()}&date=${_selectedDate.toIso8601String().substring(0, 10)}');
+      final resp = await http.get(uri);
+      if (resp.statusCode == 200 && mounted) {
+        setState(() => _searchMarkerInfo = jsonDecode(resp.body) as Map<String, dynamic>);
+      }
+    } catch (_) {}
   }
 
   @override
@@ -2078,6 +2185,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _screenHeight = MediaQuery.of(context).size.height;
     final isMobile = _isMobile;
     const panelRightPad = 0;
+    final keyboardOpen = isMobile && MediaQuery.of(context).viewInsets.bottom > 0;
 
     // Map area — used as Expanded child on mobile, full Scaffold body on desktop
     final mapArea = Stack(
@@ -2085,6 +2193,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         AbsorbPointer(
           absorbing: _draggingSlider,
           child: MapLibreMap(
+            key: _mapKey,
             styleString: mapStyle,
             initialCameraPosition: CameraPosition(target: _currentCenter, zoom: 13.0),
             onMapCreated:          _onMapCreated,
@@ -2097,7 +2206,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
 
         // Radial vignette — fades shadow layer edges so rectangular boundary is hidden
-        if (_shadowLayersReady && !_heatmapMode)
+        if (_shadowLayersReady)
           Positioned.fill(
             child: IgnorePointer(
               child: CustomPaint(painter: _VignettePainter()),
@@ -2157,12 +2266,45 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ]),
         ),
 
+        // Search result marker dot
+        if (_searchMarkerScreenPos != null)
+          Positioned(
+            left: _searchMarkerScreenPos!.dx - 18,
+            top:  _searchMarkerScreenPos!.dy - 36,
+            child: GestureDetector(
+              onTap: () => setState(() => _showSearchMarkerDetail = !_showSearchMarkerDetail),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade500,
+                    shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 3))],
+                  ),
+                  child: const Icon(Icons.place, color: Colors.white, size: 22),
+                ),
+              ]),
+            ),
+          ),
+
+        // Full-screen map blocker — prevents MapLibre from stealing touches when results are visible
+        if (_searchResults.isNotEmpty)
+          Positioned.fill(
+            child: PointerInterceptor(
+              child: GestureDetector(
+                onTap: () { setState(() => _searchResults = []); _setMapPointerEvents(true); },
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+          ),
+
         // Search bar
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
           curve: Curves.easeInOut,
           top: 12, left: 12, right: 12,
-          child: Listener(
+          child: PointerInterceptor(
+            child: Listener(
             behavior: HitTestBehavior.opaque,
             onPointerDown: (_) => _ignoreNextMapClick = true,
             child: Column(
@@ -2208,66 +2350,41 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       MouseRegion(
                         cursor: SystemMouseCursors.click,
                         child: GestureDetector(
-                          onTap: () { _searchController.clear(); setState(() => _searchResults = []); },
+                          onTap: () { _searchController.clear(); setState(() => _searchResults = []); _setMapPointerEvents(true); },
                           child: Padding(
                             padding: const EdgeInsets.only(right: 12),
                             child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
                           ),
                         ),
+                      )
+                    else if (!_searchFocus.hasFocus)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (_homeAddress != null)
+                            GestureDetector(
+                              onTap: _navigateToHome,
+                              child: Padding(
+                                padding: const EdgeInsets.only(right: 2, left: 4),
+                                child: Icon(Icons.home, size: 22, color: Colors.orange.shade400),
+                              ),
+                            ),
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: _buildWeatherWidget(),
+                          ),
+                        ],
                       ),
                   ],
                 ),
               ),
+              if (_searchFocus.hasFocus && _searchResults.isEmpty && _homeAddress != null && _searchController.text.isEmpty)
+                _buildSearchDropdown([_homeAddress!], isHomeSuggestion: true),
               if (_searchResults.isNotEmpty)
-                Container(
-                  margin: const EdgeInsets.only(top: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12), blurRadius: 10, offset: const Offset(0, 4))],
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: _searchResults.asMap().entries.map((entry) {
-                      final i      = entry.key;
-                      final result = entry.value;
-                      final parts  = (result['display_name'] as String).split(',');
-                      final title  = parts.first.trim();
-                      final sub    = parts.length > 1 ? parts.skip(1).take(2).map((s) => s.trim()).join(', ') : '';
-                      return Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (i > 0) Divider(height: 1, color: Colors.grey.shade100),
-                          GestureDetector(
-                            onTap: () => _selectSearchResult(result),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.location_on_outlined, size: 16, color: Colors.grey.shade500),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                                        if (sub.isNotEmpty)
-                                          Text(sub, style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-                                              maxLines: 1, overflow: TextOverflow.ellipsis),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                      );
-                    }).toList(),
-                  ),
-                ),
+                _buildSearchDropdown(_searchResults),
             ],
             ),
+          ),
           ),
         ),
 
@@ -2283,11 +2400,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
-        // Weather widget — top-right, below search bar
-        Positioned(
-          top: 64, right: 12,
-          child: _buildWeatherWidget(),
-        ),
 
         // Loading pill
         AnimatedPositioned(
@@ -2297,57 +2409,31 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           child: Center(child: _buildLoadingPill()),
         ),
 
-        // Heatmap toggle — top-left, below search bar
-        Positioned(
-          top: 68, left: 16,
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _ignoreNextMapClick = true,
-            child: FloatingActionButton.small(
-              heroTag: 'heatmap',
-              onPressed: _toggleHeatmap,
-              backgroundColor: _heatmapMode ? Colors.orange : Colors.white,
-              foregroundColor: _heatmapMode ? Colors.white : Colors.black87,
-              elevation: 2,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              child: _heatmapLoading
-                  ? SizedBox(
-                      width: 16, height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: _heatmapMode ? Colors.white : Colors.orange,
-                      ),
-                    )
-                  : Icon(Icons.layers,
-                      size: 20,
-                      color: _heatmapMode ? Colors.white : Colors.orange),
+
+        // GPS button — bottom-right (hidden when keyboard open on mobile)
+        if (!keyboardOpen)
+          Positioned(
+            bottom: 16, right: 16,
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => _setMapPointerEvents(false),
+              onPointerUp:   (_) => _setMapPointerEvents(true),
+              onPointerCancel: (_) => _setMapPointerEvents(true),
+              child: FloatingActionButton.small(
+                onPressed: _goToMyLocation,
+                backgroundColor: Colors.white,
+                foregroundColor: Colors.black87,
+                elevation: 2,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                child: const Icon(Icons.my_location, size: 20),
+              ),
             ),
           ),
-        ),
 
-        // GPS button — bottom-right
-        Positioned(
-          bottom: 16, right: 16,
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _ignoreNextMapClick = true,
-            child: FloatingActionButton.small(
-              onPressed: _goToMyLocation,
-              backgroundColor: Colors.white,
-              foregroundColor: Colors.black87,
-              elevation: 2,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              child: const Icon(Icons.my_location, size: 20),
-            ),
-          ),
-        ),
-
-        // Zoom + — mirrors heatmap toggle position
-        Positioned(
-          bottom: 68, left: 16,
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _ignoreNextMapClick = true,
+        // Zoom buttons — desktop only (mobile uses pinch-to-zoom)
+        if (!isMobile) ...[
+          Positioned(
+            bottom: 68, left: 16,
             child: _buildZoomButton(Icons.add, () async {
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
@@ -2355,14 +2441,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
             }),
           ),
-        ),
-
-        // Zoom − — mirrors GPS button position
-        Positioned(
-          bottom: 16, left: 16,
-          child: Listener(
-            behavior: HitTestBehavior.opaque,
-            onPointerDown: (_) => _ignoreNextMapClick = true,
+          Positioned(
+            bottom: 16, left: 16,
             child: _buildZoomButton(Icons.remove, () async {
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
@@ -2370,7 +2450,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
             }),
           ),
-        ),
+        ],
 
         // Error banner
         if (_errorMessage != null)
@@ -2391,7 +2471,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ? LayoutBuilder(builder: (ctx, constraints) {
               final totalH    = constraints.maxHeight;
               const collapsedH = 256.0;
-              final bottomH   = _panelExpanded ? totalH : collapsedH;
+              final bottomH   = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
               final mapH      = totalH - bottomH;
               return Column(children: [
                 AnimatedContainer(
@@ -2404,7 +2484,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   duration: const Duration(milliseconds: 280),
                   curve: Curves.easeInOut,
                   height: bottomH,
-                  child: _buildMobileBottom(),
+                  child: _buildMobileBottom(keyboardOpen: keyboardOpen),
                 ),
               ]);
             })
@@ -2428,17 +2508,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildLoadingPill() {
-    final visible = _showPill || _heatmapLoading;
+    final visible = _showPill;
     final rawStage = _loadingStage;
-    // At low zoom, hide verbose "Projecting X buildings" — show generic label
-    final label = _heatmapLoading
-        ? 'Sun Map…'
-        : (rawStage.isEmpty
-            ? 'Loading…'
-            : (_lastFetchZoom <= 13 && rawStage.startsWith('Projecting')
-                ? 'Computing…'
-                : rawStage));
-    final pct     = _heatmapLoading ? null : (_loadingProgress > 0 ? _loadingProgress : null);
+    final label = rawStage.isEmpty
+        ? 'Loading…'
+        : (_lastFetchZoom <= 13 && rawStage.startsWith('Projecting')
+            ? 'Computing…'
+            : rawStage);
+    final pct = _loadingProgress > 0 ? _loadingProgress : null;
     return AnimatedOpacity(
       opacity: visible ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 250),
@@ -2474,15 +2551,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       fontSize: 12, fontWeight: FontWeight.w500, color: Colors.black87,
                     ),
                   ),
-                  if (!_heatmapLoading) ...[
-                    const SizedBox(width: 10),
-                    Text(
-                      '${(_loadingProgress * 100).toInt()}%',
-                      style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.bold, color: Colors.orange,
-                      ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${(_loadingProgress * 100).toInt()}%',
+                    style: const TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.bold, color: Colors.orange,
                     ),
-                  ],
+                  ),
                 ],
               ),
               const SizedBox(height: 7),
@@ -2643,12 +2718,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       crossAxisAlignment: CrossAxisAlignment.baseline,
       textBaseline: TextBaseline.alphabetic,
       children: [
-        Icon(_timePeriodIcon, color: Colors.orange.shade300, size: 14),
-        const SizedBox(width: 5),
+        Icon(_timePeriodIcon, color: Colors.orange.shade300, size: 22),
+        const SizedBox(width: 6),
         Text(_timePeriod,
             style: TextStyle(
-                fontSize: 10, fontWeight: FontWeight.w600,
-                color: Colors.grey.shade400, letterSpacing: 1.1)),
+                fontSize: 22, fontWeight: FontWeight.w300,
+                color: Colors.grey.shade400, letterSpacing: -0.5)),
         const Spacer(),
         if (!_isToday(_selectedDate))
           Container(
@@ -2714,7 +2789,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           setState(() => _draggingSlider = false);
           _setMapPointerEvents(true);
           fetchShadows();
-          if (_heatmapMode) _fetchAndShowHeatmap();
         },
       ),
     );
@@ -2726,18 +2800,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.wb_sunny_outlined, size: 9, color: Colors.orange.shade400),
+            Icon(Icons.wb_sunny_outlined, size: 11, color: Colors.orange.shade400),
             const SizedBox(width: 3),
             Text(_formatSliderHour(minH),
-                style: TextStyle(fontSize: 10, color: Colors.orange.shade400, fontWeight: FontWeight.w500)),
+                style: TextStyle(fontSize: 13, color: Colors.orange.shade400, fontWeight: FontWeight.w500)),
           ]),
           if (noonInRange)
-            Text('12 PM', style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
+            Text('12 PM', style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
           Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.nightlight_round, size: 9, color: Colors.blueGrey.shade300),
+            Icon(Icons.nightlight_round, size: 11, color: Colors.blueGrey.shade300),
             const SizedBox(width: 3),
             Text(_formatSliderHour(maxH),
-                style: TextStyle(fontSize: 10, color: Colors.blueGrey.shade300, fontWeight: FontWeight.w500)),
+                style: TextStyle(fontSize: 13, color: Colors.blueGrey.shade300, fontWeight: FontWeight.w500)),
           ]),
         ],
       ),
@@ -2747,69 +2821,61 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final pillsRow = Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        // LIVE button — disabled while Sun Map (heatmap) is active
         GestureDetector(
-          onTap: _heatmapMode ? null : _toggleLiveMode,
+          onTap: _toggleLiveMode,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
-              color: _liveMode && !_heatmapMode ? Colors.red.shade400 : Colors.transparent,
+              color: _liveMode ? Colors.red.shade400 : Colors.transparent,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: _heatmapMode ? Colors.grey.shade200
-                    : _liveMode ? Colors.red.shade400 : Colors.grey.shade300,
+                color: _liveMode ? Colors.red.shade400 : Colors.grey.shade300,
                 width: 1,
               ),
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Container(
-                width: 5, height: 5,
-                margin: const EdgeInsets.only(right: 4),
+                width: 7, height: 7,
+                margin: const EdgeInsets.only(right: 5),
                 decoration: BoxDecoration(
-                  color: _heatmapMode ? Colors.grey.shade300
-                      : _liveMode ? Colors.white : Colors.red.shade300,
+                  color: _liveMode ? Colors.white : Colors.red.shade300,
                   shape: BoxShape.circle,
                 ),
               ),
               Text('LIVE', style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w600,
-                color: _heatmapMode ? Colors.grey.shade300
-                    : _liveMode ? Colors.white : Colors.grey.shade500,
+                fontSize: 14, fontWeight: FontWeight.w600,
+                color: _liveMode ? Colors.white : Colors.grey.shade500,
                 letterSpacing: 0.6,
               )),
             ]),
           ),
         ),
         const SizedBox(width: 10),
-        // 24h button — also disabled while Sun Map is active
         GestureDetector(
-          onTap: _heatmapMode ? null : _toggle24h,
+          onTap: _toggle24h,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
-            padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             decoration: BoxDecoration(
-              color: _animating ? Colors.orange.shade400 : Colors.transparent,
+              color: (_animating || _preloading24h) ? Colors.orange.shade400 : Colors.transparent,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: _heatmapMode ? Colors.grey.shade200
-                    : _animating ? Colors.orange.shade400 : Colors.grey.shade300,
+                color: (_animating || _preloading24h) ? Colors.orange.shade400 : Colors.grey.shade300,
                 width: 1,
               ),
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(
-                _animating && !_heatmapMode ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                size: 11,
-                color: _heatmapMode ? Colors.grey.shade300
-                    : _animating ? Colors.white : Colors.grey.shade500,
+                _preloading24h ? Icons.hourglass_top_rounded : (_animating ? Icons.stop_rounded : Icons.play_arrow_rounded),
+                size: 14,
+                color: (_animating || _preloading24h) ? Colors.white : Colors.grey.shade500,
               ),
-              const SizedBox(width: 2),
-              Text(_animating && !_heatmapMode ? '${_animSpeed}×' : '24h',
+              const SizedBox(width: 3),
+              Text(_preloading24h ? '…' : (_animating ? '${_animSpeed}×' : '24h'),
                   style: TextStyle(
-                    fontSize: 11, fontWeight: FontWeight.w600,
-                    color: _heatmapMode ? Colors.grey.shade300
-                        : _animating ? Colors.white : Colors.grey.shade500,
+                    fontSize: 14, fontWeight: FontWeight.w600,
+                    color: (_animating || _preloading24h) ? Colors.white : Colors.grey.shade500,
                   )),
             ]),
           ),
@@ -3235,7 +3301,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       _pointInfo    = null;
                     });
                   },
-                  child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
+                  ),
                 ),
               ),
             ],
@@ -3775,7 +3844,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Mobile bottom UI — separated from map (no overlap = no panning conflict)
   // =========================================================================
 
-  Widget _buildMobileBottom() {
+  Widget _buildMobileBottom({bool keyboardOpen = false}) {
     const tabs = [
       (Icons.access_time,       'Time'),
       (Icons.wb_sunny_outlined, 'Spots'),
@@ -3797,40 +3866,42 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
         child: Column(
           children: [
-            // Expand/collapse handle
-            GestureDetector(
-              onTap: () => setState(() => _panelExpanded = !_panelExpanded),
-              behavior: HitTestBehavior.opaque,
-              child: SizedBox(
-                height: 24,
-                child: Center(
-                  child: Container(
-                    width: 36, height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
-                      borderRadius: BorderRadius.circular(2),
+            if (!keyboardOpen) ...[
+              // Expand/collapse handle
+              GestureDetector(
+                onTap: () => setState(() => _panelExpanded = !_panelExpanded),
+                behavior: HitTestBehavior.opaque,
+                child: SizedBox(
+                  height: 24,
+                  child: Center(
+                    child: Container(
+                      width: 36, height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-            // Content area
-            Expanded(
-              child: ShaderMask(
-                shaderCallback: (bounds) => LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
-                  stops: const [0.0, 0.75, 1.0],
-                ).createShader(bounds),
-                blendMode: BlendMode.dstIn,
-                child: SingleChildScrollView(
-                  controller: _mobileContentScroll,
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                  child: _buildMobileTabContent(),
+              // Content area
+              Expanded(
+                child: ShaderMask(
+                  shaderCallback: (bounds) => LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
+                    stops: const [0.0, 0.75, 1.0],
+                  ).createShader(bounds),
+                  blendMode: BlendMode.dstIn,
+                  child: SingleChildScrollView(
+                    controller: _mobileContentScroll,
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                    child: _buildMobileTabContent(),
+                  ),
                 ),
               ),
-            ),
+            ],
             // Tab bar
             Divider(height: 1, color: Colors.grey.shade200),
             SizedBox(
@@ -3852,7 +3923,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchZoom   = null;
                         }
                         _spotsSearchGen++; _poisSearchGen++;
-                        setState(() { _mobileTab = i; _panelExpanded = false; _selectedSpot = null; });
+                        _searchController.clear();
+                        setState(() { _mobileTab = i; _panelExpanded = false; _selectedSpot = null; _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -3889,7 +3961,96 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
+  Widget _buildSearchMarkerDetail() {
+    final pos  = _searchMarkerPos!;
+    final name = _searchMarkerName ?? 'Selected location';
+    final info = _searchMarkerInfo;
+    final isSunny   = info?['is_sunny'] as bool? ?? false;
+    final sunUntil  = info?['sun_until'] as int?;
+    final sunHours  = info?['sun_hours_left'] as int? ?? 0;
+    final gps       = _gpsPosition;
+    final distLabel = gps != null ? _formatDistance(_distanceMeters(gps, pos)) : null;
+    final isSaved   = _savedSpots.any((s) => s['lat'] == pos.latitude && s['lon'] == pos.longitude);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 26, height: 26,
+            decoration: BoxDecoration(color: Colors.orange.shade500, shape: BoxShape.circle),
+            child: const Icon(Icons.place, color: Colors.white, size: 16),
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(name,
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
+              maxLines: 1, overflow: TextOverflow.ellipsis)),
+          GestureDetector(
+            onTap: () { _searchController.clear(); setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; }); },
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, children: [
+          if (distLabel != null) Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.directions_walk, size: 12, color: Colors.grey.shade500),
+            const SizedBox(width: 3),
+            Text(distLabel, style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+          ]),
+          if (info != null) Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(isSunny ? Icons.wb_sunny_outlined : Icons.nights_stay_outlined,
+                size: 12, color: isSunny ? Colors.orange.shade400 : Colors.grey.shade400),
+            const SizedBox(width: 3),
+            Text(
+              isSunny
+                  ? (sunUntil != null ? '$sunHours h · until ${sunUntil.toString().padLeft(2, '0')}:00' : 'Sunny')
+                  : 'In shadow',
+              style: TextStyle(fontSize: 12,
+                  color: isSunny ? Colors.orange.shade700 : Colors.grey.shade500),
+            ),
+          ]),
+        ]),
+        const SizedBox(height: 16),
+        Row(children: [
+          _sheetButton(
+            icon: Icons.directions_walk, label: 'Navigate',
+            color: Colors.orange.shade700,
+            onTap: () => html.window.open(
+              'https://www.google.com/maps/dir/?api=1&destination=${pos.latitude},${pos.longitude}&travelmode=walking',
+              '_blank'),
+          ),
+          const SizedBox(width: 8),
+          _sheetButton(
+            icon: isSaved ? Icons.favorite : Icons.favorite_outline,
+            label: isSaved ? 'Saved' : 'Save',
+            color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
+            onTap: () {
+              setState(() {
+                if (isSaved) {
+                  _savedSpots.removeWhere((s) => s['lat'] == pos.latitude && s['lon'] == pos.longitude);
+                } else {
+                  _savedSpots.add({'lat': pos.latitude, 'lon': pos.longitude, 'address': name});
+                }
+              });
+              _persistSaved();
+            },
+          ),
+          const SizedBox(width: 8),
+          _sheetButton(
+            icon: Icons.share, label: 'Share',
+            color: Colors.orange.shade600,
+            onTap: () => html.window.navigator.clipboard?.writeText(
+              '${html.window.location.href.split('?').first}?server=${Uri.encodeComponent(flaskBaseUrl)}&lat=${pos.latitude}&lon=${pos.longitude}'),
+          ),
+        ]),
+      ]),
+    );
+  }
+
   Widget _buildMobileTabContent() {
+    if (_showSearchMarkerDetail && _searchMarkerPos != null) return _buildSearchMarkerDetail();
     if (_selectedSpot != null) return _buildSpotDetail();
     switch (_mobileTab) {
       case 0: // Time
