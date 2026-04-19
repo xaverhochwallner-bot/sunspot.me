@@ -1671,6 +1671,15 @@ def point_info():
 # Find sunny spots — returns top N sunlit centroids in the current viewport
 # ---------------------------------------------------------------------------
 
+@app.route("/clear_cache")
+def clear_cache():
+    max_zoom = request.args.get("max_zoom", default=13, type=int)
+    keys = [k for k in list(_shadow_cache.keys()) if k[3] <= max_zoom]
+    for k in keys:
+        _shadow_cache.pop(k, None)
+    return jsonify({"cleared": len(keys), "max_zoom": max_zoom})
+
+
 @app.route("/find_sunny_spots")
 def find_sunny_spots():
     try:
