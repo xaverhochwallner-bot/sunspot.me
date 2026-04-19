@@ -722,9 +722,9 @@ def _gap_fill(zoom):
     if zoom == 16: return 0.000033
     if zoom == 15: return 0.000072
     if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000500   # ~56m — fills across most streets
-    if zoom == 12: return 0.000900   # ~100m — fills across wide roads/squares
-    return                0.001800   # ~200m — city-block scale merging
+    if zoom == 13: return 0.000130   # ~14m — fills narrow streets only
+    if zoom == 12: return 0.000300   # ~33m — fills typical streets
+    return                0.000600   # ~67m — city-block scale
 
 
 def _shadow_erosion_steps(zoom):
@@ -742,8 +742,8 @@ def _shadow_erosion_steps(zoom):
     if zoom >= 16: return (0.000022, 0.000055)
     if zoom == 15: return (0.000045, 0.000110)
     if zoom == 14: return (0.000090, 0.000220)
-    if zoom == 13: return (0.00017,  0.00043)
-    return               (0.00034,  0.00085)
+    if zoom == 13: return (0.000090, 0.000220)
+    return               (0.00017,  0.00043)
 
 
 def filter_small_polygons(geom, min_area):
