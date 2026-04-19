@@ -723,9 +723,9 @@ def _gap_fill(zoom):
     if zoom == 16: return 0.000033
     if zoom == 15: return 0.000072
     if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000060   # ~7m — below street width, preserves street gaps
-    if zoom == 12: return 0.000150   # ~17m — fills narrow streets
-    return                0.000300   # ~33m — city-block scale
+    if zoom == 13: return 0.000100   # ~11m — same as z14 for consistent look
+    if zoom == 12: return 0.000180   # ~20m — fills typical streets
+    return                0.000350   # ~39m — city-block scale
 
 
 def _shadow_erosion_steps(zoom):
@@ -743,8 +743,8 @@ def _shadow_erosion_steps(zoom):
     if zoom >= 16: return (0.000022, 0.000055)
     if zoom == 15: return (0.000045, 0.000110)
     if zoom == 14: return (0.000090, 0.000220)
-    if zoom == 13: return (0.0,       0.0)       # no topo rings at z13 — shadow too dense
-    if zoom == 12: return (0.0,       0.0)
+    if zoom == 13: return (0.000060, 0.000140)   # slightly smaller than z14
+    if zoom == 12: return (0.000030, 0.000070)
     return               (0.00017,  0.00043)
 
 
