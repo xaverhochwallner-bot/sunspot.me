@@ -164,10 +164,9 @@ _AMENITY_BOOST_TYPES = {
 MIN_SPOT_SEPARATION = 0.0015
 
 PRE_SIMPLIFY = {
-    12: 0.00015,  # ~15 m
-    13: 0.00006,  # ~6 m
+    12: 0.00005,  # ~5 m
     14: 0.00003,  # ~3 m
-    15: 0.000010, # ~1 m — modest reduction, still worth the STRtree cache
+    15: 0.000010, # ~1 m
 }
 
 MIN_BUILDING_AREA = 5e-9  # ~25 m²
@@ -689,9 +688,9 @@ def _simplify_tolerance(zoom):
     if zoom >= 16: return 0.000020   # ~2 m
     if zoom == 15: return 0.000040   # ~4 m
     if zoom == 14: return 0.000045   # ~4 m
-    if zoom == 13: return 0.00008    # ~8 m
-    if zoom == 12: return 0.00015    # ~15 m
-    return               0.00030    # zoom ≤ 11 — ~30 m
+    if zoom == 13: return 0.000008   # ~0.8 m — near-full detail
+    if zoom == 12: return 0.00005    # ~5 m
+    return               0.00015    # zoom ≤ 11 — ~15 m
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
