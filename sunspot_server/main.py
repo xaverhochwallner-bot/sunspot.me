@@ -653,8 +653,8 @@ def _min_building_area(zoom):
     """
     if zoom >= 15: return 5e-9    # ~40 m²  — everything
     if zoom == 14: return 1.5e-8  # ~125 m² — skip tiny sheds
-    if zoom == 13: return 3e-8    # ~250 m² — skip garages/sheds
-    return 6e-8                   # zoom ≤ 12 — ~500 m², skip small outbuildings
+    if zoom == 13: return 1e-7    # ~800 m² — only meaningful blocks at z13
+    return 2e-7                   # zoom ≤ 12 — ~1600 m², major structures only
 
 
 def _min_sunlit_area(zoom):
@@ -1055,7 +1055,8 @@ def shadow_stream():
 
             elevation, azimuth = get_sun_angles(lat, lon, now)
 
-            VIEWPORT_PAD  = 0.15   # building query area — 15% beyond viewport
+            # With shadow scaling at z12-13, shadows are short — tiny pad needed
+            VIEWPORT_PAD  = 0.05 if zoom <= 13 else 0.15
             SHADOW_BBOX_PAD = 1.5  # shadow outer boundary — always off-screen
             # Cap query area at low zoom so computation stays fast
             MAX_QUERY_HALF = {13: 0.07, 12: 0.10}  # ~8 km / ~11 km half-side
@@ -2093,24 +2094,26 @@ def _startup_prewarm():
         return
     clat, clon = 48.2082, 16.3738  # Vienna Stephansdom
     hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
-    # 3×3 grid for z12/z13 so panning around Vienna stays cached
-    g12, g13 = 0.05, 0.02
-    centers_low = list({
-        (round(clat + dlat * g12, 4), round(clon + dlon * g12, 4))
-        for dlat in (-1, 0, 1) for dlon in (-1, 0, 1)
-    } | {
-        (round(clat + dlat * g13, 4), round(clon + dlon * g13, 4))
+    # 5×5 grid for z13 (step 0.04° ≈ 4km) covers Vienna's full urban core
+    # 3×3 grid for z12 (step 0.10°)
+    centers_z13 = list({
+        (round(clat + dlat * 0.04, 4), round(clon + dlon * 0.04, 4))
+        for dlat in (-2, -1, 0, 1, 2) for dlon in (-2, -1, 0, 1, 2)
+    })
+    centers_z12 = list({
+        (round(clat + dlat * 0.10, 4), round(clon + dlon * 0.10, 4))
         for dlat in (-1, 0, 1) for dlon in (-1, 0, 1)
     })
     tasks = []
     for h in hours:
-        for la, lo in centers_low:
-            tasks.append((h, now.month, now.day, la, lo, 12, 0.20, 0.15))
+        for la, lo in centers_z13:
             tasks.append((h, now.month, now.day, la, lo, 13, 0.10, 0.08))
+        for la, lo in centers_z12:
+            tasks.append((h, now.month, now.day, la, lo, 12, 0.20, 0.15))
         tasks.append((h, now.month, now.day, clat, clon, 14, 0.05, 0.04))
         tasks.append((h, now.month, now.day, clat, clon, 15, 0.025, 0.02))
     print(f"[startup] Pre-warming {len(tasks)} tasks z12-15 for hours {hours} ...")
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
