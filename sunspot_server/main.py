@@ -556,7 +556,7 @@ def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=None):
 # Shadow projection
 # ---------------------------------------------------------------------------
 
-def project_shadow(polygon, height, elevation_deg, azimuth_deg):
+def project_shadow(polygon, height, elevation_deg, azimuth_deg, zoom=15):
     try:
         if elevation_deg <= 0 or height <= 0:
             return None
@@ -564,7 +564,15 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
         azimuth   = math.radians(azimuth_deg)
         elevation = math.radians(elevation_deg)
 
-        shadow_length = min(height / math.tan(elevation), 500.0)
+        raw_shadow_length = min(height / math.tan(elevation), 500.0)
+        if zoom <= 12:
+            shadow_length = raw_shadow_length * 0.20
+        elif zoom == 13:
+            shadow_length = raw_shadow_length * 0.25
+        elif zoom == 14:
+            shadow_length = raw_shadow_length * 0.60
+        else:
+            shadow_length = raw_shadow_length
 
         lat_center         = polygon.centroid.y
         meters_per_deg_lat = 111320.0
@@ -783,7 +791,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
                      get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                      if p.area >= min_bld_area]
 
-        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
+        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth, zoom)
         with ThreadPoolExecutor(max_workers=6) as ex:
             all_shadows = list(ex.map(_proj, buildings))
 
@@ -917,7 +925,7 @@ def shadow():
 
             def _project(args):
                 poly, height = args
-                return project_shadow(poly, height, elevation, azimuth)
+                return project_shadow(poly, height, elevation, azimuth, zoom)
 
             with ThreadPoolExecutor(max_workers=8) as ex:
                 all_shadows = list(ex.map(_project, buildings))
