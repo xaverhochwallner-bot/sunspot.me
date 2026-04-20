@@ -564,7 +564,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
         azimuth   = math.radians(azimuth_deg)
         elevation = math.radians(elevation_deg)
 
-        shadow_length = height / math.tan(elevation)
+        shadow_length = min(height / math.tan(elevation), 500.0)
 
         lat_center         = polygon.centroid.y
         meters_per_deg_lat = 111320.0
@@ -768,8 +768,8 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
         elevation, azimuth = get_sun_angles(lat, lon, now)
-        if elevation <= 0:
-            return
+        if elevation <= 0 or (elevation < 8 and zoom <= 13):
+            return  # skip prewarm — twilight handled as full-dark in stream
 
         pad = 0.15
         q_min_lat = lat - vp_h / 2 - vp_h * pad
@@ -1074,6 +1074,24 @@ def shadow_stream():
                     "time":      now.strftime("%H:%M"),
                     "elevation": elevation,
                     "azimuth":   azimuth,
+                    "dark_area": {"type": "FeatureCollection", "features": [
+                        {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
+                         "properties": {"layer": "shadow-l0"}},
+                    ]},
+                })
+                return
+
+            # Twilight at low zoom — sun too low for meaningful per-building shadows
+            # over large areas; entire city is effectively in shadow → full dark overlay
+            if elevation < 8 and zoom <= 13:
+                dark_area = orient(viewport_bbox, sign=1.0)
+                sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
+                yield _evt(100, "Twilight", result={
+                    "time":      now.strftime("%H:%M"),
+                    "elevation": elevation,
+                    "azimuth":   azimuth,
+                    "sunrise":   sr,
+                    "sunset":    ss,
                     "dark_area": {"type": "FeatureCollection", "features": [
                         {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
                          "properties": {"layer": "shadow-l0"}},
