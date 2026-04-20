@@ -1049,19 +1049,30 @@ def shadow_stream():
 
             VIEWPORT_PAD  = 0.15   # building query area — 15% beyond viewport
             SHADOW_BBOX_PAD = 1.5  # shadow outer boundary — always off-screen
+            # Cap query area at low zoom so computation stays fast
+            MAX_QUERY_HALF = {13: 0.07, 12: 0.10}  # ~8 km / ~11 km half-side
             if None not in (min_lat, min_lon, max_lat, max_lon):
-                _vw = max_lon - min_lon
-                _vh = max_lat - min_lat
+                if zoom in MAX_QUERY_HALF:
+                    _cap  = MAX_QUERY_HALF[zoom]
+                    _clat = (min_lat + max_lat) / 2
+                    _clon = (min_lon + max_lon) / 2
+                    eff_min_lat = _clat - _cap;  eff_max_lat = _clat + _cap
+                    eff_min_lon = _clon - _cap;  eff_max_lon = _clon + _cap
+                else:
+                    eff_min_lat, eff_max_lat = min_lat, max_lat
+                    eff_min_lon, eff_max_lon = min_lon, max_lon
+                _vw = eff_max_lon - eff_min_lon
+                _vh = eff_max_lat - eff_min_lat
                 # Shadow bbox is huge so its edge is never visible on any zoom
                 viewport_bbox = shapely_box(
-                    min_lon - SHADOW_BBOX_PAD, min_lat - SHADOW_BBOX_PAD,
-                    max_lon + SHADOW_BBOX_PAD, max_lat + SHADOW_BBOX_PAD,
+                    eff_min_lon - SHADOW_BBOX_PAD, eff_min_lat - SHADOW_BBOX_PAD,
+                    eff_max_lon + SHADOW_BBOX_PAD, eff_max_lat + SHADOW_BBOX_PAD,
                 )
                 # Building query uses the smaller 15% pad (performance)
-                q_min_lat = min_lat - _vh * VIEWPORT_PAD
-                q_min_lon = min_lon - _vw * VIEWPORT_PAD
-                q_max_lat = max_lat + _vh * VIEWPORT_PAD
-                q_max_lon = max_lon + _vw * VIEWPORT_PAD
+                q_min_lat = eff_min_lat - _vh * VIEWPORT_PAD
+                q_min_lon = eff_min_lon - _vw * VIEWPORT_PAD
+                q_max_lat = eff_max_lat + _vh * VIEWPORT_PAD
+                q_max_lon = eff_max_lon + _vw * VIEWPORT_PAD
             else:
                 viewport_bbox = shapely_box(lon - 1.5, lat - 1.5, lon + 1.5, lat + 1.5)
                 q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
@@ -2072,14 +2083,26 @@ def _startup_prewarm():
     if now.hour < 6 or now.hour > 20:
         print("[startup] Nighttime — skipping pre-warm.")
         return
-    lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
+    clat, clon = 48.2082, 16.3738  # Vienna Stephansdom
     hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
-    zooms = [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04), (15, 0.025, 0.02)]
-    tasks = [(h, now.month, now.day, lat, lon, z, w, v)
-             for h in hours for z, w, v in zooms]
-    print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} "
-          f"({len(tasks)} tasks in parallel) ...")
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # 3×3 grid for z12/z13 so panning around Vienna stays cached
+    g12, g13 = 0.05, 0.02
+    centers_low = list({
+        (round(clat + dlat * g12, 4), round(clon + dlon * g12, 4))
+        for dlat in (-1, 0, 1) for dlon in (-1, 0, 1)
+    } | {
+        (round(clat + dlat * g13, 4), round(clon + dlon * g13, 4))
+        for dlat in (-1, 0, 1) for dlon in (-1, 0, 1)
+    })
+    tasks = []
+    for h in hours:
+        for la, lo in centers_low:
+            tasks.append((h, now.month, now.day, la, lo, 12, 0.20, 0.15))
+            tasks.append((h, now.month, now.day, la, lo, 13, 0.10, 0.08))
+        tasks.append((h, now.month, now.day, clat, clon, 14, 0.05, 0.04))
+        tasks.append((h, now.month, now.day, clat, clon, 15, 0.025, 0.02))
+    print(f"[startup] Pre-warming {len(tasks)} tasks z12-15 for hours {hours} ...")
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
