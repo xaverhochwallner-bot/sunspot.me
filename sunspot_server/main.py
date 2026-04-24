@@ -97,7 +97,7 @@ def _cache_grid(zoom):
     if zoom == 13: return 0.02   # ~2 km
     if zoom == 14: return 0.02   # ~2 km — coarser for more pan cache hits
     if zoom == 15: return 0.01   # ~1 km
-    return 0.005                 # zoom ≥ 16 — ~500 m
+    return 0.01                  # zoom ≥ 16 — same as z15, coarser for more cache hits
 
 def _cache_key(hour, month, day, lat, lon, zoom):
     g = _cache_grid(zoom)
@@ -638,6 +638,12 @@ def round_coords(obj, precision=5):
         return round(obj, precision)
     return obj
 
+def _geojson_precision(zoom):
+    """GeoJSON coordinate decimal places — fewer digits at low zoom = smaller payload."""
+    if zoom <= 12: return 3   # ~100 m resolution, saves ~40% on mobile
+    if zoom <= 14: return 4   # ~10 m resolution
+    return 5                  # ~1 m resolution
+
 
 def _min_building_area(zoom):
     """Minimum building footprint (deg²).
@@ -839,7 +845,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         with ThreadPoolExecutor(max_workers=6) as ex:
             all_shadows = list(ex.map(_proj, buildings))
 
-        if zoom >= 14:
+        if zoom >= 15:
             tall_geoms = [sh for (_, h), sh in zip(buildings, all_shadows)
                           if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
             occluder_union = parallel_union(tall_geoms) if tall_geoms else None
@@ -953,6 +959,18 @@ def shadow():
             sunlit_filtered = _shadow_cache[ck]
             print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
         else:
+            # Cross-zoom reuse: z16+ can reuse a z15 cache entry (same shadow geometry,
+            # just filter out the smallest patches for the finer zoom level)
+            if zoom >= 16:
+                z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
+                if z15_ck in _shadow_cache:
+                    sunlit_filtered = filter_small_polygons(
+                        _shadow_cache[z15_ck], _min_sunlit_area(zoom)
+                    )
+                    _shadow_cache[ck] = sunlit_filtered
+                    print(f"{now.strftime('%H:%M')} | CACHE HIT (z15→z{zoom} reuse) | elev={elevation:.1f}")
+
+        if ck not in _shadow_cache:
             # Use the full viewport — no artificial cap
             if None not in (min_lat, min_lon, max_lat, max_lon):
                 q_min_lat, q_min_lon = min_lat, min_lon
@@ -977,8 +995,8 @@ def shadow():
 
             # Self-occlusion: build union of shadows from tall buildings (occluders),
             # then skip shorter buildings whose centroid is already in that shadow.
-            # Skip at zoom < 14 — not perceptible and saves significant time.
-            if zoom >= 14:
+            # Skip at zoom < 15 — not perceptible and saves union time at z14.
+            if zoom >= 15:
                 tall_shadow_geoms = [
                     sh for (_, h), sh in zip(buildings, all_shadows)
                     if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
@@ -1039,12 +1057,13 @@ def shadow():
         except Exception:
             shadow_l2 = shadow_l1
 
+        _prec = _geojson_precision(zoom)
         features = [
-            {"type": "Feature", "geometry": round_coords(mapping(shadow_l0)),
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
              "properties": {"layer": "shadow-l0"}},
-            {"type": "Feature", "geometry": round_coords(mapping(shadow_l1)),
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
              "properties": {"layer": "shadow-l1"}},
-            {"type": "Feature", "geometry": round_coords(mapping(shadow_l2)),
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
              "properties": {"layer": "shadow-l2"}},
         ]
 
@@ -1136,6 +1155,15 @@ def shadow_stream():
 
             ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
+            # Cross-zoom reuse: z16+ can reuse a z15 cache entry
+            if zoom >= 16:
+                z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
+                if z15_ck in _shadow_cache:
+                    _shadow_cache[ck] = filter_small_polygons(
+                        _shadow_cache[z15_ck], _min_sunlit_area(zoom)
+                    )
+                    yield _evt(90, "Cached (z15 reuse)")
+
             if ck not in _shadow_cache:
                 compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
                 min_bld_area = _min_building_area(zoom)
@@ -1172,7 +1200,7 @@ def shadow_stream():
 
                 yield _evt(60, "Merging geometry")
 
-                if zoom >= 14:
+                if zoom >= 15:
                     tall_shadow_geoms = [
                         sh for (_, h), sh in zip(buildings, all_shadows)
                         if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
@@ -1238,6 +1266,7 @@ def shadow_stream():
 
             sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
 
+            _prec = _geojson_precision(zoom)
             yield _evt(100, "Done", result={
                 "time":      now.strftime("%H:%M"),
                 "elevation": elevation,
@@ -1245,11 +1274,11 @@ def shadow_stream():
                 "sunrise":   sr,
                 "sunset":    ss,
                 "dark_area": {"type": "FeatureCollection", "features": [
-                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l0)),
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                      "properties": {"layer": "shadow-l0"}},
-                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l1)),
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
                      "properties": {"layer": "shadow-l1"}},
-                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l2)),
+                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
                      "properties": {"layer": "shadow-l2"}},
                 ]},
             })
@@ -1797,7 +1826,7 @@ def find_sunny_spots():
                 with ThreadPoolExecutor(max_workers=8) as ex:
                     all_shadows = list(ex.map(_proj, buildings))
 
-                if zoom >= 14:
+                if zoom >= 15:
                     tall = [sh for (_, h), sh in zip(buildings, all_shadows)
                             if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
                     occluder_union = parallel_union(tall) if tall else None
@@ -2125,7 +2154,8 @@ def _startup_prewarm():
             except Exception as e: print(f"[startup] prewarm error: {e}")
     print("[startup] Pre-warm complete.")
 
-threading.Thread(target=_startup_prewarm, daemon=True).start()
+# Startup prewarm disabled — sequential with max_workers=1 blocks and gives no benefit
+# threading.Thread(target=_startup_prewarm, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
