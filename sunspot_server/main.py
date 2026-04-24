@@ -95,8 +95,9 @@ MAX_CACHE     = 10000
 def _cache_grid(zoom):
     if zoom <= 12: return 0.05   # ~5 km  — whole-city tile
     if zoom == 13: return 0.02   # ~2 km
-    if zoom == 14: return 0.01   # ~1 km
-    return 0.005                 # zoom ≥ 15 — ~500 m
+    if zoom == 14: return 0.02   # ~2 km — coarser for more pan cache hits
+    if zoom == 15: return 0.01   # ~1 km
+    return 0.005                 # zoom ≥ 16 — ~500 m
 
 def _cache_key(hour, month, day, lat, lon, zoom):
     g = _cache_grid(zoom)
@@ -164,8 +165,8 @@ _AMENITY_BOOST_TYPES = {
 MIN_SPOT_SEPARATION = 0.0015
 
 PRE_SIMPLIFY = {
-    12: 0.00005,  # ~5 m
-    13: 0.000008, # ~0.8 m — minimal, just clean up geometry
+    12: 0.0003,   # ~30 m — sub-pixel at z12, slashes vertex count for block-merge
+    13: 0.0001,   # ~10 m — sub-pixel at z13
     14: 0.00003,  # ~3 m
     15: 0.000010, # ~1 m
 }
@@ -832,11 +833,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         buildings = [(p, h) for p, h in
                      get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                      if p.area >= min_bld_area]
-        # Skip block-merge in prewarm — viewport is large, unary_union would be too slow.
-        # _prepare_buildings is applied in the real-time stream path instead.
-        if zoom <= 13 and len(buildings) > 0:
-            buildings = [(p.convex_hull if p.geom_type in ('Polygon', 'MultiPolygon') else p, h)
-                         for p, h in buildings]
+        buildings = _prepare_buildings(buildings, zoom)
 
         def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
         with ThreadPoolExecutor(max_workers=6) as ex:
@@ -882,10 +879,10 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
 
 
 def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
-    """If the user is at zoom ≥ 14, pre-warm zoom 12 and 13 in the background."""
-    if zoom < 14:
+    """Pre-warm lower zoom levels in the background while the user browses."""
+    if zoom < 15:
         return
-    targets = [z for z in [13, 12] if z < zoom]
+    targets = [z for z in [14, 13, 12] if z < zoom]
     for z in targets:
         # Scale viewport size for the lower zoom (roughly 2x per zoom step)
         scale = 2 ** (zoom - z)
