@@ -839,6 +839,13 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         buildings = [(p, h) for p, h in
                      get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                      if p.area >= min_bld_area]
+        # Cap prewarm building count — z12/z13 with 8× viewport can return thousands
+        # of buildings; unary_union on them takes 30+ s and starves the server.
+        _prewarm_max_bld = {12: 400, 13: 600, 14: 1000}
+        cap = _prewarm_max_bld.get(zoom, 2000)
+        if len(buildings) > cap:
+            print(f"[prewarm] z={zoom} skipped — {len(buildings)} buildings > cap {cap}")
+            return
         buildings = _prepare_buildings(buildings, zoom)
 
         def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
@@ -890,8 +897,8 @@ def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         return
     targets = [z for z in [14, 13, 12] if z < zoom]
     for z in targets:
-        # Scale viewport size for the lower zoom (roughly 2x per zoom step)
-        scale = 2 ** (zoom - z)
+        # Scale viewport — cap at 4× to prevent z12 from querying enormous areas
+        scale = min(2 ** (zoom - z), 4)
         w, h  = vp_w * scale, vp_h * scale
         ck = _cache_key(hour, month, day, lat, lon, z)
         with _prewarm_lock:

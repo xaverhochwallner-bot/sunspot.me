@@ -1751,7 +1751,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (e) {
       debugPrint('Fetch error: $e');
       _showError('Could not load shadows — is the server running?');
-      if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; });
+      if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; _showPill = false; });
       if (!completer.isCompleted) completer.complete();
     }
   }
