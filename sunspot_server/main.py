@@ -736,19 +736,19 @@ def _simplify_tolerance(zoom):
       zoom 18+ → ~0.5 m
       zoom 17  → ~1 m
       zoom 16  → ~2 m
-      zoom 15  → ~9 m
-      zoom 14  → ~11 m
-      zoom 13  → ~13 m
+      zoom 15  → ~2.5 m
+      zoom 14  → ~4.5 m
+      zoom 13  → ~9 m
       zoom 12  → ~17 m
       zoom ≤11 → ~22 m
     """
     if zoom >= 18: return 0.000005   # ~0.5 m
     if zoom == 17: return 0.000010   # ~1 m
     if zoom >= 16: return 0.000020   # ~2 m
-    if zoom == 15: return 0.000080   # ~9 m  (was 40 — smoother edges)
-    if zoom == 14: return 0.000100   # ~11 m (was 45)
-    if zoom == 13: return 0.000120   # ~13 m (was 8 — much more rounding)
-    if zoom == 12: return 0.000150   # ~17 m (was 50)
+    if zoom == 15: return 0.000025   # ~2.5 m — sharp building edges
+    if zoom == 14: return 0.000040   # ~4.5 m — was 11 m
+    if zoom == 13: return 0.000080   # ~9 m — was 13 m
+    if zoom == 12: return 0.000150   # ~17 m
     return               0.000200   # zoom ≤ 11 — ~22 m
 
 
@@ -770,10 +770,10 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 def _gap_fill(zoom):
     """Morphological close distance — fills small gaps between shadow patches."""
     if zoom >= 17: return 0.000014
-    if zoom == 16: return 0.000033
-    if zoom == 15: return 0.000072
-    if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000100   # ~11m — same as z14 for consistent look
+    if zoom == 16: return 0.000020   # was 0.000033 — sharper edges
+    if zoom == 15: return 0.000030   # was 0.000072 — sharper edges
+    if zoom == 14: return 0.000055   # was 0.000100 — sharper edges
+    if zoom == 13: return 0.000080   # was 0.000100
     if zoom == 12: return 0.000130   # ~14m — slightly wider than z13
     return                0.000160   # ~18m — z11 and below
 
