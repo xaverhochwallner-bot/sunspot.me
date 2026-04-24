@@ -165,14 +165,64 @@ _AMENITY_BOOST_TYPES = {
 # Minimum separation between returned sunny spots (~150 m in degrees)
 MIN_SPOT_SEPARATION = 0.0015
 
-PRE_SIMPLIFY = {
-    12: 0.0003,   # ~30 m — sub-pixel at z12, slashes vertex count for block-merge
-    13: 0.0001,   # ~10 m — sub-pixel at z13
-    14: 0.00003,  # ~3 m
-    15: 0.000010, # ~1 m
+MIN_BUILDING_AREA = 5e-9  # ~25 m²
+
+# ---------------------------------------------------------------------------
+# SHADOW APPEARANCE — frozen visual config
+# All shadow rendering knobs live here. To change how shadows look, edit
+# only this block. Do not scatter magic numbers elsewhere in the file.
+# ---------------------------------------------------------------------------
+
+# Morphological close distance (deg) per zoom.
+# Applied as buffer(+d).buffer(-d×0.85), so net shadow expansion ≈ d×0.15.
+# Lower = buildings stay separate across streets; higher = gaps filled.
+_CFG_GAP_FILL = {
+    17: 0.000014,  # ~1.5 m net
+    16: 0.000020,  # ~2 m net
+    15: 0.000018,  # ~2 m net  — keep buildings separate
+    14: 0.000028,  # ~3 m net
+    13: 0.000042,  # ~6 m net
+    12: 0.000065,  # ~10 m net
+    11: 0.000100,  # ~15 m net — z11 and below
 }
 
-MIN_BUILDING_AREA = 5e-9  # ~25 m²
+# Geometry simplification tolerance (deg) per zoom.
+# Controls how closely shadow edges track actual building footprints.
+_CFG_SIMPLIFY = {
+    18: 0.000005,  # ~0.5 m
+    17: 0.000010,  # ~1 m
+    16: 0.000020,  # ~2 m
+    15: 0.000025,  # ~2.5 m
+    14: 0.000040,  # ~4.5 m
+    13: 0.000080,  # ~9 m
+    12: 0.000150,  # ~17 m
+    11: 0.000200,  # ~22 m — z11 and below
+}
+
+# Two erosion distances (deg) for the 3-ring shadow depth effect.
+# Produces subtle depth rings; sized to ~2-3 screen pixels per zoom level.
+_CFG_EROSION = {
+    17: (0.000012, 0.000030),
+    16: (0.000022, 0.000055),
+    15: (0.000045, 0.000110),
+    14: (0.000090, 0.000220),
+    13: (0.000060, 0.000140),
+    12: (0.000060, 0.000140),
+    11: (0.000060, 0.000140),  # z11 and below
+}
+
+# Buffer distance (deg) to bridge digitisation gaps between adjacent buildings
+# at low zoom before block-merge LOD (z11-z13 only).
+_CFG_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
+
+# Pre-simplification of raw OSM building polygons at startup (deg).
+# Reduces vertex count before STRtree indexing; invisible at each zoom.
+PRE_SIMPLIFY = {
+    12: 0.0003,    # ~30 m — sub-pixel at z12
+    13: 0.0001,    # ~10 m — sub-pixel at z13
+    14: 0.00003,   # ~3 m
+    15: 0.000010,  # ~1 m
+}
 
 # Bounding box filter applied during parsing — keeps only relevant buildings
 # Covers greater Vienna area; expand if you want to support other cities
@@ -655,9 +705,7 @@ def _min_building_area(zoom):
     return 5e-9                   # z≤13 — keep all valid buildings; block-merge handles LOD
 
 
-# Buffer distance (deg) to bridge gaps between adjacent buildings at low zoom.
-# ~2 m for z13 (bridges digitization gaps without crossing alleys), ~3 m for z≤12.
-_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
+_LOD_BLOCK_BUFFER = _CFG_LOD_BLOCK_BUFFER
 
 
 def _merge_into_blocks(buildings, buffer_deg):
@@ -731,25 +779,7 @@ def _min_sunlit_area(zoom):
 
 
 def _simplify_tolerance(zoom):
-    """Geometry simplification tolerance (deg).
-    Higher values at mid-zoom produce rounder, less fractal patch edges.
-      zoom 18+ → ~0.5 m
-      zoom 17  → ~1 m
-      zoom 16  → ~2 m
-      zoom 15  → ~2.5 m
-      zoom 14  → ~4.5 m
-      zoom 13  → ~9 m
-      zoom 12  → ~17 m
-      zoom ≤11 → ~22 m
-    """
-    if zoom >= 18: return 0.000005   # ~0.5 m
-    if zoom == 17: return 0.000010   # ~1 m
-    if zoom >= 16: return 0.000020   # ~2 m
-    if zoom == 15: return 0.000025   # ~2.5 m — sharp building edges
-    if zoom == 14: return 0.000040   # ~4.5 m — was 11 m
-    if zoom == 13: return 0.000080   # ~9 m — was 13 m
-    if zoom == 12: return 0.000150   # ~17 m
-    return               0.000200   # zoom ≤ 11 — ~22 m
+    return _CFG_SIMPLIFY.get(zoom, _CFG_SIMPLIFY[11])
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
@@ -768,34 +798,11 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance — fills small gaps between shadow patches."""
-    if zoom >= 17: return 0.000014
-    if zoom == 16: return 0.000020
-    if zoom == 15: return 0.000018   # tighter — keep buildings separate across streets
-    if zoom == 14: return 0.000028   # was 0.000055
-    if zoom == 13: return 0.000042   # was 0.000080
-    if zoom == 12: return 0.000065   # was 0.000130
-    return                0.000100   # was 0.000160 — z11 and below
+    return _CFG_GAP_FILL.get(zoom, _CFG_GAP_FILL[11])
 
 
 def _shadow_erosion_steps(zoom):
-    """Two erosion distances (deg) for the 3-ring depth effect.
-    Sized to produce ~2-3 screen pixels of ring width at every zoom level,
-    so depth is always subtle and never looks like a topo-map contour.
-      zoom 17+  : ~1.2 m / ~3 m   — essentially invisible rings
-      zoom 16   : ~2.5 m / ~6 m   — very subtle
-      zoom 15   : ~5 m  / ~12 m   — slight depth hint
-      zoom 14   : ~10 m / ~24 m   — noticeable depth
-      zoom 13   : ~19 m / ~48 m   — block-level depth
-      zoom ≤ 12 : ~38 m / ~95 m   — neighbourhood-scale gradient
-    """
-    if zoom >= 17: return (0.000012, 0.000030)
-    if zoom >= 16: return (0.000022, 0.000055)
-    if zoom == 15: return (0.000045, 0.000110)
-    if zoom == 14: return (0.000090, 0.000220)
-    if zoom == 13: return (0.000060, 0.000140)
-    if zoom == 12: return (0.000060, 0.000140)   # same as z13
-    return               (0.000060, 0.000140)    # z11 and below — same
+    return _CFG_EROSION.get(zoom, _CFG_EROSION[11])
 
 
 def filter_small_polygons(geom, min_area):
