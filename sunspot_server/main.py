@@ -89,6 +89,7 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 # ---------------------------------------------------------------------------
 _shadow_cache = {}
 MAX_CACHE     = 10000
+SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
 
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
@@ -608,7 +609,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
 def _union_chunk(chunk):
     return unary_union(chunk)
 
-def parallel_union(geoms, chunk_size=150, max_workers=8):
+def parallel_union(geoms, chunk_size=150, max_workers=3):
     """Union a large list of geometries in parallel chunks, then merge results."""
     if not geoms:
         return None
@@ -852,7 +853,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         buildings = _prepare_buildings(buildings, zoom)
 
         def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
-        with ThreadPoolExecutor(max_workers=6) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:
             all_shadows = list(ex.map(_proj, buildings))
 
         if zoom >= 15:
@@ -953,7 +954,7 @@ def shadow():
         # Night: cover the entire viewport with a single dark polygon, no holes
         if elevation <= 0:
             dark_area = orient(viewport_bbox, sign=1.0)
-            return jsonify({
+            resp = jsonify({
                 "time":      now.strftime("%H:%M"),
                 "elevation": elevation,
                 "azimuth":   azimuth,
@@ -962,6 +963,8 @@ def shadow():
                      "properties": {"layer": "shadow-l0"}},
                 ]},
             })
+            resp.headers['Cache-Control'] = 'public, max-age=300'
+            return resp
 
         ck  = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
@@ -1000,7 +1003,7 @@ def shadow():
                 poly, height = args
                 return project_shadow(poly, height, elevation, azimuth)
 
-            with ThreadPoolExecutor(max_workers=8) as ex:
+            with ThreadPoolExecutor(max_workers=3) as ex:
                 all_shadows = list(ex.map(_project, buildings))
 
             # Self-occlusion: build union of shadows from tall buildings (occluders),
@@ -1077,12 +1080,14 @@ def shadow():
              "properties": {"layer": "shadow-l2"}},
         ]
 
-        return jsonify({
+        resp = jsonify({
             "time":      now.strftime("%H:%M"),
             "elevation": elevation,
             "azimuth":   azimuth,
             "dark_area": {"type": "FeatureCollection", "features": features},
         })
+        resp.headers['Cache-Control'] = 'public, max-age=300'
+        return resp
 
     except Exception as e:
         import traceback
@@ -1192,7 +1197,7 @@ def shadow_stream():
                 yield _evt(15, f"Projecting {n} buildings")
 
                 all_shadows = [None] * n
-                with ThreadPoolExecutor(max_workers=8) as ex:
+                with ThreadPoolExecutor(max_workers=3) as ex:
                     future_to_idx = {
                         ex.submit(project_shadow, poly, height, elevation, azimuth): i
                         for i, (poly, height) in enumerate(buildings)
@@ -1729,7 +1734,7 @@ def point_info():
                 return h
             return None
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:
             sun_hours = sorted(h for h in ex.map(_check_hour, range(24)) if h is not None)
 
         # Build contiguous periods [{from, to}, ...]
@@ -1833,7 +1838,7 @@ def find_sunny_spots():
                 buildings = _prepare_buildings(buildings, zoom)
 
                 def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
-                with ThreadPoolExecutor(max_workers=8) as ex:
+                with ThreadPoolExecutor(max_workers=3) as ex:
                     all_shadows = list(ex.map(_proj, buildings))
 
                 if zoom >= 15:
@@ -2143,7 +2148,34 @@ if not os.path.exists(CACHE_PATH) and _pbf is None:
     _pbf = PBF_PATH
 load_buildings(_pbf)
 
+# ---------------------------------------------------------------------------
+# Disk shadow cache — persist in-memory cache across server restarts
+# ---------------------------------------------------------------------------
+if os.path.exists(SHADOW_DISK_CACHE_PATH):
+    try:
+        with open(SHADOW_DISK_CACHE_PATH, "rb") as _f:
+            _loaded = pickle.load(_f)
+        _shadow_cache.update(_loaded)
+        print(f"[disk cache] Loaded {len(_loaded):,} shadow entries from disk.")
+    except Exception as _e:
+        print(f"[disk cache] Load failed ({_e}), starting with empty cache.")
+
+def _disk_cache_saver():
+    """Background thread: flush shadow cache to disk every 120 s."""
+    while True:
+        time.sleep(120)
+        try:
+            with open(SHADOW_DISK_CACHE_PATH, "wb") as _f:
+                pickle.dump(dict(_shadow_cache), _f)
+            print(f"[disk cache] Saved {len(_shadow_cache):,} entries.")
+        except Exception as _e:
+            print(f"[disk cache] Save failed: {_e}")
+
+threading.Thread(target=_disk_cache_saver, daemon=True).start()
+
+
 def _startup_prewarm():
+    time.sleep(30)  # let the server finish booting before consuming CPU
     tz  = pytz.timezone("Europe/Vienna")
     now = datetime.now(tz)
     if now.hour < 6 or now.hour > 20:
@@ -2164,8 +2196,7 @@ def _startup_prewarm():
             except Exception as e: print(f"[startup] prewarm error: {e}")
     print("[startup] Pre-warm complete.")
 
-# Startup prewarm disabled — sequential with max_workers=1 blocks and gives no benefit
-# threading.Thread(target=_startup_prewarm, daemon=True).start()
+threading.Thread(target=_startup_prewarm, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
