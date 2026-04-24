@@ -900,18 +900,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final ctrl = _mapController;
     if (ctrl == null) return;
     if (!visible) {
-      // Nuclear option: remove layers + source entirely so MapLibre can't
-      // resurrect them on tile reload. _shadowLayersReady = false means
-      // _updateMapLayers will recreate them from scratch when needed.
       if (_shadowLayersReady) {
-        try { await ctrl.removeLayer('shadow-l2-fill'); } catch (_) {}
-        try { await ctrl.removeLayer('shadow-l1-fill'); } catch (_) {}
-        try { await ctrl.removeLayer('shadow-l0-fill'); } catch (_) {}
-        try { await ctrl.removeSource('dark-area'); } catch (_) {}
-        _shadowLayersReady = false;
+        // Hide in-place: zero opacity keeps source+layers alive so re-show is instant
+        try {
+          ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.0));
+        } catch (_) {}
       }
     } else {
-      // Re-enable: fetchShadows will recreate layers via _updateMapLayers
+      // Re-enable: fetchShadows restores correct opacity from cache or re-fetches
       fetchShadows();
     }
   }
@@ -1929,16 +1927,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     Future.microtask(() async {
       try {
         if (!_mapReady || _mapController == null) return;
-        final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).round();
-        final bounds = await _mapController!.getVisibleRegion();
+        final zoom    = (_mapController!.cameraPosition?.zoom ?? 14).round();
+        final bounds  = await _mapController!.getVisibleRegion();
         final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
-        final start  = (_sunriseHour ?? 6.0).toInt();
-        final end    = (_sunsetHour ?? 21.0).toInt();
-        // Fetch 3 hours in parallel, batch by batch
-        final hours  = List.generate(end - start + 1, (i) => start + i);
-        for (var i = 0; i < hours.length; i += 3) {
+        final start   = (_sunriseHour ?? 6.0).toInt();
+        final end     = (_sunsetHour  ?? 21.0).toInt();
+        final curHour = _hour.toInt();
+        // Adjacent hours first — H-1 and H+1 ready before anything else
+        final adjacent = [curHour - 1, curHour + 1]
+            .where((h) => h >= start && h <= end)
+            .toList();
+        await Future.wait(adjacent.map((h) => _prefetchHourAwaitable(h, zoom, lonSpan, bounds)));
+        // Remaining hours in batches of 3
+        final remaining = List.generate(end - start + 1, (i) => start + i)
+            .where((h) => !adjacent.contains(h) && h != curHour)
+            .toList();
+        for (var i = 0; i < remaining.length; i += 3) {
           if (!mounted || _animating || _preloading24h) break;
-          final batch = hours.skip(i).take(3).toList();
+          final batch = remaining.skip(i).take(3).toList();
           await Future.wait(batch.map((h) => _prefetchHourAwaitable(h, zoom, lonSpan, bounds)));
         }
       } finally {

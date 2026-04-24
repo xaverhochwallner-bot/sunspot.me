@@ -967,7 +967,7 @@ def shadow():
                      "properties": {"layer": "shadow-l0"}},
                 ]},
             })
-            resp.headers['Cache-Control'] = 'public, max-age=300'
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
             return resp
 
         ck  = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
@@ -1090,7 +1090,7 @@ def shadow():
             "azimuth":   azimuth,
             "dark_area": {"type": "FeatureCollection", "features": features},
         })
-        resp.headers['Cache-Control'] = 'public, max-age=300'
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
         return resp
 
     except Exception as e:
