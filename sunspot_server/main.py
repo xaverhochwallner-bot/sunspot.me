@@ -2117,7 +2117,7 @@ def _startup_prewarm():
              for h in hours for z, w, v in zooms]
     print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} "
           f"({len(tasks)} tasks in parallel) ...")
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=1) as ex:
         futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
