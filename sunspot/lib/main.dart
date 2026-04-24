@@ -1590,8 +1590,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final rawZoom  = _mapController!.cameraPosition?.zoom ?? 15.0;
       final zoom     = rawZoom.toInt();
 
-      // Below zoom 11.5, building shadows are too fragmented — clear and skip.
-      if (rawZoom < 11.5) {
+      // Below zoom 12, skip shadow fetch and hide any existing layers.
+      if (rawZoom < 12.0) {
         if (_shadowLayersReady) {
           final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
           await _mapController!.setGeoJsonSource('dark-area', empty);
@@ -2195,7 +2195,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           child: MapLibreMap(
             key: _mapKey,
             styleString: mapStyle,
-            initialCameraPosition: CameraPosition(target: _currentCenter, zoom: 13.0),
+            initialCameraPosition: CameraPosition(target: _currentCenter, zoom: 14.0),
             onMapCreated:          _onMapCreated,
             onStyleLoadedCallback: _onStyleLoaded,
             onCameraIdle:          _onCameraIdle,

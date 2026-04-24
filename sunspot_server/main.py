@@ -556,7 +556,7 @@ def get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=None):
 # Shadow projection
 # ---------------------------------------------------------------------------
 
-def project_shadow(polygon, height, elevation_deg, azimuth_deg, zoom=15):
+def project_shadow(polygon, height, elevation_deg, azimuth_deg):
     try:
         if elevation_deg <= 0 or height <= 0:
             return None
@@ -564,20 +564,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg, zoom=15):
         azimuth   = math.radians(azimuth_deg)
         elevation = math.radians(elevation_deg)
 
-        # At low zoom, use convex hull — identical visually but far fewer vertices
-        # → unary_union is 5-10x faster over thousands of buildings
-        if zoom <= 13 and polygon.geom_type in ('Polygon', 'MultiPolygon'):
-            polygon = polygon.convex_hull
-
-        raw_shadow_length = min(height / math.tan(elevation), 500.0)
-        if zoom <= 12:
-            shadow_length = raw_shadow_length * 0.20
-        elif zoom == 13:
-            shadow_length = raw_shadow_length * 0.25
-        elif zoom == 14:
-            shadow_length = raw_shadow_length * 0.60
-        else:
-            shadow_length = raw_shadow_length
+        shadow_length = min(height / math.tan(elevation), 500.0)
 
         lat_center         = polygon.centroid.y
         meters_per_deg_lat = 111320.0
@@ -652,14 +639,64 @@ def round_coords(obj, precision=5):
 
 
 def _min_building_area(zoom):
-    """Minimum building footprint (deg²) to include at a given zoom level.
-    Only truly tiny structures (sheds, garages) are skipped at low zoom.
-    Typical Vienna apartment block (~300 m²) is always included.
+    """Minimum building footprint (deg²).
+    At z≤13 we merge buildings into blocks first, so only degenerate slivers are dropped.
     """
     if zoom >= 15: return 5e-9    # ~40 m²  — everything
     if zoom == 14: return 1.5e-8  # ~125 m² — skip tiny sheds
-    if zoom == 13: return 1e-7    # ~800 m² — only meaningful blocks at z13
-    return 2e-7                   # zoom ≤ 12 — ~1600 m², major structures only
+    return 5e-9                   # z≤13 — keep all valid buildings; block-merge handles LOD
+
+
+# Buffer distance (deg) to bridge gaps between adjacent buildings at low zoom.
+# ~2 m for z13 (bridges digitization gaps without crossing alleys), ~3 m for z≤12.
+_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
+
+
+def _merge_into_blocks(buildings, buffer_deg):
+    """Merge adjacent buildings into city blocks for low-zoom shadow rendering.
+
+    Returns list of (merged_poly, avg_height).  Reduces polygon count by ~95%
+    in dense European cities while preserving total shadow mass.
+    """
+    if not buildings:
+        return []
+    polys   = [p for p, _ in buildings]
+    heights = [h for _, h in buildings]
+
+    buffered = [p.buffer(buffer_deg) for p in polys]
+    merged   = unary_union(buffered)
+    if merged.is_empty:
+        return []
+    merged = merged.buffer(-buffer_deg * 0.5)
+    if merged.is_empty:
+        return []
+
+    orig_tree = STRtree(polys)
+    geoms  = list(merged.geoms) if merged.geom_type != 'Polygon' else [merged]
+    result = []
+    for block in geoms:
+        if block.is_empty:
+            continue
+        idxs = orig_tree.query(block)
+        block_heights = [heights[i] for i in idxs if not polys[i].disjoint(block)]
+        avg_h = sum(block_heights) / len(block_heights) if block_heights else 10.0
+        result.append((block, avg_h))
+    return result
+
+
+def _prepare_buildings(buildings, zoom):
+    """Apply LOD reduction for the given zoom level.
+
+    z≤13: merge adjacent buildings into city blocks (preserves shadow mass,
+          reduces polygon count from thousands to tens).
+    z≥14: return unchanged.
+    """
+    if zoom >= 14 or not buildings:
+        return buildings
+    buf = _LOD_BLOCK_BUFFER.get(zoom, 0.000020)
+    blocks = _merge_into_blocks(buildings, buf)
+    print(f"[LOD] z={zoom}: {len(buildings)} buildings → {len(blocks)} blocks")
+    return blocks
 
 
 def _min_sunlit_area(zoom):
@@ -781,8 +818,8 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
         elevation, azimuth = get_sun_angles(lat, lon, now)
-        if elevation <= 0 or (elevation < 8 and zoom <= 13):
-            return  # skip prewarm — twilight handled as full-dark in stream
+        if elevation <= 0:
+            return
 
         pad = 0.15
         q_min_lat = lat - vp_h / 2 - vp_h * pad
@@ -795,8 +832,13 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         buildings = [(p, h) for p, h in
                      get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                      if p.area >= min_bld_area]
+        # Skip block-merge in prewarm — viewport is large, unary_union would be too slow.
+        # _prepare_buildings is applied in the real-time stream path instead.
+        if zoom <= 13 and len(buildings) > 0:
+            buildings = [(p.convex_hull if p.geom_type in ('Polygon', 'MultiPolygon') else p, h)
+                         for p, h in buildings]
 
-        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth, zoom)
+        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
         with ThreadPoolExecutor(max_workers=6) as ex:
             all_shadows = list(ex.map(_proj, buildings))
 
@@ -927,10 +969,11 @@ def shadow():
             buildings     = [(p, h) for p, h in
                              get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                              if p.area >= min_bld_area]
+            buildings = _prepare_buildings(buildings, zoom)
 
             def _project(args):
                 poly, height = args
-                return project_shadow(poly, height, elevation, azimuth, zoom)
+                return project_shadow(poly, height, elevation, azimuth)
 
             with ThreadPoolExecutor(max_workers=8) as ex:
                 all_shadows = list(ex.map(_project, buildings))
@@ -1060,33 +1103,21 @@ def shadow_stream():
 
             elevation, azimuth = get_sun_angles(lat, lon, now)
 
-            # With shadow scaling at z12-13, shadows are short — tiny pad needed
-            VIEWPORT_PAD  = 0.05 if zoom <= 13 else 0.15
+            VIEWPORT_PAD  = 0.15   # building query area — 15% beyond viewport
             SHADOW_BBOX_PAD = 1.5  # shadow outer boundary — always off-screen
-            # Cap query area at low zoom so computation stays fast
-            MAX_QUERY_HALF = {13: 0.07, 12: 0.10}  # ~8 km / ~11 km half-side
             if None not in (min_lat, min_lon, max_lat, max_lon):
-                if zoom in MAX_QUERY_HALF:
-                    _cap  = MAX_QUERY_HALF[zoom]
-                    _clat = (min_lat + max_lat) / 2
-                    _clon = (min_lon + max_lon) / 2
-                    eff_min_lat = _clat - _cap;  eff_max_lat = _clat + _cap
-                    eff_min_lon = _clon - _cap;  eff_max_lon = _clon + _cap
-                else:
-                    eff_min_lat, eff_max_lat = min_lat, max_lat
-                    eff_min_lon, eff_max_lon = min_lon, max_lon
-                _vw = eff_max_lon - eff_min_lon
-                _vh = eff_max_lat - eff_min_lat
+                _vw = max_lon - min_lon
+                _vh = max_lat - min_lat
                 # Shadow bbox is huge so its edge is never visible on any zoom
                 viewport_bbox = shapely_box(
-                    eff_min_lon - SHADOW_BBOX_PAD, eff_min_lat - SHADOW_BBOX_PAD,
-                    eff_max_lon + SHADOW_BBOX_PAD, eff_max_lat + SHADOW_BBOX_PAD,
+                    min_lon - SHADOW_BBOX_PAD, min_lat - SHADOW_BBOX_PAD,
+                    max_lon + SHADOW_BBOX_PAD, max_lat + SHADOW_BBOX_PAD,
                 )
                 # Building query uses the smaller 15% pad (performance)
-                q_min_lat = eff_min_lat - _vh * VIEWPORT_PAD
-                q_min_lon = eff_min_lon - _vw * VIEWPORT_PAD
-                q_max_lat = eff_max_lat + _vh * VIEWPORT_PAD
-                q_max_lon = eff_max_lon + _vw * VIEWPORT_PAD
+                q_min_lat = min_lat - _vh * VIEWPORT_PAD
+                q_min_lon = min_lon - _vw * VIEWPORT_PAD
+                q_max_lat = max_lat + _vh * VIEWPORT_PAD
+                q_max_lon = max_lon + _vw * VIEWPORT_PAD
             else:
                 viewport_bbox = shapely_box(lon - 1.5, lat - 1.5, lon + 1.5, lat + 1.5)
                 q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
@@ -1099,24 +1130,6 @@ def shadow_stream():
                     "time":      now.strftime("%H:%M"),
                     "elevation": elevation,
                     "azimuth":   azimuth,
-                    "dark_area": {"type": "FeatureCollection", "features": [
-                        {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
-                         "properties": {"layer": "shadow-l0"}},
-                    ]},
-                })
-                return
-
-            # Twilight at low zoom — sun too low for meaningful per-building shadows
-            # over large areas; entire city is effectively in shadow → full dark overlay
-            if elevation < 8 and zoom <= 13:
-                dark_area = orient(viewport_bbox, sign=1.0)
-                sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
-                yield _evt(100, "Twilight", result={
-                    "time":      now.strftime("%H:%M"),
-                    "elevation": elevation,
-                    "azimuth":   azimuth,
-                    "sunrise":   sr,
-                    "sunset":    ss,
                     "dark_area": {"type": "FeatureCollection", "features": [
                         {"type": "Feature", "geometry": round_coords(mapping(dark_area)),
                          "properties": {"layer": "shadow-l0"}},
@@ -1138,6 +1151,7 @@ def shadow_stream():
                         p = p.buffer(0)
                     if p is not None and not p.is_empty and p.area >= min_bld_area:
                         buildings.append((p, h))
+                buildings = _prepare_buildings(buildings, zoom)
                 n = len(buildings)
 
                 yield _evt(15, f"Projecting {n} buildings")
@@ -1780,6 +1794,7 @@ def find_sunny_spots():
                 buildings    = [(p, h) for p, h in
                                 get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                                 if p.area >= min_bld_area]
+                buildings = _prepare_buildings(buildings, zoom)
 
                 def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
                 with ThreadPoolExecutor(max_workers=8) as ex:
@@ -1991,6 +2006,7 @@ def heatmap():
     buildings    = [(p, h) for p, h in
                     get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=zoom)
                     if p.area >= min_bld_area]
+    buildings = _prepare_buildings(buildings, zoom)
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         all_shadows = list(ex.map(
@@ -2097,28 +2113,14 @@ def _startup_prewarm():
     if now.hour < 6 or now.hour > 20:
         print("[startup] Nighttime — skipping pre-warm.")
         return
-    clat, clon = 48.2082, 16.3738  # Vienna Stephansdom
+    lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
     hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
-    # 5×5 grid for z13 (step 0.04° ≈ 4km) covers Vienna's full urban core
-    # 3×3 grid for z12 (step 0.10°)
-    centers_z13 = list({
-        (round(clat + dlat * 0.04, 4), round(clon + dlon * 0.04, 4))
-        for dlat in (-2, -1, 0, 1, 2) for dlon in (-2, -1, 0, 1, 2)
-    })
-    centers_z12 = list({
-        (round(clat + dlat * 0.10, 4), round(clon + dlon * 0.10, 4))
-        for dlat in (-1, 0, 1) for dlon in (-1, 0, 1)
-    })
-    tasks = []
-    for h in hours:
-        for la, lo in centers_z13:
-            tasks.append((h, now.month, now.day, la, lo, 13, 0.10, 0.08))
-        for la, lo in centers_z12:
-            tasks.append((h, now.month, now.day, la, lo, 12, 0.20, 0.15))
-        tasks.append((h, now.month, now.day, clat, clon, 14, 0.05, 0.04))
-        tasks.append((h, now.month, now.day, clat, clon, 15, 0.025, 0.02))
-    print(f"[startup] Pre-warming {len(tasks)} tasks z12-15 for hours {hours} ...")
-    with ThreadPoolExecutor(max_workers=2) as ex:  # keep CPUs free for real requests
+    zooms = [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04), (15, 0.025, 0.02)]
+    tasks = [(h, now.month, now.day, lat, lon, z, w, v)
+             for h in hours for z, w, v in zooms]
+    print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} "
+          f"({len(tasks)} tasks in parallel) ...")
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
