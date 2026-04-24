@@ -770,12 +770,12 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 def _gap_fill(zoom):
     """Morphological close distance — fills small gaps between shadow patches."""
     if zoom >= 17: return 0.000014
-    if zoom == 16: return 0.000020   # was 0.000033 — sharper edges
-    if zoom == 15: return 0.000030   # was 0.000072 — sharper edges
-    if zoom == 14: return 0.000055   # was 0.000100 — sharper edges
-    if zoom == 13: return 0.000080   # was 0.000100
-    if zoom == 12: return 0.000130   # ~14m — slightly wider than z13
-    return                0.000160   # ~18m — z11 and below
+    if zoom == 16: return 0.000020
+    if zoom == 15: return 0.000018   # tighter — keep buildings separate across streets
+    if zoom == 14: return 0.000028   # was 0.000055
+    if zoom == 13: return 0.000042   # was 0.000080
+    if zoom == 12: return 0.000065   # was 0.000130
+    return                0.000100   # was 0.000160 — z11 and below
 
 
 def _shadow_erosion_steps(zoom):
