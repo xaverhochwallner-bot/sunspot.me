@@ -731,24 +731,24 @@ def _min_sunlit_area(zoom):
 
 def _simplify_tolerance(zoom):
     """Geometry simplification tolerance (deg).
-    Scaled so fine shadow edges are preserved at high zoom.
+    Higher values at mid-zoom produce rounder, less fractal patch edges.
       zoom 18+ → ~0.5 m
       zoom 17  → ~1 m
       zoom 16  → ~2 m
-      zoom 15  → ~4 m
-      zoom 14  → ~4 m
-      zoom 13  → ~8 m
-      zoom 12  → ~15 m
+      zoom 15  → ~9 m
+      zoom 14  → ~11 m
+      zoom 13  → ~13 m
+      zoom 12  → ~17 m
       zoom ≤11 → ~22 m
     """
     if zoom >= 18: return 0.000005   # ~0.5 m
     if zoom == 17: return 0.000010   # ~1 m
     if zoom >= 16: return 0.000020   # ~2 m
-    if zoom == 15: return 0.000040   # ~4 m
-    if zoom == 14: return 0.000045   # ~4 m
-    if zoom == 13: return 0.000008   # ~0.8 m — near-full detail
-    if zoom == 12: return 0.00005    # ~5 m
-    return               0.00015    # zoom ≤ 11 — ~15 m
+    if zoom == 15: return 0.000080   # ~9 m  (was 40 — smoother edges)
+    if zoom == 14: return 0.000100   # ~11 m (was 45)
+    if zoom == 13: return 0.000120   # ~13 m (was 8 — much more rounding)
+    if zoom == 12: return 0.000150   # ~17 m (was 50)
+    return               0.000200   # zoom ≤ 11 — ~22 m
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
@@ -767,14 +767,17 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 
 
 def _gap_fill(zoom):
-    """Morphological close distance — fills small gaps between shadow patches."""
+    """Morphological close distance — fills small gaps between shadow patches.
+    Sized to bridge across typical street widths so nearby sun patches merge
+    into unified blobs rather than staying fragmented per-building.
+    """
     if zoom >= 17: return 0.000014
-    if zoom == 16: return 0.000033
-    if zoom == 15: return 0.000072
-    if zoom == 14: return 0.000100
-    if zoom == 13: return 0.000100   # ~11m — same as z14 for consistent look
-    if zoom == 12: return 0.000130   # ~14m — slightly wider than z13
-    return                0.000160   # ~18m — z11 and below
+    if zoom == 16: return 0.000080   # ~9m — bridge alleys
+    if zoom == 15: return 0.000180   # ~20m — bridge typical street
+    if zoom == 14: return 0.000280   # ~31m — bridge wider roads
+    if zoom == 13: return 0.000350   # ~39m — merge block clusters
+    if zoom == 12: return 0.000420   # ~46m — merge neighbourhood chunks
+    return                0.000500   # ~55m — z11 and below
 
 
 def _shadow_erosion_steps(zoom):
@@ -870,7 +873,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
             merged = parallel_union(all_parts)
             gfill  = _gap_fill(zoom)
             stol   = _simplify_tolerance(zoom)
-            merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+            merged = merged.buffer(gfill).buffer(-gfill * 0.92)
             merged = merged.simplify(stol, preserve_topology=True)
             sunlit = compute_bbox.difference(merged)
         else:
@@ -1029,7 +1032,7 @@ def shadow():
                 merged = parallel_union(all_parts)
                 gfill  = _gap_fill(zoom)
                 stol   = _simplify_tolerance(zoom)
-                merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                merged = merged.buffer(gfill).buffer(-gfill * 0.92)
                 merged = merged.simplify(stol, preserve_topology=True)
                 sunlit = compute_bbox.difference(merged)
             else:
@@ -1235,7 +1238,7 @@ def shadow_stream():
                     gfill  = _gap_fill(zoom)
                     stol   = _simplify_tolerance(zoom)
                     if merged is not None and not merged.is_empty:
-                        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                        merged = merged.buffer(gfill).buffer(-gfill * 0.92)
                         if not merged.is_valid:
                             merged = merged.buffer(0)
                         merged = merged.simplify(stol, preserve_topology=True)
@@ -1851,7 +1854,7 @@ def find_sunny_spots():
                     merged = parallel_union(all_parts)
                     gfill  = _gap_fill(zoom)
                     stol   = _simplify_tolerance(zoom)
-                    merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                    merged = merged.buffer(gfill).buffer(-gfill * 0.92)
                     merged = merged.simplify(stol, preserve_topology=True)
                     sunlit = compute_bbox.difference(merged)
                 else:
@@ -2054,7 +2057,7 @@ def heatmap():
         merged = parallel_union(all_parts)
         gfill  = _gap_fill(zoom)
         stol   = _simplify_tolerance(zoom)
-        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+        merged = merged.buffer(gfill).buffer(-gfill * 0.92)
         merged = merged.simplify(stol, preserve_topology=True)
         sunlit = compute_bbox.difference(merged)
     else:
