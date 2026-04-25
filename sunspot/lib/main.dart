@@ -1810,11 +1810,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Zoom-interpolated opacity: 25% at z11 (heatmap), 100% at z16+ (street detail).
-    // Exponential base 1.5 keeps opacity low through macro zooms, ramps sharply near z15-16.
+    // Zoom-interpolated opacity: 18% at z11, 40% at z13, 100% at z16+.
+    // Mid-stop at z13 keeps macro zooms extra light without touching street-level crispness.
+    // Exponential base 1.5 — ramps sharply near z15-16.
     // MapLibre evaluates this client-side on every zoom change — no re-fetch needed.
     List<dynamic> zoomOp(double op) =>
-        ['interpolate', ['exponential', 1.5], ['zoom'], 11, op * 0.25, 16, op];
+        ['interpolate', ['exponential', 1.5], ['zoom'], 11, op * 0.18, 13, op * 0.40, 16, op];
 
     if (_shadowLayersReady) {
       try {
