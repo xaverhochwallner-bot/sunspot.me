@@ -220,11 +220,11 @@ _CFG_SIMPLIFY = {
     18: 0.000005,  # ~0.5 m
     17: 0.000010,  # ~1 m
     16: 0.000020,  # ~2 m
-    15: 0.000025,  # ~2.5 m
-    14: 0.000080,  # ~9 m  (2× — smaller payload, still crisp on screen)
-    13: 0.000160,  # ~18 m (2× — block-level shadows at city-overview zoom)
-    12: 0.000150,  # ~17 m
-    11: 0.000200,  # ~22 m — z11 and below
+    15: 0.000080,  # ~9 m  — coarser, blocks not individual buildings
+    14: 0.000250,  # ~28 m — block-level only
+    13: 0.000600,  # ~67 m — district silhouettes only
+    12: 0.000600,
+    11: 0.000600,
 }
 
 # Two erosion distances (deg) for the 3-ring shadow depth effect.
@@ -241,7 +241,7 @@ _CFG_EROSION = {
 
 # Buffer distance (deg) to bridge digitisation gaps between adjacent buildings
 # at low zoom before block-merge LOD (z11-z13 only).
-_CFG_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
+_CFG_LOD_BLOCK_BUFFER = {14: 0.000025, 13: 0.000030, 12: 0.000035, 11: 0.000035}
 
 # Pre-simplification of raw OSM building polygons at startup (deg).
 # Reduces vertex count before STRtree indexing; invisible at each zoom.
@@ -775,7 +775,7 @@ def _prepare_buildings(buildings, zoom):
           reduces polygon count from thousands to tens).
     z≥14: return unchanged.
     """
-    if zoom >= 14 or not buildings:
+    if zoom >= 15 or not buildings:
         return buildings
     buf = _cfg_zoom(_CFG_LOD_BLOCK_BUFFER, zoom)
     blocks = _merge_into_blocks(buildings, buf)
@@ -922,7 +922,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
         sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-        if zoom >= 14:
+        if zoom >= 16:
             e1, e2 = _shadow_erosion_steps(zoom)
             _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
         else:
@@ -1096,7 +1096,7 @@ def shadow():
             sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
             sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-            if zoom >= 14:
+            if zoom >= 16:
                 e1, e2 = _shadow_erosion_steps(zoom)
                 _cb1 = sunlit_filtered.buffer(e1)
                 _cb2 = sunlit_filtered.buffer(e2)
@@ -1114,7 +1114,7 @@ def shadow():
         shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
         features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                       "properties": {"layer": "shadow-l0"}}]
-        if zoom >= 14 and _cb1 is not None:
+        if zoom >= 16 and _cb1 is not None:
             try:    shadow_l1 = orient(viewport_bbox.difference(_cb1), sign=1.0)
             except: shadow_l1 = shadow_l0
             try:    shadow_l2 = orient(viewport_bbox.difference(_cb2), sign=1.0)
@@ -1252,6 +1252,12 @@ def shadow_stream():
                     if p is not None and not p.is_empty and p.area >= min_bld_area:
                         buildings.append((p, h))
                 buildings = _prepare_buildings(buildings, zoom)
+                # Cap building count at low zoom — block-merge should have already
+                # reduced this, but guard against pathological cases.
+                _stream_max_bld = {12: 300, 13: 500, 14: 800}
+                cap = _stream_max_bld.get(int(zoom), 99999)
+                if len(buildings) > cap:
+                    buildings = buildings[:cap]
                 n = len(buildings)
 
                 yield _evt(15, f"Projecting {n} buildings")
@@ -1322,7 +1328,7 @@ def shadow_stream():
                 sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
                 sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-                if zoom >= 14:
+                if zoom >= 16:
                     e1, e2 = _shadow_erosion_steps(zoom)
                     _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
                 else:
@@ -1340,7 +1346,7 @@ def shadow_stream():
             shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
             features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                           "properties": {"layer": "shadow-l0"}}]
-            if zoom >= 14 and _sb1 is not None:
+            if zoom >= 16 and _sb1 is not None:
                 try:    shadow_l1 = orient(viewport_bbox.difference(_sb1), sign=1.0)
                 except: shadow_l1 = shadow_l0
                 try:    shadow_l2 = orient(viewport_bbox.difference(_sb2), sign=1.0)
