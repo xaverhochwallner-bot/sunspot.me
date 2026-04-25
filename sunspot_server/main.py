@@ -193,8 +193,8 @@ _CFG_SIMPLIFY = {
     17: 0.000010,  # ~1 m
     16: 0.000020,  # ~2 m
     15: 0.000025,  # ~2.5 m
-    14: 0.000040,  # ~4.5 m
-    13: 0.000080,  # ~9 m
+    14: 0.000080,  # ~9 m  (2× — smaller payload, still crisp on screen)
+    13: 0.000160,  # ~18 m (2× — block-level shadows at city-overview zoom)
     12: 0.000150,  # ~17 m
     11: 0.000200,  # ~22 m — z11 and below
 }
@@ -219,8 +219,8 @@ _CFG_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
 # Reduces vertex count before STRtree indexing; invisible at each zoom.
 PRE_SIMPLIFY = {
     12: 0.0003,    # ~30 m — sub-pixel at z12
-    13: 0.0001,    # ~10 m — sub-pixel at z13
-    14: 0.00003,   # ~3 m
+    13: 0.0002,    # ~22 m — 2× coarser, matches new _CFG_SIMPLIFY z13
+    14: 0.00006,   # ~6.7 m — 2× coarser, matches new _CFG_SIMPLIFY z14
     15: 0.000010,  # ~1 m
 }
 

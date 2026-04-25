@@ -44,7 +44,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
     return '${uri.scheme}://${uri.host}:5000';
   }
-  static const String mapStyle     = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+  static const String mapStyle     = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
   final GlobalKey _mapKey = GlobalKey();
   MapLibreMapController? _mapController;
