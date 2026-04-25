@@ -2431,35 +2431,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
 
 
-        // GPS button — bottom-left on mobile (above floating panel), bottom-right on desktop
-        if (!keyboardOpen && (!isMobile || !_panelExpanded))
+        // GPS button — bottom-left on mobile, bottom-right on desktop
+        if (!keyboardOpen)
           Positioned(
-            bottom: isMobile ? 268 : 16,
-            left:   isMobile ? 16  : null,
-            right:  isMobile ? null : 16,
-            child: PointerInterceptor(
-              intercepting: isMobile,
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _setMapPointerEvents(false),
-                onPointerUp:   (_) => _setMapPointerEvents(true),
-                onPointerCancel: (_) => _setMapPointerEvents(true),
-                child: FloatingActionButton.small(
-                  onPressed: _goToMyLocation,
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.black87,
-                  elevation: 2,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  child: const Icon(Icons.my_location, size: 20),
-                ),
-              ),
+            bottom: 16,
+            left:  isMobile ? 16  : null,
+            right: isMobile ? null : 16,
+            child: FloatingActionButton.small(
+              onPressed: _goToMyLocation,
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.black87,
+              elevation: 2,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              child: const Icon(Icons.my_location, size: 20),
             ),
           ),
 
-        // Zoom buttons — desktop left, mobile right above floating panel
-        if (!isMobile) ...[
+        // Zoom buttons — left on desktop, right on mobile
+        if (!keyboardOpen) ...[
           Positioned(
-            bottom: 68, left: 16,
+            bottom: 68,
+            left:  isMobile ? null : 16,
+            right: isMobile ? 16   : null,
             child: _buildZoomButton(Icons.add, () async {
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
@@ -2468,48 +2461,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             }),
           ),
           Positioned(
-            bottom: 16, left: 16,
+            bottom: 16,
+            left:  isMobile ? null : 16,
+            right: isMobile ? 16   : null,
             child: _buildZoomButton(Icons.remove, () async {
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
               await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
                   CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
             }),
-          ),
-        ] else if (!keyboardOpen && !_panelExpanded) ...[
-          Positioned(
-            bottom: 316, right: 16,
-            child: PointerInterceptor(
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _setMapPointerEvents(false),
-                onPointerUp:   (_) => _setMapPointerEvents(true),
-                onPointerCancel: (_) => _setMapPointerEvents(true),
-                child: _buildZoomButton(Icons.add, () async {
-                  final cam = _mapController?.cameraPosition;
-                  if (cam == null) return;
-                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
-                }),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: 268, right: 16,
-            child: PointerInterceptor(
-              child: Listener(
-                behavior: HitTestBehavior.opaque,
-                onPointerDown: (_) => _setMapPointerEvents(false),
-                onPointerUp:   (_) => _setMapPointerEvents(true),
-                onPointerCancel: (_) => _setMapPointerEvents(true),
-                child: _buildZoomButton(Icons.remove, () async {
-                  final cam = _mapController?.cameraPosition;
-                  if (cam == null) return;
-                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
-                }),
-              ),
-            ),
           ),
         ],
 
@@ -2530,19 +2490,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return Scaffold(
       body: isMobile
           ? LayoutBuilder(builder: (ctx, constraints) {
-              final totalH    = constraints.maxHeight;
+              final totalH     = constraints.maxHeight;
               const collapsedH = 256.0;
-              final panelH    = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
-              return Stack(children: [
-                Positioned.fill(child: mapArea),
-                AnimatedPositioned(
+              final bottomH    = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
+              final mapH       = totalH - bottomH;
+              return Column(children: [
+                AnimatedContainer(
                   duration: const Duration(milliseconds: 280),
                   curve: Curves.easeInOut,
-                  bottom: 0, left: 0, right: 0,
-                  height: panelH,
-                  child: PointerInterceptor(
-                    child: _buildMobileBottom(keyboardOpen: keyboardOpen),
-                  ),
+                  height: mapH,
+                  child: mapArea,
+                ),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 280),
+                  curve: Curves.easeInOut,
+                  height: bottomH,
+                  child: _buildMobileBottom(keyboardOpen: keyboardOpen),
                 ),
               ]);
             })
