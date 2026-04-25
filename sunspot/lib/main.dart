@@ -1810,13 +1810,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
+    // Zoom-interpolated opacity: 55% at z12 (soft heatmap feel), 100% at z15+.
+    // MapLibre evaluates this client-side on every zoom change — no re-fetch needed.
+    List<dynamic> zoomOp(double op) =>
+        ['interpolate', ['linear'], ['zoom'], 12, op * 0.55, 15, op];
+
     if (_shadowLayersReady) {
       try {
         // Update source data + opacity in-place — no remove/re-add, no flicker
         await ctrl.setGeoJsonSource('dark-area', geoJson);
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3B4A', fillOpacity: opL0));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2E2B3A', fillOpacity: opL1));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1F1C2E', fillOpacity: opL2));
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3B4A', fillOpacity: zoomOp(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2E2B3A', fillOpacity: zoomOp(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1F1C2E', fillOpacity: zoomOp(opL2)));
         return;
       } catch (_) {
         // Source was removed (style reload) — fall through to re-create
@@ -1834,19 +1839,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(fillColor: '#3D3B4A', fillOpacity: opL0),
+      FillLayerProperties(fillColor: '#3D3B4A', fillOpacity: zoomOp(opL0)),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(fillColor: '#2E2B3A', fillOpacity: opL1),
+      FillLayerProperties(fillColor: '#2E2B3A', fillOpacity: zoomOp(opL1)),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(fillColor: '#1F1C2E', fillOpacity: opL2),
+      FillLayerProperties(fillColor: '#1F1C2E', fillOpacity: zoomOp(opL2)),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );

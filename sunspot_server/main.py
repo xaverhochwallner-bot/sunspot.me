@@ -180,8 +180,8 @@ _CFG_GAP_FILL = {
     17: 0.000014,  # ~1.5 m net
     16: 0.000020,  # ~2 m net
     15: 0.000018,  # ~2 m net  — keep buildings separate
-    14: 0.000028,  # ~3 m net
-    13: 0.000042,  # ~6 m net
+    14: 0.000055,  # ~6 m net  (2× — closes narrow streets, unifies block shadows)
+    13: 0.000084,  # ~9 m net  (2× — merges buildings into city-block masses)
     12: 0.000065,  # ~10 m net
     11: 0.000100,  # ~15 m net — z11 and below
 }
