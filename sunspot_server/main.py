@@ -162,6 +162,11 @@ _buildings_tree    = None # STRtree spatial index
 _simplified_polys  = {}   # zoom → list[Polygon]
 _simplified_trees  = {}   # zoom → STRtree
 
+# Static Block Database (Macro Pipeline data source) — built once at startup.
+_super_blocks         = []    # list[Polygon] — merged city-block super-polygons
+_super_block_heights  = []    # area-weighted avg height per block
+_super_block_tree     = None  # STRtree spatial index over _super_blocks
+
 # ---------------------------------------------------------------------------
 # POI / open-space data — loaded once at startup
 # ---------------------------------------------------------------------------
@@ -201,54 +206,48 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 # only this block. Do not scatter magic numbers elsewhere in the file.
 # ---------------------------------------------------------------------------
 
-# Morphological close distance (deg) per zoom.
+# Macro / Micro split:
+#   z ≤ MACRO_ZOOM_THRESHOLD → super-block fast path (single l0 layer, ~150-500 ms cold)
+#   z >  MACRO_ZOOM_THRESHOLD → per-building pipeline with l0/l1/l2 erosion rings
+MACRO_ZOOM_THRESHOLD = 14
+
+# Static Block Database — built once at startup, persisted in pickle cache.
+# All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
+# each carrying an area-weighted average member height. Macro zooms project
+# shadows of these blocks instead of individual buildings.
+SUPER_BLOCK_BUFFER   = 0.000180   # ~20 m close radius — fuses across normal Viennese streets
+SUPER_BLOCK_SIMPLIFY = 0.0001     # ~11 m — sub-pixel at z14, applied after merge
+
+# Macro pipeline post-processing
+MACRO_SIMPLIFY        = 0.0001    # ~11 m — applied to sunlit difference
+MACRO_MIN_SUNLIT_AREA = 5e-7      # ~4,000 m² — drops slivers, keeps small parks/squares
+
+# Morphological close distance (deg) per zoom — z ≥ 15 only.
 # Applied as buffer(+d).buffer(-d×0.85), so net shadow expansion ≈ d×0.15.
-# Lower = buildings stay separate across streets; higher = gaps filled.
 _CFG_GAP_FILL = {
     17: 0.000014,  # ~1.5 m net
     16: 0.000020,  # ~2 m net
-    15: 0.000018,  # ~2 m net  — keep buildings separate
-    14: 0.000055,  # ~6 m net  (2× — closes narrow streets, unifies block shadows)
-    13: 0.000084,  # ~9 m net  (2× — merges buildings into city-block masses)
-    12: 0.000065,  # ~10 m net
-    11: 0.000100,  # ~15 m net — z11 and below
+    15: 0.000018,  # ~2 m net — keep buildings separate
 }
 
-# Geometry simplification tolerance (deg) per zoom.
-# Controls how closely shadow edges track actual building footprints.
+# Geometry simplification tolerance (deg) per zoom — z ≥ 15 only.
 _CFG_SIMPLIFY = {
     18: 0.000005,  # ~0.5 m
     17: 0.000010,  # ~1 m
     16: 0.000020,  # ~2 m
     15: 0.000025,  # ~2.5 m
-    14: 0.000080,  # ~9 m  (2× — smaller payload, still crisp on screen)
-    13: 0.000160,  # ~18 m (2× — block-level shadows at city-overview zoom)
-    12: 0.000150,  # ~17 m
-    11: 0.000200,  # ~22 m — z11 and below
 }
 
-# Two erosion distances (deg) for the 3-ring shadow depth effect.
-# Produces subtle depth rings; sized to ~2-3 screen pixels per zoom level.
+# Two erosion distances (deg) for the 3-ring shadow depth effect — z ≥ 15 only.
 _CFG_EROSION = {
     17: (0.000012, 0.000030),
     16: (0.000022, 0.000055),
     15: (0.000045, 0.000110),
-    14: (0.000090, 0.000220),
-    13: (0.000060, 0.000140),
-    12: (0.000060, 0.000140),
-    11: (0.000060, 0.000140),  # z11 and below
 }
 
-# Buffer distance (deg) to bridge digitisation gaps between adjacent buildings
-# at low zoom before block-merge LOD (z11-z13 only).
-_CFG_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
-
 # Pre-simplification of raw OSM building polygons at startup (deg).
-# Reduces vertex count before STRtree indexing; invisible at each zoom.
+# Only z15 is needed now — macro zooms use the super-block DB instead.
 PRE_SIMPLIFY = {
-    12: 0.0003,    # ~30 m — sub-pixel at z12
-    13: 0.0002,    # ~22 m — 2× coarser, matches new _CFG_SIMPLIFY z13
-    14: 0.00006,   # ~6.7 m — 2× coarser, matches new _CFG_SIMPLIFY z14
     15: 0.000010,  # ~1 m
 }
 
@@ -515,12 +514,17 @@ def load_buildings(pbf_path=None):
             with open(CACHE_PATH, "rb") as f:
                 cached = pickle.load(f)
             # Cache formats:
-            #   2-tuple: (polys, heights)                         — legacy
-            #   3-tuple: (polys, heights, poi_data)               — v2
-            #   4-tuple: (polys, heights, poi_data, simp_polys)   — v3 (current)
+            #   2-tuple: (polys, heights)                                       — legacy
+            #   3-tuple: (polys, heights, poi_data)                             — v2
+            #   4-tuple: (polys, heights, poi_data, simp_polys)                 — v3
+            #   5-tuple: (polys, heights, poi_data, simp_polys, super_blocks)   — v4 (current)
+            poi_data          = None
+            simp_polys        = None
+            super_blocks_data = None
             if isinstance(cached, tuple) and len(cached) >= 3:
                 _buildings_polys, _buildings_heights, poi_data = cached[:3]
-                simp_polys = cached[3] if len(cached) >= 4 else None
+                simp_polys        = cached[3] if len(cached) >= 4 else None
+                super_blocks_data = cached[4] if len(cached) >= 5 else None
                 _buildings_tree = STRtree(_buildings_polys)
                 print(f"Loaded {len(_buildings_polys):,} buildings from cache — ready.")
                 _build_poi_trees(poi_data)
@@ -529,8 +533,16 @@ def load_buildings(pbf_path=None):
                 _buildings_polys, _buildings_heights = cached
                 _buildings_tree = STRtree(_buildings_polys)
                 print("Old cache format — delete buildings_cache.pkl to rebuild with POI data.")
-                simp_polys = None
             _build_simplified_sets(from_cache=simp_polys)
+            _build_super_blocks(from_cache=super_blocks_data)
+            # Migrate old caches by re-saving with the super-block data appended.
+            if super_blocks_data is None and poi_data is not None:
+                print("Re-saving cache with super-block data ...")
+                with open(CACHE_PATH, "wb") as f:
+                    pickle.dump((_buildings_polys, _buildings_heights, poi_data,
+                                 dict(_simplified_polys),
+                                 (_super_blocks, _super_block_heights)), f)
+                print("Cache updated.")
             return
 
     print(f"Parsing buildings from {pbf_path} (first run, will cache) ...")
@@ -575,10 +587,13 @@ def load_buildings(pbf_path=None):
     print(f"Loaded {len(_buildings_polys):,} buildings — spatial index ready.")
     _build_poi_trees(poi_data)
     _build_simplified_sets()   # parallel simplification — populates _simplified_polys
+    _build_super_blocks()      # builds the Static Block Database
 
     print(f"Saving cache to {CACHE_PATH} ...")
     with open(CACHE_PATH, "wb") as f:
-        pickle.dump((_buildings_polys, _buildings_heights, poi_data, dict(_simplified_polys)), f)
+        pickle.dump((_buildings_polys, _buildings_heights, poi_data,
+                     dict(_simplified_polys),
+                     (_super_blocks, _super_block_heights)), f)
     print("Cache saved.")
 
 
@@ -725,85 +740,93 @@ def _geojson_precision(zoom):
 
 
 def _min_building_area(zoom):
-    """Minimum building footprint (deg²).
-    At z≤13 we merge buildings into blocks first, so only degenerate slivers are dropped.
+    """Minimum building footprint (deg²) — used by the per-building (z ≥ 15) pipeline only."""
+    return 5e-9   # ~40 m² — keep everything; visible at street level
+
+
+def _build_super_blocks(from_cache=None):
+    """Build the Static Block Database — data source for the Macro Pipeline.
+
+    All Vienna buildings are buffered (~20 m), unioned into city-block-sized
+    polygons, then partially un-buffered to pull boundaries back near building
+    footprints. Each block stores an area-weighted average member height.
+    Used by zoom ≤ MACRO_ZOOM_THRESHOLD requests instead of per-building merge.
+
+    If from_cache is provided ((blocks, heights) tuple), skip the heavy
+    buffer/union and just rebuild the STRtree (fast). Otherwise build from
+    scratch — costs ~30-90 s once on first run, then persisted in the cache.
     """
-    if zoom >= 15: return 5e-9    # ~40 m²  — everything
-    if zoom == 14: return 1.5e-8  # ~125 m² — skip tiny sheds
-    return 5e-9                   # z≤13 — keep all valid buildings; block-merge handles LOD
+    global _super_blocks, _super_block_heights, _super_block_tree
 
+    if from_cache is not None:
+        blocks, heights = from_cache
+        _super_blocks         = blocks
+        _super_block_heights  = heights
+        _super_block_tree     = STRtree(blocks) if blocks else None
+        print(f"Super-Block DB: {len(_super_blocks):,} blocks loaded from cache.")
+        return
 
-_LOD_BLOCK_BUFFER = _CFG_LOD_BLOCK_BUFFER
+    # Use the z15 simplified set (~1 m) as input — same Macro-level visual
+    # result as raw, but ~3× faster buffer+union due to lower vertex count.
+    src_polys = _simplified_polys.get(15) or _buildings_polys
+    if not src_polys:
+        print("Super-Block DB: no buildings to process, skipping.")
+        return
 
+    print(f"Super-Block DB: building from {len(src_polys):,} buildings ...")
+    t0 = time.time()
 
-def _merge_into_blocks(buildings, buffer_deg):
-    """Merge adjacent buildings into city blocks for low-zoom shadow rendering.
+    buffered = [p.buffer(SUPER_BLOCK_BUFFER) for p in src_polys]
+    print(f"  buffered in {time.time()-t0:.1f}s — unioning ...")
+    t1 = time.time()
+    merged = unary_union(buffered)
+    print(f"  unioned  in {time.time()-t1:.1f}s — finalizing ...")
 
-    Returns list of (merged_poly, avg_height).  Reduces polygon count by ~95%
-    in dense European cities while preserving total shadow mass.
-    """
-    if not buildings:
-        return []
-    polys   = [p for p, _ in buildings]
-    heights = [h for _, h in buildings]
-
-    buffered = [p.buffer(buffer_deg) for p in polys]
-    merged   = unary_union(buffered)
+    # Slight asymmetric un-buffer (small net grow) keeps blocks fused across
+    # streets while pulling boundaries closer to actual building footprints.
+    merged = merged.buffer(-SUPER_BLOCK_BUFFER * 0.5)
     if merged.is_empty:
-        return []
-    merged = merged.buffer(-buffer_deg * 0.5)
-    if merged.is_empty:
-        return []
+        print("Super-Block DB: merge produced empty geometry — skipping.")
+        return
+    merged = merged.simplify(SUPER_BLOCK_SIMPLIFY, preserve_topology=True)
 
-    orig_tree = STRtree(polys)
-    geoms  = list(merged.geoms) if merged.geom_type != 'Polygon' else [merged]
-    result = []
-    for block in geoms:
+    block_geoms = list(merged.geoms) if merged.geom_type != 'Polygon' else [merged]
+
+    # Area-weighted avg height: query original full-detail buildings per block,
+    # weight each member's contribution by its footprint area. Prevents one
+    # garage from dragging an apartment-block's shadow length to nothing.
+    orig_tree = STRtree(_buildings_polys)
+    blocks  = []
+    heights = []
+    for block in block_geoms:
         if block.is_empty:
             continue
         idxs = orig_tree.query(block)
-        block_heights = [heights[i] for i in idxs if not polys[i].disjoint(block)]
-        avg_h = sum(block_heights) / len(block_heights) if block_heights else 10.0
-        result.append((block, avg_h))
-    return result
+        total_area  = 0.0
+        weighted_h  = 0.0
+        for i in idxs:
+            p = _buildings_polys[i]
+            if p.disjoint(block):
+                continue
+            a = p.area
+            total_area += a
+            weighted_h += a * _buildings_heights[i]
+        avg_h = (weighted_h / total_area) if total_area > 0 else DEFAULT_HEIGHT
+        blocks.append(block)
+        heights.append(avg_h)
 
-
-def _prepare_buildings(buildings, zoom):
-    """Apply LOD reduction for the given zoom level.
-
-    z≤13: merge adjacent buildings into city blocks (preserves shadow mass,
-          reduces polygon count from thousands to tens).
-    z≥14: return unchanged.
-    """
-    if zoom >= 14 or not buildings:
-        return buildings
-    buf = _cfg_zoom(_CFG_LOD_BLOCK_BUFFER, zoom)
-    blocks = _merge_into_blocks(buildings, buf)
-    print(f"[LOD] z={zoom}: {len(buildings)} buildings → {len(blocks)} blocks")
-    return blocks
+    _super_blocks         = blocks
+    _super_block_heights  = heights
+    _super_block_tree     = STRtree(blocks) if blocks else None
+    print(f"Super-Block DB: {len(blocks):,} blocks ready in {time.time()-t0:.1f}s total.")
 
 
 def _min_sunlit_area(zoom):
-    """Minimum sunlit patch area (deg²).
-    z15+ uses 3× per zoom step (fine detail preserved).
-    z13 and below uses a steeper 5× curve so only large open areas stay sunny.
-      zoom 19  → ~0.8 m²
-      zoom 18  → ~2 m²
-      zoom 17  → ~7 m²
-      zoom 16  → ~200 m²      — small courtyards visible
-      zoom 15  → ~600 m²
-      zoom 14  → ~1,500 m²
-      zoom 13  → ~7,500 m²    — small squares disappear
-      zoom 12  → ~37,000 m²   — only medium+ parks stay sunny
-      zoom 11  → ~187,000 m²  — large parks only
-      zoom 10  → ~930,000 m²  — major open areas only
+    """Minimum sunlit patch area (deg²) — z ≥ 15 pipeline only.
+    Macro zooms use the constant MACRO_MIN_SUNLIT_AREA instead.
     """
     base = 2e-8   # ~200 m² at z16
-    if zoom >= 14:
-        return max(1e-10, base * (3 ** (16 - zoom)))
-    # Steep 8× curve below z14 — only large open areas stay sunny
-    z14_val = base * (3 ** 2)  # 1.8e-7 ≈ 1,500 m²
-    return max(1e-10, z14_val * (8 ** (14 - zoom)))
+    return max(1e-10, base * (3 ** (16 - zoom)))
 
 
 def _cfg_zoom(cfg, zoom):
@@ -851,6 +874,49 @@ def filter_small_polygons(geom, min_area):
 
 
 # ---------------------------------------------------------------------------
+# Macro pipeline — z ≤ MACRO_ZOOM_THRESHOLD fast path
+# Uses the Static Block Database directly. No per-request merging, no
+# parallel chunking, no l1/l2 erosion. ~150-500 ms cold on full Vienna.
+# ---------------------------------------------------------------------------
+
+def _macro_compute(elevation, azimuth, q_bounds):
+    """Compute the sunlit_filtered geometry for a Macro-zoom request.
+
+    q_bounds is (min_lat, min_lon, max_lat, max_lon) of the area to process.
+    Returns a Polygon/MultiPolygon (the sunlit area), or the bbox itself if
+    no super-blocks intersect.
+    """
+    q_min_lat, q_min_lon, q_max_lat, q_max_lon = q_bounds
+    compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+
+    if _super_block_tree is None or not _super_blocks:
+        return compute_bbox
+
+    idxs = _super_block_tree.query(compute_bbox)
+    blocks = [(_super_blocks[i], _super_block_heights[i])
+              for i in idxs if _super_blocks[i].intersects(compute_bbox)]
+    if not blocks:
+        return compute_bbox
+
+    shadow_parts = []
+    for poly, h in blocks:
+        sh = project_shadow(poly, h, elevation, azimuth)
+        if sh is not None and not sh.is_empty:
+            shadow_parts.append(sh)
+
+    block_polys = [p for p, _ in blocks]
+    merged = unary_union(block_polys + shadow_parts)
+    if not merged.is_valid:
+        merged = merged.buffer(0)
+    merged = merged.simplify(MACRO_SIMPLIFY, preserve_topology=True)
+
+    sunlit          = compute_bbox.difference(merged)
+    sunlit_simple   = sunlit.simplify(MACRO_SIMPLIFY, preserve_topology=True)
+    sunlit_filtered = filter_small_polygons(sunlit_simple, MACRO_MIN_SUNLIT_AREA)
+    return sunlit_filtered, len(blocks)
+
+
+# ---------------------------------------------------------------------------
 # Background pre-warming — compute lower-zoom shadows while user browses
 # ---------------------------------------------------------------------------
 
@@ -875,31 +941,34 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         q_min_lon = lon - vp_w / 2 - vp_w * pad
         q_max_lat = lat + vp_h / 2 + vp_h * pad
         q_max_lon = lon + vp_w / 2 + vp_w * pad
-        compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
 
+        # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
+        if zoom <= MACRO_ZOOM_THRESHOLD:
+            t0 = time.time()
+            sunlit_filtered, n_blocks = _macro_compute(
+                elevation, azimuth,
+                (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
+            )
+            _shadow_cache[ck] = sunlit_filtered
+            if len(_shadow_cache) > MAX_CACHE:
+                _shadow_cache.pop(next(iter(_shadow_cache)))
+            print(f"[prewarm] z={zoom} h={hour} macro | blocks={n_blocks} | {time.time()-t0:.2f}s")
+            return
+
+        # ---------- Per-building pipeline (z ≥ 15) ----------
+        compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
         min_bld_area = _min_building_area(zoom)
         buildings = [(p, h) for p, h in
                      get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                      if p.area >= min_bld_area]
-        # Cap prewarm building count — z12/z13 with 8× viewport can return thousands
-        # of buildings; unary_union on them takes 30+ s and starves the server.
-        _prewarm_max_bld = {12: 400, 13: 600, 14: 1000}
-        cap = _prewarm_max_bld.get(zoom, 2000)
-        if len(buildings) > cap:
-            print(f"[prewarm] z={zoom} skipped — {len(buildings)} buildings > cap {cap}")
-            return
-        buildings = _prepare_buildings(buildings, zoom)
 
         def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
         with ThreadPoolExecutor(max_workers=3) as ex:
             all_shadows = list(ex.map(_proj, buildings))
 
-        if zoom >= 15:
-            tall_geoms = [sh for (_, h), sh in zip(buildings, all_shadows)
-                          if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
-            occluder_union = parallel_union(tall_geoms) if tall_geoms else None
-        else:
-            occluder_union = None
+        tall_geoms = [sh for (_, h), sh in zip(buildings, all_shadows)
+                      if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
+        occluder_union = parallel_union(tall_geoms) if tall_geoms else None
 
         shadow_parts = []
         for (poly, h), sh in zip(buildings, all_shadows):
@@ -922,11 +991,8 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
         sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-        if zoom >= 14:
-            e1, e2 = _shadow_erosion_steps(zoom)
-            _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
-        else:
-            _shadow_cache[ck] = sunlit_filtered
+        e1, e2 = _shadow_erosion_steps(zoom)
+        _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
         if len(_shadow_cache) > MAX_CACHE:
             _shadow_cache.pop(next(iter(_shadow_cache)))
         print(f"[prewarm] z={zoom} h={hour} cached")
@@ -1007,35 +1073,75 @@ def shadow():
             resp.headers['Cache-Control'] = 'public, max-age=3600'
             return resp
 
-        ck  = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
+        ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
-        def _unpack_cache(entry, zoom):
+        # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
+        if zoom <= MACRO_ZOOM_THRESHOLD:
+            if ck in _shadow_cache:
+                cached = _shadow_cache[ck]
+                sunlit_filtered = cached[0] if isinstance(cached, tuple) else cached
+                print(f"{now.strftime('%H:%M')} | CACHE HIT | z={zoom} macro | elev={elevation:.1f}")
+            else:
+                if None not in (min_lat, min_lon, max_lat, max_lon):
+                    q_bounds = (min_lat, min_lon, max_lat, max_lon)
+                else:
+                    q_bounds = (lat - 0.01, lon - 0.01, lat + 0.01, lon + 0.01)
+                t0 = time.time()
+                sunlit_filtered, n_blocks = _macro_compute(elevation, azimuth, q_bounds)
+                _shadow_cache[ck] = sunlit_filtered
+                if len(_shadow_cache) > MAX_CACHE:
+                    _shadow_cache.pop(next(iter(_shadow_cache)))
+                print(f"{now.strftime('%H:%M')} | z={zoom} macro | blocks={n_blocks} | {time.time()-t0:.2f}s")
+
+            _prec     = _geojson_precision(zoom)
+            shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+            features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
+                          "properties": {"layer": "shadow-l0"}}]
+            body = json.dumps({
+                "time":      now.strftime("%H:%M"),
+                "elevation": elevation,
+                "azimuth":   azimuth,
+                "dark_area": {"type": "FeatureCollection", "features": features},
+            }).encode('utf-8')
+            if 'gzip' in request.headers.get('Accept-Encoding', ''):
+                body = _gzip.compress(body, compresslevel=6)
+                resp = Response(body, 200, content_type='application/json')
+                resp.headers['Content-Encoding'] = 'gzip'
+            else:
+                resp = Response(body, 200, content_type='application/json')
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            return resp
+
+        # ---------- Per-building pipeline (z ≥ 15) ----------
+        def _unpack_cache(entry):
             if isinstance(entry, tuple):
                 return entry  # (sunlit_filtered, buf_e1, buf_e2)
             return (entry, None, None)
 
+        _cb1 = _cb2 = None
+        sunlit_filtered = None
+
         if ck in _shadow_cache:
-            sunlit_filtered, _cb1, _cb2 = _unpack_cache(_shadow_cache[ck], zoom)
+            sunlit_filtered, _cb1, _cb2 = _unpack_cache(_shadow_cache[ck])
             print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
-        else:
+        elif zoom >= 16:
             # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
             # The z15 geometry covers a larger bbox than z16, so it is always a
-            # superset of what z16 needs.  The reverse is NEVER safe: reusing a
-            # smaller-bbox z15 result for a larger-viewport z13 request would
-            # return a postage-stamp-sized shadow that covers only the old z15
-            # bounding box and leaves the rest of the z13 viewport empty.
-            if zoom >= 16:
-                z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
-                if z15_ck in _shadow_cache:
-                    z15_sunlit, _, _ = _unpack_cache(_shadow_cache[z15_ck], 15)
-                    sunlit_filtered = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
-                    e1, e2 = _shadow_erosion_steps(zoom)
-                    _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
-                    _cb1 = _shadow_cache[ck][1]; _cb2 = _shadow_cache[ck][2]
-                    print(f"{now.strftime('%H:%M')} | CACHE HIT (z15→z{zoom} reuse) | elev={elevation:.1f}")
+            # superset of what z16 needs. The reverse is NEVER safe: reusing a
+            # smaller-bbox z15 result for a larger-viewport z14 request would
+            # return a postage-stamp-sized shadow.
+            z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
+            if z15_ck in _shadow_cache:
+                z15_sunlit, _, _ = _unpack_cache(_shadow_cache[z15_ck])
+                sunlit_filtered = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
+                e1, e2 = _shadow_erosion_steps(zoom)
+                _cb1 = sunlit_filtered.buffer(e1)
+                _cb2 = sunlit_filtered.buffer(e2)
+                _shadow_cache[ck] = (sunlit_filtered, _cb1, _cb2)
+                print(f"{now.strftime('%H:%M')} | CACHE HIT (z15→z{zoom} reuse) | elev={elevation:.1f}")
 
-        if ck not in _shadow_cache:
-            # Use the full viewport — no artificial cap
+        if sunlit_filtered is None:
+            # Cold compute (per-building pipeline)
             if None not in (min_lat, min_lon, max_lat, max_lon):
                 q_min_lat, q_min_lon = min_lat, min_lon
                 q_max_lat, q_max_lon = max_lat, max_lon
@@ -1048,7 +1154,6 @@ def shadow():
             buildings     = [(p, h) for p, h in
                              get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
                              if p.area >= min_bld_area]
-            buildings = _prepare_buildings(buildings, zoom)
 
             def _project(args):
                 poly, height = args
@@ -1057,17 +1162,12 @@ def shadow():
             with ThreadPoolExecutor(max_workers=3) as ex:
                 all_shadows = list(ex.map(_project, buildings))
 
-            # Self-occlusion: build union of shadows from tall buildings (occluders),
-            # then skip shorter buildings whose centroid is already in that shadow.
-            # Skip at zoom < 15 — not perceptible and saves union time at z14.
-            if zoom >= 15:
-                tall_shadow_geoms = [
-                    sh for (_, h), sh in zip(buildings, all_shadows)
-                    if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
-                ]
-                occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
-            else:
-                occluder_union = None
+            # Self-occlusion: skip short buildings whose centroid is in a tall building's shadow.
+            tall_shadow_geoms = [
+                sh for (_, h), sh in zip(buildings, all_shadows)
+                if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
+            ]
+            occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
 
             shadow_parts = []
             for (poly, h), sh in zip(buildings, all_shadows):
@@ -1076,7 +1176,7 @@ def shadow():
                 if (h < OCCLUDER_HEIGHT
                         and occluder_union is not None
                         and occluder_union.covers(poly.centroid)):
-                    continue  # building is in shadow — skip its projection
+                    continue
                 shadow_parts.append(sh)
 
             t0 = time.time()
@@ -1096,14 +1196,10 @@ def shadow():
             sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
             sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-            if zoom >= 14:
-                e1, e2 = _shadow_erosion_steps(zoom)
-                _cb1 = sunlit_filtered.buffer(e1)
-                _cb2 = sunlit_filtered.buffer(e2)
-                _shadow_cache[ck] = (sunlit_filtered, _cb1, _cb2)
-            else:
-                _cb1 = _cb2 = None
-                _shadow_cache[ck] = sunlit_filtered
+            e1, e2 = _shadow_erosion_steps(zoom)
+            _cb1 = sunlit_filtered.buffer(e1)
+            _cb2 = sunlit_filtered.buffer(e2)
+            _shadow_cache[ck] = (sunlit_filtered, _cb1, _cb2)
             if len(_shadow_cache) > MAX_CACHE:
                 _shadow_cache.pop(next(iter(_shadow_cache)))
 
@@ -1114,7 +1210,7 @@ def shadow():
         shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
         features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                       "properties": {"layer": "shadow-l0"}}]
-        if zoom >= 14 and _cb1 is not None:
+        if _cb1 is not None:
             try:    shadow_l1 = orient(viewport_bbox.difference(_cb1), sign=1.0)
             except: shadow_l1 = shadow_l0
             try:    shadow_l2 = orient(viewport_bbox.difference(_cb2), sign=1.0)
@@ -1226,131 +1322,148 @@ def shadow_stream():
                     return entry
                 return (entry, None, None)
 
-            # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
-            # NEVER allow zoom-OUT reuse (e.g. z15 → z13): the cached geometry
-            # covers only the smaller z15 bbox and would create a postage-stamp
-            # artifact where shadow appears only in the old z15 bounding box.
-            if zoom >= 16:
-                z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
-                if z15_ck in _shadow_cache:
-                    z15_sunlit, _, _ = _unpack_sse(_shadow_cache[z15_ck])
-                    sf = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
-                    e1, e2 = _shadow_erosion_steps(zoom)
-                    _shadow_cache[ck] = (sf, sf.buffer(e1), sf.buffer(e2))
-                    yield _evt(90, "Cached (z15 reuse)")
+            # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
+            if zoom <= MACRO_ZOOM_THRESHOLD:
+                if ck in _shadow_cache:
+                    cached = _shadow_cache[ck]
+                    sunlit_filtered = cached[0] if isinstance(cached, tuple) else cached
+                    yield _evt(90, "Cached")
+                else:
+                    yield _evt(20, "Macro pipeline")
+                    t0 = time.time()
+                    sunlit_filtered, n_blocks = _macro_compute(
+                        elevation, azimuth,
+                        (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
+                    )
+                    _shadow_cache[ck] = sunlit_filtered
+                    if len(_shadow_cache) > MAX_CACHE:
+                        _shadow_cache.pop(next(iter(_shadow_cache)))
+                    yield _evt(90, f"Macro done ({n_blocks} blocks, {time.time()-t0:.2f}s)")
 
-            if ck not in _shadow_cache:
-                compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-                min_bld_area = _min_building_area(zoom)
-                raw_buildings = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                buildings = []
-                for p, h in raw_buildings:
-                    if p is None or p.is_empty:
-                        continue
-                    if not p.is_valid:
-                        p = p.buffer(0)
-                    if p is not None and not p.is_empty and p.area >= min_bld_area:
-                        buildings.append((p, h))
-                buildings = _prepare_buildings(buildings, zoom)
-                n = len(buildings)
+                _prec     = _geojson_precision(zoom)
+                shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+                features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
+                              "properties": {"layer": "shadow-l0"}}]
+            else:
+                # ---------- Per-building pipeline (z ≥ 15) ----------
+                # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
+                # NEVER allow zoom-OUT reuse (e.g. z15 → z13): the cached geometry
+                # covers only the smaller z15 bbox and would create a postage-stamp
+                # artifact where shadow appears only in the old z15 bounding box.
+                if zoom >= 16 and ck not in _shadow_cache:
+                    z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
+                    if z15_ck in _shadow_cache:
+                        z15_sunlit, _, _ = _unpack_sse(_shadow_cache[z15_ck])
+                        sf = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
+                        e1, e2 = _shadow_erosion_steps(zoom)
+                        _shadow_cache[ck] = (sf, sf.buffer(e1), sf.buffer(e2))
+                        yield _evt(90, "Cached (z15 reuse)")
 
-                yield _evt(15, f"Projecting {n} buildings")
+                if ck not in _shadow_cache:
+                    compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+                    min_bld_area = _min_building_area(zoom)
+                    raw_buildings = get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+                    buildings = []
+                    for p, h in raw_buildings:
+                        if p is None or p.is_empty:
+                            continue
+                        if not p.is_valid:
+                            p = p.buffer(0)
+                        if p is not None and not p.is_empty and p.area >= min_bld_area:
+                            buildings.append((p, h))
+                    n = len(buildings)
 
-                all_shadows = [None] * n
-                with ThreadPoolExecutor(max_workers=3) as ex:
-                    future_to_idx = {
-                        ex.submit(project_shadow, poly, height, elevation, azimuth): i
-                        for i, (poly, height) in enumerate(buildings)
-                    }
-                    done, last_pct = 0, 15
-                    for fut in as_completed(future_to_idx):
-                        idx = future_to_idx[fut]
-                        try:    all_shadows[idx] = fut.result()
-                        except: all_shadows[idx] = None
-                        done += 1
-                        pct = 15 + int(45 * done / max(n, 1))
-                        if pct >= last_pct + 5:
-                            last_pct = pct
-                            yield _evt(pct, f"Shadows {done}/{n}")
+                    yield _evt(15, f"Projecting {n} buildings")
 
-                yield _evt(60, "Merging geometry")
+                    all_shadows = [None] * n
+                    with ThreadPoolExecutor(max_workers=3) as ex:
+                        future_to_idx = {
+                            ex.submit(project_shadow, poly, height, elevation, azimuth): i
+                            for i, (poly, height) in enumerate(buildings)
+                        }
+                        done, last_pct = 0, 15
+                        for fut in as_completed(future_to_idx):
+                            idx = future_to_idx[fut]
+                            try:    all_shadows[idx] = fut.result()
+                            except: all_shadows[idx] = None
+                            done += 1
+                            pct = 15 + int(45 * done / max(n, 1))
+                            if pct >= last_pct + 5:
+                                last_pct = pct
+                                yield _evt(pct, f"Shadows {done}/{n}")
 
-                if zoom >= 15:
+                    yield _evt(60, "Merging geometry")
+
                     tall_shadow_geoms = [
                         sh for (_, h), sh in zip(buildings, all_shadows)
                         if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
                     ]
                     occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
-                else:
-                    occluder_union = None
 
-                shadow_parts = []
-                for (poly, h), sh in zip(buildings, all_shadows):
-                    if sh is None or sh.is_empty:
-                        continue
-                    if (h < OCCLUDER_HEIGHT
-                            and occluder_union is not None
-                            and occluder_union.covers(poly.centroid)):
-                        continue
-                    shadow_parts.append(sh)
+                    shadow_parts = []
+                    for (poly, h), sh in zip(buildings, all_shadows):
+                        if sh is None or sh.is_empty:
+                            continue
+                        if (h < OCCLUDER_HEIGHT
+                                and occluder_union is not None
+                                and occluder_union.covers(poly.centroid)):
+                            continue
+                        shadow_parts.append(sh)
 
-                yield _evt(70, "Unioning shadows")
+                    yield _evt(70, "Unioning shadows")
 
-                building_polys = [p for p, _ in buildings]
-                all_parts = building_polys + shadow_parts
-                if all_parts:
-                    merged = parallel_union(all_parts)
-                    gfill  = _gap_fill(zoom)
-                    stol   = _simplify_tolerance(zoom)
-                    if merged is not None and not merged.is_empty:
-                        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-                        if not merged.is_valid:
-                            merged = merged.buffer(0)
-                        merged = merged.simplify(stol, preserve_topology=True)
-                        try:
-                            sunlit = compute_bbox.difference(merged)
-                        except Exception:
+                    building_polys = [p for p, _ in buildings]
+                    all_parts = building_polys + shadow_parts
+                    if all_parts:
+                        merged = parallel_union(all_parts)
+                        gfill  = _gap_fill(zoom)
+                        stol   = _simplify_tolerance(zoom)
+                        if merged is not None and not merged.is_empty:
+                            merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                            if not merged.is_valid:
+                                merged = merged.buffer(0)
+                            merged = merged.simplify(stol, preserve_topology=True)
+                            try:
+                                sunlit = compute_bbox.difference(merged)
+                            except Exception:
+                                sunlit = compute_bbox
+                        else:
                             sunlit = compute_bbox
                     else:
                         sunlit = compute_bbox
-                else:
-                    sunlit = compute_bbox
 
-                yield _evt(85, "Simplifying")
+                    yield _evt(85, "Simplifying")
 
-                stol            = _simplify_tolerance(zoom)
-                sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
-                sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+                    stol            = _simplify_tolerance(zoom)
+                    sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+                    sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-                if zoom >= 14:
                     e1, e2 = _shadow_erosion_steps(zoom)
                     _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
+                    if len(_shadow_cache) > MAX_CACHE:
+                        _shadow_cache.pop(next(iter(_shadow_cache)))
                 else:
-                    _shadow_cache[ck] = sunlit_filtered
-                if len(_shadow_cache) > MAX_CACHE:
-                    _shadow_cache.pop(next(iter(_shadow_cache)))
-            else:
-                yield _evt(90, "Cached")
+                    yield _evt(90, "Cached")
 
-            yield _evt(90, "Building response")
+                yield _evt(90, "Building response")
 
-            sunlit_filtered, _sb1, _sb2 = _unpack_sse(_shadow_cache[ck])
+                sunlit_filtered, _sb1, _sb2 = _unpack_sse(_shadow_cache[ck])
 
-            _prec     = _geojson_precision(zoom)
-            shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
-            features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
-                          "properties": {"layer": "shadow-l0"}}]
-            if zoom >= 14 and _sb1 is not None:
-                try:    shadow_l1 = orient(viewport_bbox.difference(_sb1), sign=1.0)
-                except: shadow_l1 = shadow_l0
-                try:    shadow_l2 = orient(viewport_bbox.difference(_sb2), sign=1.0)
-                except: shadow_l2 = shadow_l1
-                features += [
-                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
-                     "properties": {"layer": "shadow-l1"}},
-                    {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
-                     "properties": {"layer": "shadow-l2"}},
-                ]
+                _prec     = _geojson_precision(zoom)
+                shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
+                features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
+                              "properties": {"layer": "shadow-l0"}}]
+                if _sb1 is not None:
+                    try:    shadow_l1 = orient(viewport_bbox.difference(_sb1), sign=1.0)
+                    except: shadow_l1 = shadow_l0
+                    try:    shadow_l2 = orient(viewport_bbox.difference(_sb2), sign=1.0)
+                    except: shadow_l2 = shadow_l1
+                    features += [
+                        {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
+                         "properties": {"layer": "shadow-l1"}},
+                        {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
+                         "properties": {"layer": "shadow-l2"}},
+                    ]
 
             sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
 
@@ -1899,44 +2012,47 @@ def find_sunny_spots():
                     q_min_lat, q_min_lon = lat - 0.012, lon - 0.012
                     q_max_lat, q_max_lon = lat + 0.012, lon + 0.012
 
-                compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-                min_bld_area = _min_building_area(zoom)
-                buildings    = [(p, h) for p, h in
-                                get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                                if p.area >= min_bld_area]
-                buildings = _prepare_buildings(buildings, zoom)
+                z_int = int(zoom)
+                if z_int <= MACRO_ZOOM_THRESHOLD:
+                    sunlit_filtered, _ = _macro_compute(
+                        elevation, azimuth,
+                        (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
+                    )
+                else:
+                    compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+                    min_bld_area = _min_building_area(z_int)
+                    buildings    = [(p, h) for p, h in
+                                    get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=z_int)
+                                    if p.area >= min_bld_area]
 
-                def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
-                with ThreadPoolExecutor(max_workers=3) as ex:
-                    all_shadows = list(ex.map(_proj, buildings))
+                    def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
+                    with ThreadPoolExecutor(max_workers=3) as ex:
+                        all_shadows = list(ex.map(_proj, buildings))
 
-                if zoom >= 15:
                     tall = [sh for (_, h), sh in zip(buildings, all_shadows)
                             if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
                     occluder_union = parallel_union(tall) if tall else None
-                else:
-                    occluder_union = None
 
-                shadow_parts = []
-                for (poly, h), sh in zip(buildings, all_shadows):
-                    if sh is None or sh.is_empty: continue
-                    if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
-                    shadow_parts.append(sh)
+                    shadow_parts = []
+                    for (poly, h), sh in zip(buildings, all_shadows):
+                        if sh is None or sh.is_empty: continue
+                        if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
+                        shadow_parts.append(sh)
 
-                all_parts = [p for p, _ in buildings] + shadow_parts
-                if all_parts:
-                    merged = parallel_union(all_parts)
-                    gfill  = _gap_fill(zoom)
-                    stol   = _simplify_tolerance(zoom)
-                    merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-                    merged = merged.simplify(stol, preserve_topology=True)
-                    sunlit = compute_bbox.difference(merged)
-                else:
-                    sunlit = compute_bbox
+                    all_parts = [p for p, _ in buildings] + shadow_parts
+                    if all_parts:
+                        merged = parallel_union(all_parts)
+                        gfill  = _gap_fill(z_int)
+                        stol   = _simplify_tolerance(z_int)
+                        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+                        merged = merged.simplify(stol, preserve_topology=True)
+                        sunlit = compute_bbox.difference(merged)
+                    else:
+                        sunlit = compute_bbox
 
-                stol            = _simplify_tolerance(zoom)
-                sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
-                sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+                    stol            = _simplify_tolerance(z_int)
+                    sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+                    sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(z_int))
                 _shadow_cache[ck] = sunlit_filtered
                 if len(_shadow_cache) > MAX_CACHE:
                     _shadow_cache.pop(next(iter(_shadow_cache)))
@@ -2111,38 +2227,17 @@ def heatmap():
     if elevation <= 0:
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
-    compute_bbox = shapely_box(min_lon, min_lat, max_lon, max_lat)
-    min_bld_area = _min_building_area(zoom)
-    buildings    = [(p, h) for p, h in
-                    get_buildings_for_viewport(min_lat, min_lon, max_lat, max_lon, zoom=zoom)
-                    if p.area >= min_bld_area]
-    buildings = _prepare_buildings(buildings, zoom)
-
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        all_shadows = list(ex.map(
-            lambda args: project_shadow(args[0], args[1], elevation, azimuth),
-            buildings,
-        ))
-
-    shadow_parts = [sh for sh in all_shadows if sh and not sh.is_empty]
-    all_parts    = [p for p, _ in buildings] + shadow_parts
-
-    if all_parts:
-        merged = parallel_union(all_parts)
-        gfill  = _gap_fill(zoom)
-        stol   = _simplify_tolerance(zoom)
-        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-        merged = merged.simplify(stol, preserve_topology=True)
-        sunlit = compute_bbox.difference(merged)
-    else:
-        sunlit = compute_bbox
+    # Heatmap is always Macro (zoom clamped to 12 above) — single fast path.
+    sunlit, _ = _macro_compute(
+        elevation, azimuth,
+        (min_lat, min_lon, max_lat, max_lon),
+    )
 
     if not sunlit or sunlit.is_empty:
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
-    stol     = _simplify_tolerance(zoom) * 2
-    sunlit   = sunlit.simplify(stol, preserve_topology=True)
-    polys    = sunlit.geoms if hasattr(sunlit, 'geoms') else [sunlit]
+    sunlit = sunlit.simplify(MACRO_SIMPLIFY * 2, preserve_topology=True)
+    polys  = sunlit.geoms if hasattr(sunlit, 'geoms') else [sunlit]
     features = [
         {'type': 'Feature', 'geometry': mapping(g), 'properties': {}}
         for g in polys if not g.is_empty
