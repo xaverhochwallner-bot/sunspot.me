@@ -76,7 +76,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                _shadowLayersReady = false;
   int                 _lastFetchZoom     = -1;
 
-  // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3'
+  // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3_lonSpan'
+  // zoom is the INTEGER camera zoom; lonSpan prevents reusing data at a different viewport size.
+  // A cached result for z15 is NEVER returned for a z13 lookup (different key).
   final Map<String, Map<String, dynamic>> _shadowResultCache = {};
   static const int _shadowCacheMax = 50;
 
@@ -341,7 +343,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_searchMarkerPos != null) _refreshSearchMarkerPosition();
     _bgPreloading = false;
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 600), fetchShadows);
+    // When zoom changes significantly (> 0.5 levels), use a very short debounce so
+    // stale shadow data from the previous zoom is not shown for a full 600 ms.
+    final zoomDelta = _lastFetchZoom >= 0 ? (zoom - _lastFetchZoom).abs() : 0.0;
+    final debounceMs = zoomDelta > 0.5 ? 100 : 600;
+    _debounceTimer = Timer(Duration(milliseconds: debounceMs), fetchShadows);
   }
 
   void _onMapClick(Point<double> point, LatLng coordinates) {
@@ -1873,7 +1879,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
-    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).round();
+    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).toInt();
     final bounds = await _mapController!.getVisibleRegion();
     final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
     final start  = (_sunriseHour ?? 6.0).toInt();
@@ -1927,7 +1933,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     Future.microtask(() async {
       try {
         if (!_mapReady || _mapController == null) return;
-        final zoom    = (_mapController!.cameraPosition?.zoom ?? 14).round();
+        // Use toInt() to match fetchShadows — round() can snap to a different
+        // zoom integer and produce cache keys that are never hit by the main fetch.
+        final zoom    = (_mapController!.cameraPosition?.zoom ?? 14).toInt();
         final bounds  = await _mapController!.getVisibleRegion();
         final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
         final start   = (_sunriseHour ?? 6.0).toInt();

@@ -976,8 +976,12 @@ def shadow():
             sunlit_filtered = _shadow_cache[ck]
             print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
         else:
-            # Cross-zoom reuse: z16+ can reuse a z15 cache entry (same shadow geometry,
-            # just filter out the smallest patches for the finer zoom level)
+            # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
+            # The z15 geometry covers a larger bbox than z16, so it is always a
+            # superset of what z16 needs.  The reverse is NEVER safe: reusing a
+            # smaller-bbox z15 result for a larger-viewport z13 request would
+            # return a postage-stamp-sized shadow that covers only the old z15
+            # bounding box and leaves the rest of the z13 viewport empty.
             if zoom >= 16:
                 z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
                 if z15_ck in _shadow_cache:
@@ -1174,7 +1178,10 @@ def shadow_stream():
 
             ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
-            # Cross-zoom reuse: z16+ can reuse a z15 cache entry
+            # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
+            # NEVER allow zoom-OUT reuse (e.g. z15 → z13): the cached geometry
+            # covers only the smaller z15 bbox and would create a postage-stamp
+            # artifact where shadow appears only in the old z15 bounding box.
             if zoom >= 16:
                 z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
                 if z15_ck in _shadow_cache:
