@@ -749,7 +749,7 @@ def _prepare_buildings(buildings, zoom):
     """
     if zoom >= 14 or not buildings:
         return buildings
-    buf = _LOD_BLOCK_BUFFER.get(zoom, 0.000020)
+    buf = _cfg_zoom(_CFG_LOD_BLOCK_BUFFER, zoom)
     blocks = _merge_into_blocks(buildings, buf)
     print(f"[LOD] z={zoom}: {len(buildings)} buildings → {len(blocks)} blocks")
     return blocks
@@ -778,8 +778,14 @@ def _min_sunlit_area(zoom):
     return max(1e-10, z14_val * (8 ** (14 - zoom)))
 
 
+def _cfg_zoom(cfg, zoom):
+    """Return cfg value for zoom, clamped to [min_key, max_key] — no z11 blowup at z18+."""
+    keys = sorted(cfg)
+    return cfg[max(keys[0], min(keys[-1], zoom))]
+
+
 def _simplify_tolerance(zoom):
-    return _CFG_SIMPLIFY.get(zoom, _CFG_SIMPLIFY[11])
+    return _cfg_zoom(_CFG_SIMPLIFY, zoom)
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
@@ -798,11 +804,11 @@ def _get_sunrise_sunset(lat, lon, now, tz):
 
 
 def _gap_fill(zoom):
-    return _CFG_GAP_FILL.get(zoom, _CFG_GAP_FILL[11])
+    return _cfg_zoom(_CFG_GAP_FILL, zoom)
 
 
 def _shadow_erosion_steps(zoom):
-    return _CFG_EROSION.get(zoom, _CFG_EROSION[11])
+    return _cfg_zoom(_CFG_EROSION, zoom)
 
 
 def filter_small_polygons(geom, min_area):
