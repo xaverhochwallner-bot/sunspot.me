@@ -85,6 +85,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Panel
   bool _panelOpen = true;
   bool _panelExpanded = false;
+  bool _panelHidden = false;
 
   // Live mode
   bool   _liveMode  = false;
@@ -971,7 +972,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _detailReturnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
     final lat = spot['lat'] as double;
     final lon = spot['lon'] as double;
-    if (_panelExpanded) setState(() => _panelExpanded = false);
+    if (_panelExpanded || _panelHidden) setState(() { _panelExpanded = false; _panelHidden = false; });
     _suppressResultClear = true;
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
     final key          = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
@@ -2492,7 +2493,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ? LayoutBuilder(builder: (ctx, constraints) {
               final totalH     = constraints.maxHeight;
               const collapsedH = 256.0;
-              final bottomH    = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
+              final safeBottom = MediaQuery.of(ctx).padding.bottom;
+              final hiddenH    = 24.0 + 1.0 + 56.0 + safeBottom; // handle + divider + tabbar
+              final bottomH    = keyboardOpen ? 57.0 : (_panelHidden ? hiddenH : (_panelExpanded ? totalH : collapsedH));
               final mapH       = totalH - bottomH;
               return Column(children: [
                 AnimatedContainer(
@@ -3890,9 +3893,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         child: Column(
           children: [
             if (!keyboardOpen) ...[
-              // Expand/collapse handle
+              // Expand/collapse/hide handle
               GestureDetector(
-                onTap: () => setState(() => _panelExpanded = !_panelExpanded),
+                onTap: () => setState(() {
+                  if (_panelHidden) {
+                    _panelHidden = false;
+                    _panelExpanded = false;
+                  } else if (_panelExpanded) {
+                    _panelExpanded = false;
+                    _panelHidden = true;
+                  } else {
+                    _panelExpanded = true;
+                  }
+                }),
                 behavior: HitTestBehavior.opaque,
                 child: SizedBox(
                   height: 24,
@@ -3907,23 +3920,24 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ),
                 ),
               ),
-              // Content area
-              Expanded(
-                child: ShaderMask(
-                  shaderCallback: (bounds) => LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
-                    stops: const [0.0, 0.75, 1.0],
-                  ).createShader(bounds),
-                  blendMode: BlendMode.dstIn,
-                  child: SingleChildScrollView(
-                    controller: _mobileContentScroll,
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                    child: _buildMobileTabContent(),
+              // Content area — hidden when panel is slid away
+              if (!_panelHidden)
+                Expanded(
+                  child: ShaderMask(
+                    shaderCallback: (bounds) => LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
+                      stops: const [0.0, 0.75, 1.0],
+                    ).createShader(bounds),
+                    blendMode: BlendMode.dstIn,
+                    child: SingleChildScrollView(
+                      controller: _mobileContentScroll,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                      child: _buildMobileTabContent(),
+                    ),
                   ),
                 ),
-              ),
             ],
             // Tab bar
             Divider(height: 1, color: Colors.grey.shade200),
@@ -3947,7 +3961,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         }
                         _spotsSearchGen++; _poisSearchGen++;
                         _searchController.clear();
-                        setState(() { _mobileTab = i; _panelExpanded = false; _selectedSpot = null; _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
+                        setState(() { _mobileTab = i; _panelExpanded = false; _panelHidden = false; _selectedSpot = null; _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
