@@ -207,9 +207,9 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 _CFG_GAP_FILL = {
     17: 0.000014,  # ~1.5 m net
     16: 0.000020,  # ~2 m net
-    15: 0.000060,  # ~7 m net  — closes Zinshaus gaps, kills the labyrinth
-    14: 0.000130,  # ~15 m net — merges streets into block masses (block-merge active here)
-    13: 0.000150,  # ~17 m net — large block masses
+    15: 0.000018,  # ~2 m net  — keep buildings separate
+    14: 0.000055,  # ~6 m net  (2× — closes narrow streets, unifies block shadows)
+    13: 0.000084,  # ~9 m net  (2× — merges buildings into city-block masses)
     12: 0.000065,  # ~10 m net
     11: 0.000100,  # ~15 m net — z11 and below
 }
@@ -220,9 +220,9 @@ _CFG_SIMPLIFY = {
     18: 0.000005,  # ~0.5 m
     17: 0.000010,  # ~1 m
     16: 0.000020,  # ~2 m
-    15: 0.000060,  # ~7 m  — macro-level detail; vertex count destroyed
-    14: 0.000180,  # ~20 m — block silhouettes only
-    13: 0.000300,  # ~33 m — pure mass shadows
+    15: 0.000025,  # ~2.5 m
+    14: 0.000080,  # ~9 m  (2× — smaller payload, still crisp on screen)
+    13: 0.000160,  # ~18 m (2× — block-level shadows at city-overview zoom)
     12: 0.000150,  # ~17 m
     11: 0.000200,  # ~22 m — z11 and below
 }
@@ -240,15 +240,15 @@ _CFG_EROSION = {
 }
 
 # Buffer distance (deg) to bridge digitisation gaps between adjacent buildings
-# at low zoom before block-merge LOD (z11-z14).
-_CFG_LOD_BLOCK_BUFFER = {14: 0.000040, 13: 0.000060, 12: 0.000030, 11: 0.000030}
+# at low zoom before block-merge LOD (z11-z13 only).
+_CFG_LOD_BLOCK_BUFFER = {13: 0.000020, 12: 0.000030, 11: 0.000030}
 
 # Pre-simplification of raw OSM building polygons at startup (deg).
 # Reduces vertex count before STRtree indexing; invisible at each zoom.
 PRE_SIMPLIFY = {
     12: 0.0003,    # ~30 m — sub-pixel at z12
-    13: 0.0002,    # ~22 m — sub-pixel at z13
-    14: 0.00012,   # ~13 m — halves vertex count before unary_union; critical for block-merge at z14
+    13: 0.0002,    # ~22 m — 2× coarser, matches new _CFG_SIMPLIFY z13
+    14: 0.00006,   # ~6.7 m — 2× coarser, matches new _CFG_SIMPLIFY z14
     15: 0.000010,  # ~1 m
 }
 
@@ -771,11 +771,11 @@ def _merge_into_blocks(buildings, buffer_deg):
 def _prepare_buildings(buildings, zoom):
     """Apply LOD reduction for the given zoom level.
 
-    z≤14: merge adjacent buildings into city blocks (preserves shadow mass,
+    z≤13: merge adjacent buildings into city blocks (preserves shadow mass,
           reduces polygon count from thousands to tens).
-    z≥15: return unchanged.
+    z≥14: return unchanged.
     """
-    if zoom >= 15 or not buildings:
+    if zoom >= 14 or not buildings:
         return buildings
     buf = _cfg_zoom(_CFG_LOD_BLOCK_BUFFER, zoom)
     blocks = _merge_into_blocks(buildings, buf)
@@ -922,7 +922,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
         sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-        if zoom >= 15:
+        if zoom >= 14:
             e1, e2 = _shadow_erosion_steps(zoom)
             _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
         else:
@@ -1096,7 +1096,7 @@ def shadow():
             sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
             sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-            if zoom >= 15:
+            if zoom >= 14:
                 e1, e2 = _shadow_erosion_steps(zoom)
                 _cb1 = sunlit_filtered.buffer(e1)
                 _cb2 = sunlit_filtered.buffer(e2)
@@ -1114,7 +1114,7 @@ def shadow():
         shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
         features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                       "properties": {"layer": "shadow-l0"}}]
-        if zoom >= 15 and _cb1 is not None:
+        if zoom >= 14 and _cb1 is not None:
             try:    shadow_l1 = orient(viewport_bbox.difference(_cb1), sign=1.0)
             except: shadow_l1 = shadow_l0
             try:    shadow_l2 = orient(viewport_bbox.difference(_cb2), sign=1.0)
@@ -1322,7 +1322,7 @@ def shadow_stream():
                 sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
                 sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
 
-                if zoom >= 15:
+                if zoom >= 14:
                     e1, e2 = _shadow_erosion_steps(zoom)
                     _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
                 else:
@@ -1340,7 +1340,7 @@ def shadow_stream():
             shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
             features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
                           "properties": {"layer": "shadow-l0"}}]
-            if zoom >= 15 and _sb1 is not None:
+            if zoom >= 14 and _sb1 is not None:
                 try:    shadow_l1 = orient(viewport_bbox.difference(_sb1), sign=1.0)
                 except: shadow_l1 = shadow_l0
                 try:    shadow_l2 = orient(viewport_bbox.difference(_sb2), sign=1.0)
