@@ -2431,27 +2431,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ),
 
 
-        // GPS button — bottom-right (hidden when keyboard open on mobile)
-        if (!keyboardOpen)
+        // GPS button — bottom-left on mobile (above floating panel), bottom-right on desktop
+        if (!keyboardOpen && (!isMobile || !_panelExpanded))
           Positioned(
-            bottom: 16, right: 16,
-            child: Listener(
-              behavior: HitTestBehavior.opaque,
-              onPointerDown: (_) => _setMapPointerEvents(false),
-              onPointerUp:   (_) => _setMapPointerEvents(true),
-              onPointerCancel: (_) => _setMapPointerEvents(true),
-              child: FloatingActionButton.small(
-                onPressed: _goToMyLocation,
-                backgroundColor: Colors.white,
-                foregroundColor: Colors.black87,
-                elevation: 2,
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                child: const Icon(Icons.my_location, size: 20),
+            bottom: isMobile ? 268 : 16,
+            left:   isMobile ? 16  : null,
+            right:  isMobile ? null : 16,
+            child: PointerInterceptor(
+              intercepting: isMobile,
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _setMapPointerEvents(false),
+                onPointerUp:   (_) => _setMapPointerEvents(true),
+                onPointerCancel: (_) => _setMapPointerEvents(true),
+                child: FloatingActionButton.small(
+                  onPressed: _goToMyLocation,
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black87,
+                  elevation: 2,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  child: const Icon(Icons.my_location, size: 20),
+                ),
               ),
             ),
           ),
 
-        // Zoom buttons — desktop only (mobile uses pinch-to-zoom)
+        // Zoom buttons — desktop left, mobile right above floating panel
         if (!isMobile) ...[
           Positioned(
             bottom: 68, left: 16,
@@ -2470,6 +2475,41 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
                   CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
             }),
+          ),
+        ] else if (!keyboardOpen && !_panelExpanded) ...[
+          Positioned(
+            bottom: 316, right: 16,
+            child: PointerInterceptor(
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _setMapPointerEvents(false),
+                onPointerUp:   (_) => _setMapPointerEvents(true),
+                onPointerCancel: (_) => _setMapPointerEvents(true),
+                child: _buildZoomButton(Icons.add, () async {
+                  final cam = _mapController?.cameraPosition;
+                  if (cam == null) return;
+                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
+                }),
+              ),
+            ),
+          ),
+          Positioned(
+            bottom: 268, right: 16,
+            child: PointerInterceptor(
+              child: Listener(
+                behavior: HitTestBehavior.opaque,
+                onPointerDown: (_) => _setMapPointerEvents(false),
+                onPointerUp:   (_) => _setMapPointerEvents(true),
+                onPointerCancel: (_) => _setMapPointerEvents(true),
+                child: _buildZoomButton(Icons.remove, () async {
+                  final cam = _mapController?.cameraPosition;
+                  if (cam == null) return;
+                  await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
+                      CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
+                }),
+              ),
+            ),
           ),
         ],
 
@@ -2492,20 +2532,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ? LayoutBuilder(builder: (ctx, constraints) {
               final totalH    = constraints.maxHeight;
               const collapsedH = 256.0;
-              final bottomH   = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
-              final mapH      = totalH - bottomH;
-              return Column(children: [
-                AnimatedContainer(
+              final panelH    = keyboardOpen ? 57.0 : (_panelExpanded ? totalH : collapsedH);
+              return Stack(children: [
+                Positioned.fill(child: mapArea),
+                AnimatedPositioned(
                   duration: const Duration(milliseconds: 280),
                   curve: Curves.easeInOut,
-                  height: mapH,
-                  child: mapArea,
-                ),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 280),
-                  curve: Curves.easeInOut,
-                  height: bottomH,
-                  child: _buildMobileBottom(keyboardOpen: keyboardOpen),
+                  bottom: 0, left: 0, right: 0,
+                  height: panelH,
+                  child: PointerInterceptor(
+                    child: _buildMobileBottom(keyboardOpen: keyboardOpen),
+                  ),
                 ),
               ]);
             })
@@ -3875,13 +3912,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return SafeArea(
       top: false,
       child: Container(
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.14),
-              blurRadius: 12,
-              offset: const Offset(0, -3),
+              color: Colors.black.withValues(alpha: 0.18),
+              blurRadius: 16,
+              offset: const Offset(0, -4),
             ),
           ],
         ),
