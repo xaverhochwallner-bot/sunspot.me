@@ -833,19 +833,18 @@ def _build_super_blocks(from_cache=None):
     if merged.is_empty:
         print("Super-Block DB: merge produced empty geometry — skipping.")
         return
-    # preserve_topology=False: bbox-unioned rectangles have Manhattan geometry,
-    # topology violations from Douglas-Peucker don't occur — 10-100× faster.
-    print(f"  simplifying at {time.time()-t0:.1f}s ...", flush=True)
-    merged = merged.simplify(SUPER_BLOCK_SIMPLIFY, preserve_topology=False)
+    # No simplify: bbox-unioned rectangles are already Manhattan geometry with
+    # minimal vertices. Shapely's simplify on a MultiPolygon with hundreds of
+    # thousands of components is unboundedly slow and yields no real reduction.
 
     block_geoms = list(merged.geoms) if merged.geom_type != 'Polygon' else [merged]
-    print(f"  {len(block_geoms):,} blocks after simplify at {time.time()-t0:.1f}s, computing heights ...", flush=True)
+    print(f"  {len(block_geoms):,} blocks at {time.time()-t0:.1f}s, computing heights ...", flush=True)
 
     orig_tree = STRtree(_buildings_polys)
     blocks  = []
     heights = []
     bld_heights = _buildings_heights  # local ref avoids repeated global lookup
-    for block in block_geoms:
+    for bi, block in enumerate(block_geoms):
         if block.is_empty:
             continue
         idxs = orig_tree.query(block, predicate='intersects')
@@ -858,6 +857,8 @@ def _build_super_blocks(from_cache=None):
         avg_h = min((weighted_h / total_area) if total_area > 0 else DEFAULT_HEIGHT, 25.0)
         blocks.append(block)
         heights.append(avg_h)
+        if bi and bi % 50000 == 0:
+            print(f"    heights {bi:,}/{len(block_geoms):,} at {time.time()-t0:.1f}s ...", flush=True)
 
     print(f"  heights done at {time.time()-t0:.1f}s, building STRtree ...", flush=True)
     _super_blocks         = blocks
