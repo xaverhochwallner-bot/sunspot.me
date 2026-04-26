@@ -1807,16 +1807,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (ctrl == null) return;
 
     final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
-    final opL0 = elevation <= 0 ? 0.82 : 0.28 + t * 0.12;
+    // opL0 raised (was 0.28+t*0.12) so macro zooms (single l0 layer) are visible.
+    // Micro zooms (z≥15) gain slightly; l1+l2 stacking still creates crisp deep cores.
+    final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Zoom-interpolated opacity: 18% at z11, 40% at z13, 100% at z16+.
-    // Mid-stop at z13 keeps macro zooms extra light without touching street-level crispness.
+    // Zoom-interpolated opacity: 50% at z11, 90% at z14, 100% at z16+.
+    // z11-14 = macro pipeline (single l0 layer) → needs high multiplier to be visible.
     // Exponential base 1.5 — ramps sharply near z15-16.
-    // MapLibre evaluates this client-side on every zoom change — no re-fetch needed.
     List<dynamic> zoomOp(double op) =>
-        ['interpolate', ['exponential', 1.5], ['zoom'], 11, op * 0.18, 13, op * 0.40, 16, op];
+        ['interpolate', ['exponential', 1.5], ['zoom'], 11, op * 0.50, 14, op * 0.90, 16, op];
 
     if (_shadowLayersReady) {
       try {

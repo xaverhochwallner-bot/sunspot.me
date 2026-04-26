@@ -832,22 +832,23 @@ def _build_super_blocks(from_cache=None):
     # Area-weighted avg height: query original full-detail buildings per block,
     # weight each member's contribution by its footprint area. Prevents one
     # garage from dragging an apartment-block's shadow length to nothing.
+    # Area-weighted avg height: use STRtree.query(block, predicate='intersects') to
+    # skip the per-polygon disjoint check — avoids the 12-minute O(n_blocks × candidates)
+    # inner loop that was burning 95% of the build time.
     orig_tree = STRtree(_buildings_polys)
     blocks  = []
     heights = []
+    bld_heights = _buildings_heights  # local ref avoids repeated global lookup
     for block in block_geoms:
         if block.is_empty:
             continue
-        idxs = orig_tree.query(block)
+        idxs = orig_tree.query(block, predicate='intersects')
         total_area  = 0.0
         weighted_h  = 0.0
         for i in idxs:
-            p = _buildings_polys[i]
-            if p.disjoint(block):
-                continue
-            a = p.area
+            a = _buildings_polys[i].area
             total_area += a
-            weighted_h += a * _buildings_heights[i]
+            weighted_h += a * bld_heights[i]
         avg_h = (weighted_h / total_area) if total_area > 0 else DEFAULT_HEIGHT
         blocks.append(block)
         heights.append(avg_h)
