@@ -1830,9 +1830,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
     // Line layers at 60% of fill opacity — feathers polygon edges.
     List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
-    // Line width: thick at low zoom (organic rounded blobs), thin at high zoom (precise edges).
-    List<dynamic> zoomLineW() =>
-        ['interpolate', ['linear'], ['zoom'], 11, 7.0, 12, 5.0, 13, 3.5, 15, 1.5, 16, 1.2];
 
     if (_shadowLayersReady) {
       try {
@@ -1866,7 +1863,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-line',
-      LineLayerProperties(lineColor: '#5B6AA5', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOp(opL0)),
+      LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
@@ -1878,7 +1875,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-line',
-      LineLayerProperties(lineColor: '#4A5599', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOp(opL1)),
+      LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
@@ -1890,7 +1887,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-line',
-      LineLayerProperties(lineColor: '#3D3F85', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOp(opL2)),
+      LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
