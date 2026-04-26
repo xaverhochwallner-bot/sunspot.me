@@ -776,11 +776,40 @@ def _build_super_blocks(from_cache=None):
     print(f"Super-Block DB: building from {len(src_polys):,} buildings ...")
     t0 = time.time()
 
-    buffered = [p.buffer(SUPER_BLOCK_BUFFER) for p in src_polys]
-    print(f"  buffered in {time.time()-t0:.1f}s — unioning ...")
-    t1 = time.time()
-    merged = unary_union(buffered)
-    print(f"  unioned  in {time.time()-t1:.1f}s — finalizing ...")
+    # Spatial grid chunking: divide the bounding box into GRID×GRID cells and
+    # union each cell independently. Avoids one O(n²) unary_union over all
+    # Vienna buildings (which takes 10-20 min) by keeping each union local.
+    GRID = 20
+    all_bounds = [p.bounds for p in src_polys]
+    min_lon = min(b[0] for b in all_bounds)
+    min_lat = min(b[1] for b in all_bounds)
+    max_lon = max(b[2] for b in all_bounds)
+    max_lat = max(b[3] for b in all_bounds)
+    lon_step = (max_lon - min_lon) / GRID
+    lat_step = (max_lat - min_lat) / GRID
+    src_tree = STRtree(src_polys)
+
+    cell_results = []
+    for ci in range(GRID):
+        for cj in range(GRID):
+            cell_box = shapely_box(
+                min_lon + ci * lon_step, min_lat + cj * lat_step,
+                min_lon + (ci + 1) * lon_step, min_lat + (cj + 1) * lat_step,
+            )
+            idxs = src_tree.query(cell_box)
+            cell_polys = [src_polys[k] for k in idxs if not src_polys[k].disjoint(cell_box)]
+            if not cell_polys:
+                continue
+            buffered = [p.buffer(SUPER_BLOCK_BUFFER) for p in cell_polys]
+            cell_union = unary_union(buffered)
+            if not cell_union.is_empty:
+                cell_results.append(cell_union)
+        if (ci + 1) % 5 == 0:
+            print(f"  grid {ci+1}/{GRID} rows done, {time.time()-t0:.1f}s elapsed ...")
+
+    print(f"  grid done in {time.time()-t0:.1f}s — final merge ...")
+    merged = unary_union(cell_results)
+    print(f"  final merge done in {time.time()-t0:.1f}s — finalizing ...")
 
     # Slight asymmetric un-buffer (small net grow) keeps blocks fused across
     # streets while pulling boundaries closer to actual building footprints.
