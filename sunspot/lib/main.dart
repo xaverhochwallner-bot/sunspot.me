@@ -1627,7 +1627,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         final srHour = (cached['sunrise']   as num?)?.toDouble();
         final ssHour = (cached['sunset']    as num?)?.toDouble();
         if (cached['dark_area'] != null) {
-          await _updateMapLayers(cached['dark_area'] as Map<String, dynamic>, elev);
+          await _updateMapLayers(cached['dark_area'] as Map<String, dynamic>, elev, requestGen: gen);
         }
         _pillTimer?.cancel();
         if (mounted) setState(() {
@@ -1696,7 +1696,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final srHour  = (result['sunrise']   as num?)?.toDouble();
           final ssHour  = (result['sunset']    as num?)?.toDouble();
           if (result['dark_area'] != null) {
-            await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev);
+            await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev, requestGen: gen);
           }
           // Store in client cache for instant replay (e.g. slider scrub back)
           _shadowResultCache[cacheKey] = result;
@@ -1811,9 +1811,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     es.onError.listen((_) => es.close());
   }
 
-  Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation) async {
+  Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation, {int? requestGen}) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
+    // Stale-fetch guard: if a newer fetchShadows() has started since this
+    // request was issued, do NOT write its (smaller-bbox) geometry over the
+    // newer data. Without this, an in-flight z16 response can finish AFTER
+    // a faster z14 cache-hit and leave the old z16 dark frame on the map.
+    if (requestGen != null && requestGen != _fetchGen) return;
 
     final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
     final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
@@ -1828,7 +1833,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     if (_shadowLayersReady) {
       try {
+        // Re-check gen right before each await-gated write — a superseded
+        // fetch must never land its setData call after a newer one.
+        if (requestGen != null && requestGen != _fetchGen) return;
         await ctrl.setGeoJsonSource('dark-area', geoJson);
+        if (requestGen != null && requestGen != _fetchGen) return;
         await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
         await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
         await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
@@ -1843,6 +1852,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     // First time (or after style reload): create source and all 6 layers.
     // Fills: l0 (edge) → l1 (mid) → l2 (core). Lines: feather each ring's boundary.
+    if (requestGen != null && requestGen != _fetchGen) return;
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: geoJson));
 
     await ctrl.addLayer(
