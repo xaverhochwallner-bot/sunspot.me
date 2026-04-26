@@ -910,9 +910,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (_shadowLayersReady) {
         // Hide in-place: zero opacity keeps source+layers alive so re-show is instant
         try {
-          ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.0));
+          ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.0));
         } catch (_) {}
       }
     } else {
@@ -1639,9 +1642,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Dim existing shadows while new data loads — keeps the map readable
       // instead of going blank. Opacity is restored by _updateMapLayers.
       if (_shadowLayersReady) {
-        _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.15));
-        _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.10));
-        _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.08));
+        _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.15));
+        _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.10));
+        _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.08));
+        _mapController!.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.09));
+        _mapController!.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.06));
+        _mapController!.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.05));
       }
 
       final uri = Uri.parse(
@@ -1742,9 +1748,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         // If stream dropped before result arrived, restore shadow layers to
         // their pre-dim state so stale dimmed overlay doesn't persist.
         if (!resultReceived && _shadowLayersReady && _mapController != null) {
-          _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.0));
+          _mapController!.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.0));
         }
         _showError('Could not load shadows — is the server running?');
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
@@ -1807,55 +1816,68 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (ctrl == null) return;
 
     final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
-    // opL0 raised (was 0.28+t*0.12) so macro zooms (single l0 layer) are visible.
-    // Micro zooms (z≥15) gain slightly; l1+l2 stacking still creates crisp deep cores.
     final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Zoom-interpolated opacity: 50% at z11, 90% at z14, 100% at z16+.
-    // z11-14 = macro pipeline (single l0 layer) → needs high multiplier to be visible.
-    // Exponential base 1.5 — ramps sharply near z15-16.
+    // Softer ramp: heatmap-like at z11, fully present at z16.
     List<dynamic> zoomOp(double op) =>
-        ['interpolate', ['exponential', 1.5], ['zoom'], 11, op * 0.50, 14, op * 0.90, 16, op];
+        ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
+    // Line layers at 60% of fill opacity — feathers polygon edges.
+    List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
 
     if (_shadowLayersReady) {
       try {
-        // Update source data + opacity in-place — no remove/re-add, no flicker
         await ctrl.setGeoJsonSource('dark-area', geoJson);
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3B4A', fillOpacity: zoomOp(opL0)));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#2E2B3A', fillOpacity: zoomOp(opL1)));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#1F1C2E', fillOpacity: zoomOp(opL2)));
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
+        await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
         return;
       } catch (_) {
-        // Source was removed (style reload) — fall through to re-create
         _shadowLayersReady = false;
       }
     }
 
-    // First time (or after style reload): create source and layers
+    // First time (or after style reload): create source and all 6 layers.
+    // Fills: l0 (edge) → l1 (mid) → l2 (core). Lines: feather each ring's boundary.
     await ctrl.addSource('dark-area', GeojsonSourceProperties(data: geoJson));
 
-    // Three concentric rings — topo-map style shadow density:
-    //   l0 (widest)  → light tint, shadow edges
-    //   l1 (middle)  → medium, stacks on l0
-    //   l2 (core)    → darkest, stacks on l0+l1
-    // Result: edge zones ≈ 0.25 opacity, deep shadow cores ≈ 0.65 opacity.
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(fillColor: '#3D3B4A', fillOpacity: zoomOp(opL0)),
+      FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)),
+      filter: ['==', ['get', 'layer'], 'shadow-l0'],
+      enableInteraction: false,
+    );
+    await ctrl.addLayer(
+      'dark-area', 'shadow-l0-line',
+      LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(fillColor: '#2E2B3A', fillOpacity: zoomOp(opL1)),
+      FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)),
+      filter: ['==', ['get', 'layer'], 'shadow-l1'],
+      enableInteraction: false,
+    );
+    await ctrl.addLayer(
+      'dark-area', 'shadow-l1-line',
+      LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(fillColor: '#1F1C2E', fillOpacity: zoomOp(opL2)),
+      FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)),
+      filter: ['==', ['get', 'layer'], 'shadow-l2'],
+      enableInteraction: false,
+    );
+    await ctrl.addLayer(
+      'dark-area', 'shadow-l2-line',
+      LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
