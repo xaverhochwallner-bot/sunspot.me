@@ -222,6 +222,14 @@ SUPER_BLOCK_SIMPLIFY = 0.0001     # ~11 m — sub-pixel at z14, applied after me
 MACRO_SIMPLIFY        = 0.0001    # ~11 m — applied to sunlit difference
 MACRO_MIN_SUNLIT_AREA = 5e-7      # ~4,000 m² — drops slivers, keeps small parks/squares
 
+# Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
+# Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
+_CFG_MACRO_EROSION = {
+    12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
+    13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
+    14: (0.0001, 0.0003),   # ~11 m / ~33 m — city-block scale
+}
+
 # Morphological close distance (deg) per zoom — z ≥ 15 only.
 # Applied as buffer(+d).buffer(-d×0.85), so net shadow expansion ≈ d×0.15.
 _CFG_GAP_FILL = {
@@ -899,6 +907,9 @@ def _gap_fill(zoom):
 def _shadow_erosion_steps(zoom):
     return _cfg_zoom(_CFG_EROSION, zoom)
 
+def _macro_erosion_steps(zoom):
+    return _cfg_zoom(_CFG_MACRO_EROSION, zoom)
+
 
 def filter_small_polygons(geom, min_area):
     if geom is None or geom.is_empty:
@@ -917,24 +928,23 @@ def filter_small_polygons(geom, min_area):
 # parallel chunking, no l1/l2 erosion. ~150-500 ms cold on full Vienna.
 # ---------------------------------------------------------------------------
 
-def _macro_compute(elevation, azimuth, q_bounds):
-    """Compute the sunlit_filtered geometry for a Macro-zoom request.
+def _macro_compute(elevation, azimuth, q_bounds, zoom):
+    """Compute shadow geometry for a Macro-zoom request.
 
-    q_bounds is (min_lat, min_lon, max_lat, max_lon) of the area to process.
-    Returns a Polygon/MultiPolygon (the sunlit area), or the bbox itself if
-    no super-blocks intersect.
+    Returns (sunlit_filtered, buf_e1, buf_e2, n_blocks) — the sunlit area,
+    two erosion-inset variants for l1/l2 depth rings, and a block count.
     """
     q_min_lat, q_min_lon, q_max_lat, q_max_lon = q_bounds
     compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
 
     if _super_block_tree is None or not _super_blocks:
-        return compute_bbox
+        return compute_bbox, compute_bbox, compute_bbox, 0
 
     idxs = _super_block_tree.query(compute_bbox)
     blocks = [(_super_blocks[i], _super_block_heights[i])
               for i in idxs if _super_blocks[i].intersects(compute_bbox)]
     if not blocks:
-        return compute_bbox
+        return compute_bbox, compute_bbox, compute_bbox, 0
 
     shadow_parts = []
     for poly, h in blocks:
@@ -951,10 +961,140 @@ def _macro_compute(elevation, azimuth, q_bounds):
     sunlit          = compute_bbox.difference(merged)
     sunlit_simple   = sunlit.simplify(MACRO_SIMPLIFY, preserve_topology=True)
     sunlit_filtered = filter_small_polygons(sunlit_simple, MACRO_MIN_SUNLIT_AREA)
-    return sunlit_filtered, len(blocks)
+
+    e1, e2 = _macro_erosion_steps(zoom)
+    return sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2), len(blocks)
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Shared shadow helpers — used by all compute paths
+# ---------------------------------------------------------------------------
+
+def _unpack_shadow_cache(entry):
+    """Unpack any cache entry into (sunlit, buf_e1, buf_e2)."""
+    if isinstance(entry, tuple):
+        return entry
+    return (entry, None, None)
+
+
+def _trim_cache():
+    """FIFO eviction if cache exceeds limit."""
+    if len(_shadow_cache) > MAX_CACHE:
+        _shadow_cache.pop(next(iter(_shadow_cache)))
+
+
+def _build_shadow_features(viewport_bbox, sunlit, buf_e1, buf_e2, prec):
+    """Build GeoJSON feature list for shadow-l0/l1/l2 layers."""
+    shadow_l0 = orient(viewport_bbox.difference(sunlit), sign=1.0)
+    features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), prec),
+                  "properties": {"layer": "shadow-l0"}}]
+    if buf_e1 is not None:
+        try:    shadow_l1 = orient(viewport_bbox.difference(buf_e1), sign=1.0)
+        except: shadow_l1 = shadow_l0
+        try:    shadow_l2 = orient(viewport_bbox.difference(buf_e2), sign=1.0)
+        except: shadow_l2 = shadow_l1
+        features += [
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), prec),
+             "properties": {"layer": "shadow-l1"}},
+            {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), prec),
+             "properties": {"layer": "shadow-l2"}},
+        ]
+    return features
+
+
+def _compute_micro_shadow(zoom, elevation, azimuth, q_bounds):
+    """Per-building pipeline. Returns (sunlit_filtered, buf_e1, buf_e2)."""
+    q_min_lat, q_min_lon, q_max_lat, q_max_lon = q_bounds
+    compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
+    min_bld_area = _min_building_area(zoom)
+    buildings    = [
+        (p, h) for p, h in
+        get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
+        if p.area >= min_bld_area
+    ]
+
+    def _proj(args):
+        return project_shadow(args[0], args[1], elevation, azimuth)
+
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        all_shadows = list(ex.map(_proj, buildings))
+
+    tall_geoms = [
+        sh for (_, h), sh in zip(buildings, all_shadows)
+        if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
+    ]
+    occluder_union = parallel_union(tall_geoms) if tall_geoms else None
+
+    shadow_parts = []
+    for (poly, h), sh in zip(buildings, all_shadows):
+        if sh is None or sh.is_empty:
+            continue
+        if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid):
+            continue
+        shadow_parts.append(sh)
+
+    all_parts = [p for p, _ in buildings] + shadow_parts
+    if all_parts:
+        merged = parallel_union(all_parts)
+        gfill  = _gap_fill(zoom)
+        stol   = _simplify_tolerance(zoom)
+        merged = merged.buffer(gfill).buffer(-gfill * 0.85)
+        merged = merged.simplify(stol, preserve_topology=True)
+        sunlit = compute_bbox.difference(merged)
+    else:
+        sunlit = compute_bbox
+
+    stol            = _simplify_tolerance(zoom)
+    sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
+    sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
+
+    e1, e2 = _shadow_erosion_steps(zoom)
+    return sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2)
+
+
+def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, day, lat, lon):
+    """Central shadow router: cache lookup → macro or micro compute → cache store.
+
+    Returns (sunlit_filtered, buf_e1, buf_e2).
+    Callers supply pre-padded q_bounds; this function only routes and caches.
+    """
+    if ck in _shadow_cache:
+        return _unpack_shadow_cache(_shadow_cache[ck])
+
+    if zoom <= MACRO_ZOOM_THRESHOLD:
+        t0 = time.time()
+        sunlit, buf_e1, buf_e2, n_blocks = _macro_compute(elevation, azimuth, q_bounds, zoom)
+        entry = (sunlit, buf_e1, buf_e2)
+        _shadow_cache[ck] = entry
+        _trim_cache()
+        print(f"macro | z={zoom} blocks={n_blocks} {time.time()-t0:.2f}s")
+        return entry
+
+    # Cross-zoom reuse: a cached z15 result is a geometry superset of z16/17/18.
+    # NEVER reuse upward (larger bbox → smaller bbox) — postage-stamp artifact.
+    if zoom >= 16:
+        z15_ck = _cache_key(hour, month, day, lat, lon, 15)
+        if z15_ck in _shadow_cache:
+            z15_sunlit, _, _ = _unpack_shadow_cache(_shadow_cache[z15_ck])
+            sunlit = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
+            e1, e2 = _shadow_erosion_steps(zoom)
+            entry  = (sunlit, sunlit.buffer(e1), sunlit.buffer(e2))
+            _shadow_cache[ck] = entry
+            _trim_cache()
+            print(f"micro | z={zoom} CACHE HIT (z15→z{zoom} reuse)")
+            return entry
+
+    # Cold per-building compute
+    t0 = time.time()
+    sunlit, buf_e1, buf_e2 = _compute_micro_shadow(zoom, elevation, azimuth, q_bounds)
+    entry = (sunlit, buf_e1, buf_e2)
+    _shadow_cache[ck] = entry
+    _trim_cache()
+    print(f"micro | z={zoom} {time.time()-t0:.2f}s")
+    return entry
+
+
 # Background pre-warming — compute lower-zoom shadows while user browses
 # ---------------------------------------------------------------------------
 
@@ -963,7 +1103,7 @@ _prewarm_in_flight = set()
 _prewarm_lock = threading.Lock()
 
 def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
-    """Compute and cache shadow for a given center/zoom if not already cached."""
+    """Pre-warm: compute and cache shadow for a given center/zoom if not already cached."""
     ck = _cache_key(hour, month, day, lat, lon, zoom)
     if ck in _shadow_cache:
         return
@@ -975,65 +1115,13 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
             return
 
         pad = 0.15
-        q_min_lat = lat - vp_h / 2 - vp_h * pad
-        q_min_lon = lon - vp_w / 2 - vp_w * pad
-        q_max_lat = lat + vp_h / 2 + vp_h * pad
-        q_max_lon = lon + vp_w / 2 + vp_w * pad
-
-        # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
-        if zoom <= MACRO_ZOOM_THRESHOLD:
-            t0 = time.time()
-            sunlit_filtered, n_blocks = _macro_compute(
-                elevation, azimuth,
-                (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
-            )
-            _shadow_cache[ck] = sunlit_filtered
-            if len(_shadow_cache) > MAX_CACHE:
-                _shadow_cache.pop(next(iter(_shadow_cache)))
-            print(f"[prewarm] z={zoom} h={hour} macro | blocks={n_blocks} | {time.time()-t0:.2f}s")
-            return
-
-        # ---------- Per-building pipeline (z ≥ 15) ----------
-        compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-        min_bld_area = _min_building_area(zoom)
-        buildings = [(p, h) for p, h in
-                     get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                     if p.area >= min_bld_area]
-
-        def _proj(args): return project_shadow(args[0], args[1], elevation, azimuth)
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            all_shadows = list(ex.map(_proj, buildings))
-
-        tall_geoms = [sh for (_, h), sh in zip(buildings, all_shadows)
-                      if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty]
-        occluder_union = parallel_union(tall_geoms) if tall_geoms else None
-
-        shadow_parts = []
-        for (poly, h), sh in zip(buildings, all_shadows):
-            if sh is None or sh.is_empty: continue
-            if h < OCCLUDER_HEIGHT and occluder_union and occluder_union.covers(poly.centroid): continue
-            shadow_parts.append(sh)
-
-        all_parts = [p for p, _ in buildings] + shadow_parts
-        if all_parts:
-            merged = parallel_union(all_parts)
-            gfill  = _gap_fill(zoom)
-            stol   = _simplify_tolerance(zoom)
-            merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-            merged = merged.simplify(stol, preserve_topology=True)
-            sunlit = compute_bbox.difference(merged)
-        else:
-            sunlit = compute_bbox
-
-        stol            = _simplify_tolerance(zoom)
-        sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
-        sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
-
-        e1, e2 = _shadow_erosion_steps(zoom)
-        _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
-        if len(_shadow_cache) > MAX_CACHE:
-            _shadow_cache.pop(next(iter(_shadow_cache)))
-        print(f"[prewarm] z={zoom} h={hour} cached")
+        q_bounds = (
+            lat - vp_h / 2 - vp_h * pad, lon - vp_w / 2 - vp_w * pad,
+            lat + vp_h / 2 + vp_h * pad, lon + vp_w / 2 + vp_w * pad,
+        )
+        t0 = time.time()
+        _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, day, lat, lon)
+        print(f"[prewarm] z={zoom} h={hour} cached in {time.time()-t0:.2f}s")
     except Exception as e:
         print(f"[prewarm] error z={zoom}: {e}")
     finally:
@@ -1086,17 +1174,17 @@ def shadow():
 
         elevation, azimuth = get_sun_angles(lat, lon, now)
 
-        # Tight outer boundary — just beyond the visible viewport.
-        SHADOW_BBOX_PAD = 0.05  # degrees (~5 km) — avoids sending huge invisible polygons
+        SHADOW_BBOX_PAD = 0.05
         if None not in (min_lat, min_lon, max_lat, max_lon):
             viewport_bbox = shapely_box(
                 min_lon - SHADOW_BBOX_PAD, min_lat - SHADOW_BBOX_PAD,
                 max_lon + SHADOW_BBOX_PAD, max_lat + SHADOW_BBOX_PAD,
             )
+            q_bounds = (min_lat, min_lon, max_lat, max_lon)
         else:
             viewport_bbox = shapely_box(lon - 0.05, lat - 0.05, lon + 0.05, lat + 0.05)
+            q_bounds      = (lat - 0.01, lon - 0.01, lat + 0.01, lon + 0.01)
 
-        # Night: cover the entire viewport with a single dark polygon, no holes
         if elevation <= 0:
             dark_area = orient(viewport_bbox, sign=1.0)
             resp = jsonify({
@@ -1112,154 +1200,13 @@ def shadow():
             return resp
 
         ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
+        sunlit, buf_e1, buf_e2 = _compute_shadow_data(
+            zoom, elevation, azimuth, q_bounds, ck,
+            now.hour, now.month, now.day, lat, lon,
+        )
 
-        # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
-        if zoom <= MACRO_ZOOM_THRESHOLD:
-            if ck in _shadow_cache:
-                cached = _shadow_cache[ck]
-                sunlit_filtered = cached[0] if isinstance(cached, tuple) else cached
-                print(f"{now.strftime('%H:%M')} | CACHE HIT | z={zoom} macro | elev={elevation:.1f}")
-            else:
-                if None not in (min_lat, min_lon, max_lat, max_lon):
-                    q_bounds = (min_lat, min_lon, max_lat, max_lon)
-                else:
-                    q_bounds = (lat - 0.01, lon - 0.01, lat + 0.01, lon + 0.01)
-                t0 = time.time()
-                sunlit_filtered, n_blocks = _macro_compute(elevation, azimuth, q_bounds)
-                _shadow_cache[ck] = sunlit_filtered
-                if len(_shadow_cache) > MAX_CACHE:
-                    _shadow_cache.pop(next(iter(_shadow_cache)))
-                print(f"{now.strftime('%H:%M')} | z={zoom} macro | blocks={n_blocks} | {time.time()-t0:.2f}s")
-
-            _prec     = _geojson_precision(zoom)
-            shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
-            features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
-                          "properties": {"layer": "shadow-l0"}}]
-            body = json.dumps({
-                "time":      now.strftime("%H:%M"),
-                "elevation": elevation,
-                "azimuth":   azimuth,
-                "dark_area": {"type": "FeatureCollection", "features": features},
-            }).encode('utf-8')
-            if 'gzip' in request.headers.get('Accept-Encoding', ''):
-                body = _gzip.compress(body, compresslevel=6)
-                resp = Response(body, 200, content_type='application/json')
-                resp.headers['Content-Encoding'] = 'gzip'
-            else:
-                resp = Response(body, 200, content_type='application/json')
-            resp.headers['Cache-Control'] = 'public, max-age=3600'
-            return resp
-
-        # ---------- Per-building pipeline (z ≥ 15) ----------
-        def _unpack_cache(entry):
-            if isinstance(entry, tuple):
-                return entry  # (sunlit_filtered, buf_e1, buf_e2)
-            return (entry, None, None)
-
-        _cb1 = _cb2 = None
-        sunlit_filtered = None
-
-        if ck in _shadow_cache:
-            sunlit_filtered, _cb1, _cb2 = _unpack_cache(_shadow_cache[ck])
-            print(f"{now.strftime('%H:%M')} | CACHE HIT | elev={elevation:.1f}")
-        elif zoom >= 16:
-            # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
-            # The z15 geometry covers a larger bbox than z16, so it is always a
-            # superset of what z16 needs. The reverse is NEVER safe: reusing a
-            # smaller-bbox z15 result for a larger-viewport z14 request would
-            # return a postage-stamp-sized shadow.
-            z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
-            if z15_ck in _shadow_cache:
-                z15_sunlit, _, _ = _unpack_cache(_shadow_cache[z15_ck])
-                sunlit_filtered = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
-                e1, e2 = _shadow_erosion_steps(zoom)
-                _cb1 = sunlit_filtered.buffer(e1)
-                _cb2 = sunlit_filtered.buffer(e2)
-                _shadow_cache[ck] = (sunlit_filtered, _cb1, _cb2)
-                print(f"{now.strftime('%H:%M')} | CACHE HIT (z15→z{zoom} reuse) | elev={elevation:.1f}")
-
-        if sunlit_filtered is None:
-            # Cold compute (per-building pipeline)
-            if None not in (min_lat, min_lon, max_lat, max_lon):
-                q_min_lat, q_min_lon = min_lat, min_lon
-                q_max_lat, q_max_lon = max_lat, max_lon
-            else:
-                q_min_lat, q_min_lon = lat - 0.01, lon - 0.01
-                q_max_lat, q_max_lon = lat + 0.01, lon + 0.01
-
-            compute_bbox  = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
-            min_bld_area  = _min_building_area(zoom)
-            buildings     = [(p, h) for p, h in
-                             get_buildings_for_viewport(q_min_lat, q_min_lon, q_max_lat, q_max_lon, zoom=zoom)
-                             if p.area >= min_bld_area]
-
-            def _project(args):
-                poly, height = args
-                return project_shadow(poly, height, elevation, azimuth)
-
-            with ThreadPoolExecutor(max_workers=3) as ex:
-                all_shadows = list(ex.map(_project, buildings))
-
-            # Self-occlusion: skip short buildings whose centroid is in a tall building's shadow.
-            tall_shadow_geoms = [
-                sh for (_, h), sh in zip(buildings, all_shadows)
-                if h >= OCCLUDER_HEIGHT and sh and not sh.is_empty
-            ]
-            occluder_union = parallel_union(tall_shadow_geoms) if tall_shadow_geoms else None
-
-            shadow_parts = []
-            for (poly, h), sh in zip(buildings, all_shadows):
-                if sh is None or sh.is_empty:
-                    continue
-                if (h < OCCLUDER_HEIGHT
-                        and occluder_union is not None
-                        and occluder_union.covers(poly.centroid)):
-                    continue
-                shadow_parts.append(sh)
-
-            t0 = time.time()
-            building_polys = [p for p, _ in buildings]
-            all_parts      = building_polys + shadow_parts
-            if all_parts:
-                merged = parallel_union(all_parts)
-                gfill  = _gap_fill(zoom)
-                stol   = _simplify_tolerance(zoom)
-                merged = merged.buffer(gfill).buffer(-gfill * 0.85)
-                merged = merged.simplify(stol, preserve_topology=True)
-                sunlit = compute_bbox.difference(merged)
-            else:
-                sunlit = compute_bbox
-
-            stol            = _simplify_tolerance(zoom)
-            sunlit_simple   = sunlit.simplify(stol, preserve_topology=True)
-            sunlit_filtered = filter_small_polygons(sunlit_simple, _min_sunlit_area(zoom))
-
-            e1, e2 = _shadow_erosion_steps(zoom)
-            _cb1 = sunlit_filtered.buffer(e1)
-            _cb2 = sunlit_filtered.buffer(e2)
-            _shadow_cache[ck] = (sunlit_filtered, _cb1, _cb2)
-            if len(_shadow_cache) > MAX_CACHE:
-                _shadow_cache.pop(next(iter(_shadow_cache)))
-
-            print(f"{now.strftime('%H:%M')} | elev={elevation:.1f} azim={azimuth:.1f} "
-                  f"| z={zoom} | buildings={len(buildings)} | {time.time()-t0:.2f}s")
-
-        _prec     = _geojson_precision(zoom)
-        shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
-        features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
-                      "properties": {"layer": "shadow-l0"}}]
-        if _cb1 is not None:
-            try:    shadow_l1 = orient(viewport_bbox.difference(_cb1), sign=1.0)
-            except: shadow_l1 = shadow_l0
-            try:    shadow_l2 = orient(viewport_bbox.difference(_cb2), sign=1.0)
-            except: shadow_l2 = shadow_l1
-            features += [
-                {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
-                 "properties": {"layer": "shadow-l1"}},
-                {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
-                 "properties": {"layer": "shadow-l2"}},
-            ]
-
+        _prec    = _geojson_precision(zoom)
+        features = _build_shadow_features(viewport_bbox, sunlit, buf_e1, buf_e2, _prec)
         body = json.dumps({
             "time":      now.strftime("%H:%M"),
             "elevation": elevation,
@@ -1355,33 +1302,25 @@ def shadow_stream():
 
             ck = _cache_key(now.hour, now.month, now.day, lat, lon, zoom)
 
-            def _unpack_sse(entry):
-                if isinstance(entry, tuple):
-                    return entry
-                return (entry, None, None)
-
             # ---------- Macro fast path (z ≤ MACRO_ZOOM_THRESHOLD) ----------
             if zoom <= MACRO_ZOOM_THRESHOLD:
                 if ck in _shadow_cache:
-                    cached = _shadow_cache[ck]
-                    sunlit_filtered = cached[0] if isinstance(cached, tuple) else cached
+                    sunlit_filtered, buf_e1, buf_e2 = _unpack_shadow_cache(_shadow_cache[ck])
                     yield _evt(90, "Cached")
                 else:
                     yield _evt(20, "Macro pipeline")
                     t0 = time.time()
-                    sunlit_filtered, n_blocks = _macro_compute(
+                    sunlit_filtered, buf_e1, buf_e2, n_blocks = _macro_compute(
                         elevation, azimuth,
                         (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
+                        zoom,
                     )
-                    _shadow_cache[ck] = sunlit_filtered
-                    if len(_shadow_cache) > MAX_CACHE:
-                        _shadow_cache.pop(next(iter(_shadow_cache)))
+                    _shadow_cache[ck] = (sunlit_filtered, buf_e1, buf_e2)
+                    _trim_cache()
                     yield _evt(90, f"Macro done ({n_blocks} blocks, {time.time()-t0:.2f}s)")
 
-                _prec     = _geojson_precision(zoom)
-                shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
-                features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
-                              "properties": {"layer": "shadow-l0"}}]
+                _prec    = _geojson_precision(zoom)
+                features = _build_shadow_features(viewport_bbox, sunlit_filtered, buf_e1, buf_e2, _prec)
             else:
                 # ---------- Per-building pipeline (z ≥ 15) ----------
                 # Cross-zoom reuse — ZOOM-IN ONLY (z15 → z16/17/…).
@@ -1391,10 +1330,11 @@ def shadow_stream():
                 if zoom >= 16 and ck not in _shadow_cache:
                     z15_ck = _cache_key(now.hour, now.month, now.day, lat, lon, 15)
                     if z15_ck in _shadow_cache:
-                        z15_sunlit, _, _ = _unpack_sse(_shadow_cache[z15_ck])
+                        z15_sunlit, _, _ = _unpack_shadow_cache(_shadow_cache[z15_ck])
                         sf = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
                         e1, e2 = _shadow_erosion_steps(zoom)
                         _shadow_cache[ck] = (sf, sf.buffer(e1), sf.buffer(e2))
+                        _trim_cache()
                         yield _evt(90, "Cached (z15 reuse)")
 
                 if ck not in _shadow_cache:
@@ -1478,30 +1418,16 @@ def shadow_stream():
 
                     e1, e2 = _shadow_erosion_steps(zoom)
                     _shadow_cache[ck] = (sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2))
-                    if len(_shadow_cache) > MAX_CACHE:
-                        _shadow_cache.pop(next(iter(_shadow_cache)))
+                    _trim_cache()
                 else:
                     yield _evt(90, "Cached")
 
                 yield _evt(90, "Building response")
 
-                sunlit_filtered, _sb1, _sb2 = _unpack_sse(_shadow_cache[ck])
+                sunlit_filtered, buf_e1, buf_e2 = _unpack_shadow_cache(_shadow_cache[ck])
 
-                _prec     = _geojson_precision(zoom)
-                shadow_l0 = orient(viewport_bbox.difference(sunlit_filtered), sign=1.0)
-                features  = [{"type": "Feature", "geometry": round_coords(mapping(shadow_l0), _prec),
-                              "properties": {"layer": "shadow-l0"}}]
-                if _sb1 is not None:
-                    try:    shadow_l1 = orient(viewport_bbox.difference(_sb1), sign=1.0)
-                    except: shadow_l1 = shadow_l0
-                    try:    shadow_l2 = orient(viewport_bbox.difference(_sb2), sign=1.0)
-                    except: shadow_l2 = shadow_l1
-                    features += [
-                        {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), _prec),
-                         "properties": {"layer": "shadow-l1"}},
-                        {"type": "Feature", "geometry": round_coords(mapping(shadow_l2), _prec),
-                         "properties": {"layer": "shadow-l2"}},
-                    ]
+                _prec    = _geojson_precision(zoom)
+                features = _build_shadow_features(viewport_bbox, sunlit_filtered, buf_e1, buf_e2, _prec)
 
             sr, ss = _get_sunrise_sunset(lat, lon, now, tz)
 
