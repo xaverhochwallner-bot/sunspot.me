@@ -218,9 +218,22 @@ MACRO_ZOOM_THRESHOLD = 14
 SUPER_BLOCK_BUFFER   = 0.000045   # ~5 m close radius — fuses touching footprints, keeps streets open
 SUPER_BLOCK_SIMPLIFY = 0.0001     # ~11 m — sub-pixel at z14, applied after merge
 
-# Macro pipeline post-processing
-MACRO_SIMPLIFY        = 0.0001    # ~11 m — applied to sunlit difference
-MACRO_MIN_SUNLIT_AREA = 1e-7      # ~800 m² — keeps street-width sunlit patches
+# Macro pipeline post-processing — zoom-dependent for cleaner low-zoom aesthetics
+_CFG_MACRO_SIMPLIFY = {
+    12: 0.0005,   # ~55 m — removes building-scale spikes at city overview
+    13: 0.0002,   # ~22 m — neighbourhood scale
+    14: 0.0001,   # ~11 m — city-block scale
+}
+_CFG_MACRO_MIN_SUNLIT = {
+    12: 3e-6,   # ~24 000 m² — only large parks, wide boulevards
+    13: 8e-7,   # ~6 400 m² — neighbourhood-scale patches
+    14: 1e-7,   # ~800 m² — street-width patches
+}
+# Morphological close radius per zoom — rounds spiky polygon corners at low zoom
+_CFG_MACRO_ROUND = {
+    12: 0.0004,   # ~44 m — merges nearby fragments and rounds sharp corners
+    13: 0.0002,   # ~22 m — softer rounding for neighbourhood scale
+}
 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
@@ -869,7 +882,7 @@ def _build_super_blocks(from_cache=None):
 
 def _min_sunlit_area(zoom):
     """Minimum sunlit patch area (deg²) — z ≥ 15 pipeline only.
-    Macro zooms use the constant MACRO_MIN_SUNLIT_AREA instead.
+    Macro zooms use _macro_min_sunlit() instead.
     """
     base = 2e-8   # ~200 m² at z16
     return max(1e-10, base * (3 ** (16 - zoom)))
@@ -883,6 +896,12 @@ def _cfg_zoom(cfg, zoom):
 
 def _simplify_tolerance(zoom):
     return _cfg_zoom(_CFG_SIMPLIFY, zoom)
+
+def _macro_simplify_tol(zoom):
+    return _cfg_zoom(_CFG_MACRO_SIMPLIFY, zoom)
+
+def _macro_min_sunlit(zoom):
+    return _cfg_zoom(_CFG_MACRO_MIN_SUNLIT, zoom)
 
 
 def _get_sunrise_sunset(lat, lon, now, tz):
@@ -956,11 +975,19 @@ def _macro_compute(elevation, azimuth, q_bounds, zoom):
     merged = unary_union(block_polys + shadow_parts)
     if not merged.is_valid:
         merged = merged.buffer(0)
-    merged = merged.simplify(MACRO_SIMPLIFY, preserve_topology=True)
+    macro_simp = _macro_simplify_tol(zoom)
+    merged = merged.simplify(macro_simp, preserve_topology=True)
 
     sunlit          = compute_bbox.difference(merged)
-    sunlit_simple   = sunlit.simplify(MACRO_SIMPLIFY, preserve_topology=True)
-    sunlit_filtered = filter_small_polygons(sunlit_simple, MACRO_MIN_SUNLIT_AREA)
+    sunlit_simple   = sunlit.simplify(macro_simp, preserve_topology=True)
+    sunlit_filtered = filter_small_polygons(sunlit_simple, _macro_min_sunlit(zoom))
+
+    # Morphological close at low zoom: rounds spiky corners and merges nearby fragments
+    if zoom in _CFG_MACRO_ROUND:
+        rd = _CFG_MACRO_ROUND[zoom]
+        sunlit_filtered = sunlit_filtered.buffer(rd).buffer(-rd * 0.95)
+        if not sunlit_filtered.is_valid:
+            sunlit_filtered = sunlit_filtered.buffer(0)
 
     e1, e2 = _macro_erosion_steps(zoom)
     return sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2), len(blocks)
@@ -2194,15 +2221,16 @@ def heatmap():
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
     # Heatmap is always Macro (zoom clamped to 12 above) — single fast path.
-    sunlit, _ = _macro_compute(
+    sunlit, *_ = _macro_compute(
         elevation, azimuth,
         (min_lat, min_lon, max_lat, max_lon),
+        zoom,
     )
 
     if not sunlit or sunlit.is_empty:
         return jsonify({'type': 'FeatureCollection', 'features': []})
 
-    sunlit = sunlit.simplify(MACRO_SIMPLIFY * 2, preserve_topology=True)
+    sunlit = sunlit.simplify(_macro_simplify_tol(zoom) * 2, preserve_topology=True)
     polys  = sunlit.geoms if hasattr(sunlit, 'geoms') else [sunlit]
     features = [
         {'type': 'Feature', 'geometry': mapping(g), 'properties': {}}

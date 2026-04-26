@@ -1825,11 +1825,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Softer ramp: heatmap-like at z11, fully present at z16.
-    List<dynamic> zoomOp(double op) =>
+    // L0: main shadow layer — fades in from z11 to z16.
+    List<dynamic> zoomOpL0(double op) =>
         ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
-    // Line layers at 60% of fill opacity — feathers polygon edges.
-    List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
+    // L1/L2: 3D depth rings — hidden at z<=13, fade in z13→z15 to prevent sudden pop on zoom.
+    List<dynamic> zoomOpL12(double op) =>
+        ['interpolate', ['linear'], ['zoom'], 13, 0.0, 15, op];
+    // Line opacity: 60% of fill to feather edges.
+    List<dynamic> zoomLineOpL0(double op) => zoomOpL0(op * 0.6);
+    List<dynamic> zoomLineOpL12(double op) => zoomOpL12(op * 0.6);
+    // Line width: thick at low zoom for organic blob rounding, thin at high zoom for precision.
+    List<dynamic> zoomLineW() =>
+        ['interpolate', ['linear'], ['zoom'], 11, 7.0, 12, 5.0, 13, 3.5, 15, 1.5, 16, 1.2];
 
     if (_shadowLayersReady) {
       try {
@@ -1838,12 +1845,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         if (requestGen != null && requestGen != _fetchGen) return;
         await ctrl.setGeoJsonSource('dark-area', geoJson);
         if (requestGen != null && requestGen != _fetchGen) return;
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
-        await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
-        await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
-        await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOpL0(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOpL12(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOpL12(opL2)));
+        await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOpL0(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOpL12(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOpL12(opL2)));
         return;
       } catch (_) {
         _shadowLayersReady = false;
@@ -1857,37 +1864,37 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-fill',
-      FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)),
+      FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOpL0(opL0)),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l0-line',
-      LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
+      LineLayerProperties(lineColor: '#5B6AA5', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOpL0(opL0)),
       filter: ['==', ['get', 'layer'], 'shadow-l0'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-fill',
-      FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)),
+      FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOpL12(opL1)),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l1-line',
-      LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
+      LineLayerProperties(lineColor: '#4A5599', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOpL12(opL1)),
       filter: ['==', ['get', 'layer'], 'shadow-l1'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-fill',
-      FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)),
+      FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOpL12(opL2)),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
     await ctrl.addLayer(
       'dark-area', 'shadow-l2-line',
-      LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
+      LineLayerProperties(lineColor: '#3D3F85', lineWidth: zoomLineW(), lineJoin: 'round', lineCap: 'round', lineOpacity: zoomLineOpL12(opL2)),
       filter: ['==', ['get', 'layer'], 'shadow-l2'],
       enableInteraction: false,
     );
