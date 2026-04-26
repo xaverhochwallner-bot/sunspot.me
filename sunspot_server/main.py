@@ -800,7 +800,13 @@ def _build_super_blocks(from_cache=None):
             cell_polys = [src_polys[k] for k in idxs if not src_polys[k].disjoint(cell_box)]
             if not cell_polys:
                 continue
-            buffered = [p.buffer(SUPER_BLOCK_BUFFER) for p in cell_polys]
+            # resolution=4 (vs default 16) → ~4x fewer vertices per buffered polygon
+            # → ~8-16x faster unary_union. Super-blocks only need block-level accuracy.
+            # Pre-simplify to 5m to further reduce vertex count before buffering.
+            buffered = [
+                p.simplify(0.00005, preserve_topology=False).buffer(SUPER_BLOCK_BUFFER, resolution=4)
+                for p in cell_polys
+            ]
             cell_union = unary_union(buffered)
             if not cell_union.is_empty:
                 cell_results.append(cell_union)
