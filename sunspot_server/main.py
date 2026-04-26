@@ -222,6 +222,13 @@ SUPER_BLOCK_SIMPLIFY = 0.0001     # ~11 m — sub-pixel at z14, applied after me
 MACRO_SIMPLIFY        = 0.0001    # ~11 m — applied to sunlit difference
 MACRO_MIN_SUNLIT_AREA = 1e-7      # ~800 m² — keeps street-width sunlit patches
 
+# Morphological close radius per zoom — rounds spiky corners into organic blobs.
+# Applied as buffer(+r).buffer(-r*0.95): fills small notches, rounds convex corners.
+_CFG_MACRO_ROUND = {
+    12: 0.0004,   # ~44 m — merges nearby fragments and rounds sharp corners
+    13: 0.0002,   # ~22 m — softer rounding at neighbourhood scale
+}
+
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
 _CFG_MACRO_EROSION = {
@@ -961,6 +968,13 @@ def _macro_compute(elevation, azimuth, q_bounds, zoom):
     sunlit          = compute_bbox.difference(merged)
     sunlit_simple   = sunlit.simplify(MACRO_SIMPLIFY, preserve_topology=True)
     sunlit_filtered = filter_small_polygons(sunlit_simple, MACRO_MIN_SUNLIT_AREA)
+
+    # Morphological close at low zoom: rounds spiky corners and merges nearby fragments
+    if zoom in _CFG_MACRO_ROUND:
+        rd = _CFG_MACRO_ROUND[zoom]
+        sunlit_filtered = sunlit_filtered.buffer(rd).buffer(-rd * 0.95)
+        if not sunlit_filtered.is_valid:
+            sunlit_filtered = sunlit_filtered.buffer(0)
 
     e1, e2 = _macro_erosion_steps(zoom)
     return sunlit_filtered, sunlit_filtered.buffer(e1), sunlit_filtered.buffer(e2), len(blocks)
