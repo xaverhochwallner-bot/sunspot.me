@@ -833,16 +833,14 @@ def _build_super_blocks(from_cache=None):
     if merged.is_empty:
         print("Super-Block DB: merge produced empty geometry — skipping.")
         return
-    merged = merged.simplify(SUPER_BLOCK_SIMPLIFY, preserve_topology=True)
+    # preserve_topology=False: bbox-unioned rectangles have Manhattan geometry,
+    # topology violations from Douglas-Peucker don't occur — 10-100× faster.
+    print(f"  simplifying at {time.time()-t0:.1f}s ...", flush=True)
+    merged = merged.simplify(SUPER_BLOCK_SIMPLIFY, preserve_topology=False)
 
     block_geoms = list(merged.geoms) if merged.geom_type != 'Polygon' else [merged]
+    print(f"  {len(block_geoms):,} blocks after simplify at {time.time()-t0:.1f}s, computing heights ...", flush=True)
 
-    # Area-weighted avg height: query original full-detail buildings per block,
-    # weight each member's contribution by its footprint area. Prevents one
-    # garage from dragging an apartment-block's shadow length to nothing.
-    # Area-weighted avg height: use STRtree.query(block, predicate='intersects') to
-    # skip the per-polygon disjoint check — avoids the 12-minute O(n_blocks × candidates)
-    # inner loop that was burning 95% of the build time.
     orig_tree = STRtree(_buildings_polys)
     blocks  = []
     heights = []
@@ -861,6 +859,7 @@ def _build_super_blocks(from_cache=None):
         blocks.append(block)
         heights.append(avg_h)
 
+    print(f"  heights done at {time.time()-t0:.1f}s, building STRtree ...", flush=True)
     _super_blocks         = blocks
     _super_block_heights  = heights
     _super_block_tree     = STRtree(blocks) if blocks else None
