@@ -827,9 +827,9 @@ def _build_super_blocks(from_cache=None):
     merged = unary_union(cell_results)
     print(f"  final merge done in {time.time()-t0:.1f}s — finalizing ...", flush=True)
 
-    # Slight asymmetric un-buffer (small net grow) keeps blocks fused across
-    # streets while pulling boundaries closer to actual building footprints.
-    merged = merged.buffer(-SUPER_BLOCK_BUFFER * 0.5)
+    # No back-buffer: with a 5m SUPER_BLOCK_BUFFER the footprints are already
+    # close to buildings and streets are not fused — shrinking would be O(200K)
+    # polygons and serves no purpose at this scale.
     if merged.is_empty:
         print("Super-Block DB: merge produced empty geometry — skipping.")
         return
