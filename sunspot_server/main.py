@@ -773,7 +773,7 @@ def _build_super_blocks(from_cache=None):
         print("Super-Block DB: no buildings to process, skipping.")
         return
 
-    print(f"Super-Block DB: building from {len(src_polys):,} buildings ...")
+    print(f"Super-Block DB: building from {len(src_polys):,} buildings ...", flush=True)
     t0 = time.time()
 
     # Spatial grid chunking: divide the bounding box into GRID×GRID cells and
@@ -800,22 +800,24 @@ def _build_super_blocks(from_cache=None):
             cell_polys = [src_polys[k] for k in idxs if not src_polys[k].disjoint(cell_box)]
             if not cell_polys:
                 continue
-            # resolution=4 (vs default 16) → ~4x fewer vertices per buffered polygon
-            # → ~8-16x faster unary_union. Super-blocks only need block-level accuracy.
-            # Pre-simplify to 5m to further reduce vertex count before buffering.
+            # Use bbox expansion instead of buffer(): 5-vertex rectangles vs 30+
+            # vertex arc-polygons. At z12-z14 scale building bbox ≈ building shape.
+            # ~50x faster buffer step + ~16x faster unary_union (fewer vertices).
+            d = SUPER_BLOCK_BUFFER
             buffered = [
-                p.simplify(0.00005, preserve_topology=False).buffer(SUPER_BLOCK_BUFFER, resolution=4)
+                shapely_box(p.bounds[0] - d, p.bounds[1] - d,
+                            p.bounds[2] + d, p.bounds[3] + d)
                 for p in cell_polys
             ]
             cell_union = unary_union(buffered)
             if not cell_union.is_empty:
                 cell_results.append(cell_union)
         if (ci + 1) % 5 == 0:
-            print(f"  grid {ci+1}/{GRID} rows done, {time.time()-t0:.1f}s elapsed ...")
+            print(f"  grid {ci+1}/{GRID} rows done, {time.time()-t0:.1f}s elapsed ...", flush=True)
 
-    print(f"  grid done in {time.time()-t0:.1f}s — final merge ...")
+    print(f"  grid done in {time.time()-t0:.1f}s — final merge ...", flush=True)
     merged = unary_union(cell_results)
-    print(f"  final merge done in {time.time()-t0:.1f}s — finalizing ...")
+    print(f"  final merge done in {time.time()-t0:.1f}s — finalizing ...", flush=True)
 
     # Slight asymmetric un-buffer (small net grow) keeps blocks fused across
     # streets while pulling boundaries closer to actual building footprints.
@@ -853,7 +855,7 @@ def _build_super_blocks(from_cache=None):
     _super_blocks         = blocks
     _super_block_heights  = heights
     _super_block_tree     = STRtree(blocks) if blocks else None
-    print(f"Super-Block DB: {len(blocks):,} blocks ready in {time.time()-t0:.1f}s total.")
+    print(f"Super-Block DB: {len(blocks):,} blocks ready in {time.time()-t0:.1f}s total.", flush=True)
 
 
 def _min_sunlit_area(zoom):
