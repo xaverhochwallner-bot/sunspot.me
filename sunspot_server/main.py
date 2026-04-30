@@ -135,6 +135,25 @@ def _cache_key(hour, month, day, lat, lon, zoom):
             round(round(lon / g) * g, 6))
 
 
+def _macro_canonical_q_bounds(lat, lon, zoom):
+    """Fixed compute bbox for macro cache — derived from the snapped cache
+    coordinates so all requests in the same grid cell use identical q_bounds.
+
+    Margin is large enough to cover any viewport_bbox that could arise at
+    each zoom level (desktop max viewport + SHADOW_BBOX_PAD + grid drift).
+    """
+    g = _cache_grid(zoom)
+    slat = round(round(lat / g) * g, 6)
+    slon = round(round(lon / g) * g, 6)
+    if zoom >= 14:
+        m = 0.20   # covers ~22 km; desktop max viewport_bbox half ~0.16° + 0.01 drift
+    elif zoom == 13:
+        m = 0.35   # wider viewport at z13
+    else:
+        m = 0.65   # z12 — viewport up to ~0.5° wide
+    return slat - m, slon - m, slat + m, slon + m
+
+
 # ---------------------------------------------------------------------------
 # Sun position
 # ---------------------------------------------------------------------------
@@ -1066,7 +1085,8 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
 
     if zoom <= MACRO_ZOOM_THRESHOLD:
         t0 = time.time()
-        sunlit, buf_e1, buf_e2, n_blocks = _macro_compute(elevation, azimuth, q_bounds, zoom)
+        canon_q = _macro_canonical_q_bounds(lat, lon, zoom)
+        sunlit, buf_e1, buf_e2, n_blocks = _macro_compute(elevation, azimuth, canon_q, zoom)
         entry = (sunlit, buf_e1, buf_e2)
         _shadow_cache[ck] = entry
         _trim_cache()
@@ -1314,10 +1334,9 @@ def shadow_stream():
                 else:
                     yield _evt(20, "Macro pipeline")
                     t0 = time.time()
+                    canon_q = _macro_canonical_q_bounds(lat, lon, zoom)
                     sunlit_filtered, buf_e1, buf_e2, n_blocks = _macro_compute(
-                        elevation, azimuth,
-                        (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
-                        zoom,
+                        elevation, azimuth, canon_q, zoom,
                     )
                     _shadow_cache[ck] = (sunlit_filtered, buf_e1, buf_e2)
                     _trim_cache()
@@ -1984,7 +2003,7 @@ def find_sunny_spots():
                 if z_int <= MACRO_ZOOM_THRESHOLD:
                     sunlit_filtered, _ = _macro_compute(
                         elevation, azimuth,
-                        (q_min_lat, q_min_lon, q_max_lat, q_max_lon),
+                        _macro_canonical_q_bounds(lat, lon, z_int),
                     )
                 else:
                     compute_bbox = shapely_box(q_min_lon, q_min_lat, q_max_lon, q_max_lat)
