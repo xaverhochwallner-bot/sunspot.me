@@ -74,7 +74,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
-  int                 _lastFetchZoom     = -1;
+  int                 _lastFetchZoom      = -1;
+  String              _currentTileUrlBase = '';
 
   // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3_lonSpan'
   // zoom is the INTEGER camera zoom; lonSpan prevents reusing data at a different viewport size.
@@ -1594,16 +1595,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
 
     try {
-      final bounds   = await _mapController!.getVisibleRegion();
       final rawZoom  = _mapController!.cameraPosition?.zoom ?? 15.0;
       final zoom     = rawZoom.toInt();
 
-      // Below zoom 12, skip shadow fetch and hide any existing layers.
+      // Below zoom 12: skip (VectorSource has minzoom: 12, MapLibre hides tiles automatically).
       if (rawZoom < 12.0) {
-        if (_shadowLayersReady) {
-          final empty = <String, dynamic>{'type': 'FeatureCollection', 'features': <dynamic>[]};
-          await _mapController!.setGeoJsonSource('dark-area', empty);
-        }
         _pillTimer?.cancel();
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         if (!completer.isCompleted) completer.complete();
@@ -1612,154 +1608,65 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       _lastFetchZoom = zoom;
 
-      // Cache lookup — key matches server's _cache_key(hour, month, day, lat, lon, zoom)
-      // Include viewport span in key so desktop (wide) and mobile (narrow)
-      // don't share cached results computed for a different aspect ratio.
-      final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
-      final cacheKey = '${zoom}_${_hour.toInt()}_${_selectedDate.month}_${_selectedDate.day}'
-          '_${_currentCenter.latitude.toStringAsFixed(4)}'
-          '_${_currentCenter.longitude.toStringAsFixed(4)}'
-          '_$lonSpan';
-      final cached = _shadowResultCache[cacheKey];
-      if (cached != null) {
-        final elev   = (cached['elevation'] as num?)?.toDouble() ?? 0.0;
-        final azim   = (cached['azimuth']   as num?)?.toDouble() ?? 0.0;
-        final srHour = (cached['sunrise']   as num?)?.toDouble();
-        final ssHour = (cached['sunset']    as num?)?.toDouble();
-        if (cached['dark_area'] != null) {
-          await _updateMapLayers(cached['dark_area'] as Map<String, dynamic>, elev, requestGen: gen);
-        }
-        _pillTimer?.cancel();
-        if (mounted) setState(() {
-          _elevation = elev; _azimuth = azim;
-          _sunriseHour = srHour; _sunsetHour = ssHour;
-          _loading = false; _showPill = false; _loadingProgress = 0.0;
-        });
-        if (!completer.isCompleted) completer.complete();
-        return;
-      }
-
-      // Dim existing shadows while new data loads — keeps the map readable
-      // instead of going blank. Opacity is restored by _updateMapLayers.
-      if (_shadowLayersReady) {
-        _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.15));
-        _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.10));
-        _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.08));
-        _mapController!.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.09));
-        _mapController!.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.06));
-        _mapController!.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.05));
-      }
-
-      final uri = Uri.parse(
-        '$flaskBaseUrl/shadow/stream'
+      // Fetch sun angles — lightweight call, no geometry computation.
+      final metaUri = Uri.parse(
+        '$flaskBaseUrl/shadow/meta'
         '?lat=${_currentCenter.latitude}'
         '&lon=${_currentCenter.longitude}'
         '&hour=${_hour.toInt()}'
         '&minute=${((_hour * 60).toInt() % 60)}'
         '&month=${_selectedDate.month}'
-        '&day=${_selectedDate.day}'
-        '&zoom=$zoom'
-        '&minLat=${bounds.southwest.latitude  - (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
-        '&minLon=${bounds.southwest.longitude - (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}'
-        '&maxLat=${bounds.northeast.latitude  + (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
-        '&maxLon=${bounds.northeast.longitude + (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}',
+        '&day=${_selectedDate.day}',
       );
-
-      final es = html.EventSource(uri.toString());
-      _activeEventSource = es;
-
-      var resultReceived = false;
-
-      es.onMessage.listen((event) async {
-        if (gen != _fetchGen) {
-          es.close();
-          if (mounted) setState(() { _showPill = false; _loadingProgress = 0.0; _loadingStage = ''; });
-          return;
-        }
-
-        final data  = jsonDecode(event.data as String) as Map<String, dynamic>;
-        final pct   = (data['progress'] as num?)?.toDouble() ?? 0.0;
-        final stage = data['stage'] as String? ?? '';
-
-        if (mounted) setState(() {
-          _loadingProgress = pct / 100.0;
-          _loadingStage    = stage;
-        });
-
-        if (data.containsKey('result')) {
-          resultReceived = true;
-          es.close();
-          _activeEventSource = null;
-          final result  = data['result'] as Map<String, dynamic>;
-          final elev    = (result['elevation'] as num?)?.toDouble() ?? 0.0;
-          final azim    = (result['azimuth']   as num?)?.toDouble() ?? 0.0;
-          final srHour  = (result['sunrise']   as num?)?.toDouble();
-          final ssHour  = (result['sunset']    as num?)?.toDouble();
-          if (result['dark_area'] != null) {
-            await _updateMapLayers(result['dark_area'] as Map<String, dynamic>, elev, requestGen: gen);
-          }
-          // Store in client cache for instant replay (e.g. slider scrub back)
-          _shadowResultCache[cacheKey] = result;
-          if (_shadowResultCache.length > _shadowCacheMax) {
-            _shadowResultCache.remove(_shadowResultCache.keys.first);
-          }
-          // Background-preload all hours so 24h animation starts instantly
-          Future.delayed(const Duration(milliseconds: 800), () {
-            if (!mounted || _draggingSlider || _loading) return;
-            _triggerBackgroundPreload();
-          });
-          _pillTimer?.cancel();
-          if (mounted) {
-            setState(() {
-              _elevation   = elev;
-              _azimuth     = azim;
-              _sunriseHour = srHour;
-              _sunsetHour  = ssHour;
-              // Clamp current hour to daylight window
-              if (srHour != null && ssHour != null) {
-                _hour = _hour.clamp(srHour, ssHour);
-              }
-              _loading         = false;
-              _showPill        = false;
-              _loadingProgress = 0.0;
-              _loadingStage    = '';
-            });
-          }
-          if (!completer.isCompleted) completer.complete();
-        }
-
-        if (data.containsKey('error')) {
-          es.close();
-          _activeEventSource = null;
-          _pillTimer?.cancel();
-          _showError(data['error'] as String? ?? 'Server error');
-          if (mounted) {
-            setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
-          }
-          if (!completer.isCompleted) completer.complete();
-        }
-      });
-
-      es.onError.listen((_) {
-        if (gen != _fetchGen) return;
-        es.close();
-        _activeEventSource = null;
+      final metaResp = await http.get(metaUri).timeout(const Duration(seconds: 10));
+      if (gen != _fetchGen) {
         _pillTimer?.cancel();
-        // If stream dropped before result arrived, restore shadow layers to
-        // their pre-dim state so stale dimmed overlay doesn't persist.
-        if (!resultReceived && _shadowLayersReady && _mapController != null) {
-          _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.0));
-          _mapController!.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.0));
-        }
-        _showError('Could not load shadows — is the server running?');
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         if (!completer.isCompleted) completer.complete();
+        return;
+      }
+      final meta   = jsonDecode(metaResp.body) as Map<String, dynamic>;
+      final elev   = (meta['elevation'] as num?)?.toDouble() ?? 0.0;
+      final azim   = (meta['azimuth']   as num?)?.toDouble() ?? 0.0;
+      final srHour = (meta['sunrise']   as num?)?.toDouble();
+      final ssHour = (meta['sunset']    as num?)?.toDouble();
+
+      // Tile URL encodes time — MapLibre fetches {z}/{x}/{y} tiles automatically.
+      final tileUrlBase = '$flaskBaseUrl/shadow/tile/{z}/{x}/{y}.pbf'
+          '?hour=${_hour.toInt()}'
+          '&minute=${((_hour * 60).toInt() % 60)}'
+          '&month=${_selectedDate.month}'
+          '&day=${_selectedDate.day}';
+
+      if (tileUrlBase != _currentTileUrlBase || !_shadowLayersReady) {
+        await _rebuildShadowSource(tileUrlBase, elev);
+        _currentTileUrlBase = tileUrlBase;
+      } else {
+        await _updateShadowOpacity(elev);
+      }
+
+      Future.delayed(const Duration(milliseconds: 800), () {
+        if (!mounted || _draggingSlider || _loading) return;
+        _triggerBackgroundPreload();
       });
 
+      _pillTimer?.cancel();
+      if (mounted) {
+        setState(() {
+          _elevation    = elev;
+          _azimuth      = azim;
+          _sunriseHour  = srHour;
+          _sunsetHour   = ssHour;
+          if (srHour != null && ssHour != null) {
+            _hour = _hour.clamp(srHour, ssHour);
+          }
+          _loading         = false;
+          _showPill        = false;
+          _loadingProgress = 0.0;
+          _loadingStage    = '';
+        });
+      }
+      if (!completer.isCompleted) completer.complete();
       return completer.future;
 
     } catch (e) {
@@ -1770,128 +1677,84 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
-  // Silently pre-fetch an adjacent hour into the client cache.
-  // Does not touch UI state or _fetchGen — pure background work.
-  Future<void> _prefetchSilent(int hour, int zoom) async {
-    if (!_mapReady || _mapController == null) return;
-    final bounds = await _mapController!.getVisibleRegion();
-    final prefetchKey = '${zoom}_${hour}_${_selectedDate.month}_${_selectedDate.day}'
-        '_${_currentCenter.latitude.toStringAsFixed(4)}'
-        '_${_currentCenter.longitude.toStringAsFixed(4)}';
-    if (_shadowResultCache.containsKey(prefetchKey)) return;
-
-    final uri = Uri.parse(
-      '$flaskBaseUrl/shadow/stream'
-      '?lat=${_currentCenter.latitude}'
-      '&lon=${_currentCenter.longitude}'
-      '&hour=$hour&minute=0'
-      '&month=${_selectedDate.month}&day=${_selectedDate.day}'
-      '&zoom=$zoom'
-      '&minLat=${bounds.southwest.latitude}'
-      '&minLon=${bounds.southwest.longitude}'
-      '&maxLat=${bounds.northeast.latitude}'
-      '&maxLon=${bounds.northeast.longitude}',
-    );
-
-    final es = html.EventSource(uri.toString());
-    es.onMessage.listen((event) {
-      final data = jsonDecode(event.data as String) as Map<String, dynamic>;
-      if (data.containsKey('result')) {
-        es.close();
-        if (!_shadowResultCache.containsKey(prefetchKey)) {
-          _shadowResultCache[prefetchKey] = data['result'] as Map<String, dynamic>;
-          if (_shadowResultCache.length > _shadowCacheMax) {
-            _shadowResultCache.remove(_shadowResultCache.keys.first);
-          }
-        }
-      } else if (data.containsKey('error')) {
-        es.close();
-      }
-    });
-    es.onError.listen((_) => es.close());
-  }
-
-  Future<void> _updateMapLayers(Map<String, dynamic> geoJson, double elevation, {int? requestGen}) async {
+  Future<void> _rebuildShadowSource(String tileUrlBase, double elevation) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
-    // Stale-fetch guard: if a newer fetchShadows() has started since this
-    // request was issued, do NOT write its (smaller-bbox) geometry over the
-    // newer data. Without this, an in-flight z16 response can finish AFTER
-    // a faster z14 cache-hit and leave the old z16 dark frame on the map.
-    if (requestGen != null && requestGen != _fetchGen) return;
 
-    final t   = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
+    if (_shadowLayersReady) {
+      for (final id in ['shadow-l2-line', 'shadow-l2-fill', 'shadow-l1-line',
+                         'shadow-l1-fill', 'shadow-l0-line', 'shadow-l0-fill']) {
+        try { await ctrl.removeLayer(id); } catch (_) {}
+      }
+      try { await ctrl.removeSource('dark-area'); } catch (_) {}
+      _shadowLayersReady = false;
+    }
+
+    final t    = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
     final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Softer ramp: heatmap-like at z11, fully present at z16.
     List<dynamic> zoomOp(double op) =>
         ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
-    // Line layers at 60% of fill opacity — feathers polygon edges.
     List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
 
-    if (_shadowLayersReady) {
-      try {
-        // Re-check gen right before each await-gated write — a superseded
-        // fetch must never land its setData call after a newer one.
-        if (requestGen != null && requestGen != _fetchGen) return;
-        await ctrl.setGeoJsonSource('dark-area', geoJson);
-        if (requestGen != null && requestGen != _fetchGen) return;
-        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
-        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
-        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
-        await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
-        await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
-        await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
-        return;
-      } catch (_) {
-        _shadowLayersReady = false;
-      }
-    }
+    await ctrl.addSource('dark-area', VectorSourceProperties(
+      tiles: [tileUrlBase],
+      minzoom: 12,
+      maxzoom: 18,
+    ));
 
-    // First time (or after style reload): create source and all 6 layers.
-    // Fills: l0 (edge) → l1 (mid) → l2 (core). Lines: feather each ring's boundary.
-    if (requestGen != null && requestGen != _fetchGen) return;
-    await ctrl.addSource('dark-area', GeojsonSourceProperties(data: geoJson));
-
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l0-fill',
+    await ctrl.addLayer('dark-area', 'shadow-l0-fill',
       FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)),
-      filter: ['==', ['get', 'layer'], 'shadow-l0'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l0-line',
+    await ctrl.addLayer('dark-area', 'shadow-l0-line',
       LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
-      filter: ['==', ['get', 'layer'], 'shadow-l0'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l1-fill',
+    await ctrl.addLayer('dark-area', 'shadow-l1-fill',
       FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)),
-      filter: ['==', ['get', 'layer'], 'shadow-l1'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l1-line',
+    await ctrl.addLayer('dark-area', 'shadow-l1-line',
       LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
-      filter: ['==', ['get', 'layer'], 'shadow-l1'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l2-fill',
+    await ctrl.addLayer('dark-area', 'shadow-l2-fill',
       FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)),
-      filter: ['==', ['get', 'layer'], 'shadow-l2'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
-    await ctrl.addLayer(
-      'dark-area', 'shadow-l2-line',
+    await ctrl.addLayer('dark-area', 'shadow-l2-line',
       LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
-      filter: ['==', ['get', 'layer'], 'shadow-l2'],
-      enableInteraction: false,
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     _shadowLayersReady = true;
+  }
+
+  Future<void> _updateShadowOpacity(double elevation) async {
+    final ctrl = _mapController;
+    if (ctrl == null || !_shadowLayersReady) return;
+
+    final t    = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
+    final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
+    final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
+    final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
+
+    List<dynamic> zoomOp(double op) =>
+        ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
+    List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
+
+    try {
+      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
+      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
+      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
+      await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
+      await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
+      await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
+    } catch (_) {
+      _shadowLayersReady = false;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1933,40 +1796,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
-  Future<void> _prefetchHourAwaitable(int hour, int zoom, String lonSpan, dynamic bounds) async {
-    final cacheKey = '${zoom}_${hour}_${_selectedDate.month}_${_selectedDate.day}'
-        '_${_currentCenter.latitude.toStringAsFixed(3)}'
-        '_${_currentCenter.longitude.toStringAsFixed(3)}'
-        '_$lonSpan';
-    if (_shadowResultCache.containsKey(cacheKey)) return;
-    final completer = Completer<void>();
-    final uri = Uri.parse(
-      '$flaskBaseUrl/shadow/stream'
-      '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
-      '&hour=$hour&minute=0'
-      '&month=${_selectedDate.month}&day=${_selectedDate.day}'
-      '&zoom=$zoom'
-      '&minLat=${bounds.southwest.latitude  - (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
-      '&minLon=${bounds.southwest.longitude - (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}'
-      '&maxLat=${bounds.northeast.latitude  + (bounds.northeast.latitude  - bounds.southwest.latitude)  * 0.10}'
-      '&maxLon=${bounds.northeast.longitude + (bounds.northeast.longitude - bounds.southwest.longitude) * 0.10}',
-    );
-    final es = html.EventSource(uri.toString());
-    es.onMessage.listen((event) {
-      final data = jsonDecode(event.data as String) as Map<String, dynamic>;
-      if (data.containsKey('result')) {
-        es.close();
-        _shadowResultCache[cacheKey] = data['result'] as Map<String, dynamic>;
-        if (_shadowResultCache.length > _shadowCacheMax) _shadowResultCache.remove(_shadowResultCache.keys.first);
-        if (!completer.isCompleted) completer.complete();
-      } else if (data.containsKey('error')) {
-        es.close();
-        if (!completer.isCompleted) completer.complete();
-      }
-    });
-    es.onError.listen((_) { es.close(); if (!completer.isCompleted) completer.complete(); });
-    return completer.future;
-  }
+  // With MVT, MapLibre's own tile cache handles animation replay efficiently.
+  // Server-side shadow_cache is keyed per tile, not per viewport.
+  Future<void> _prefetchHourAwaitable(int hour, int zoom, String lonSpan, dynamic bounds) async {}
 
   void _triggerBackgroundPreload() {
     if (_bgPreloading || _animating || _preloading24h) return;

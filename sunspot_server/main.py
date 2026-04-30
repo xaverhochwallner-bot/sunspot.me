@@ -1240,6 +1240,53 @@ def shadow():
 
 
 # ---------------------------------------------------------------------------
+# Shadow — lightweight metadata endpoint (sun angles only, no geometry)
+# ---------------------------------------------------------------------------
+
+@app.route("/shadow/meta")
+def shadow_meta():
+    try:
+        lat    = request.args.get("lat",    default=48.2082, type=float)
+        lon    = request.args.get("lon",    default=16.3738, type=float)
+        hour   = request.args.get("hour",   default=None, type=int)
+        minute = request.args.get("minute", default=0,    type=int)
+        month  = request.args.get("month",  default=None, type=int)
+        day    = request.args.get("day",    default=None, type=int)
+
+        tz  = pytz.timezone("Europe/Vienna")
+        now = datetime.now(tz)
+        if month is not None and day is not None:
+            now = now.replace(month=month, day=day)
+        if hour is not None:
+            now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        elevation, azimuth = get_sun_angles(lat, lon, now)
+
+        sunrise = sunset = None
+        for h in range(4, 22):
+            dt0 = now.replace(hour=h,   minute=0, second=0, microsecond=0)
+            dt1 = now.replace(hour=h+1, minute=0, second=0, microsecond=0)
+            e0, _ = get_sun_angles(lat, lon, dt0)
+            e1, _ = get_sun_angles(lat, lon, dt1)
+            if e0 <= 0 < e1 and sunrise is None:
+                sunrise = h + e0 / (e0 - e1) if (e0 - e1) != 0 else float(h)
+            if e0 > 0 >= e1 and sunset is None:
+                sunset  = h + e0 / (e0 - e1) if (e0 - e1) != 0 else float(h)
+
+        resp = jsonify({
+            "time":      now.strftime("%H:%M"),
+            "elevation": elevation,
+            "azimuth":   azimuth,
+            "sunrise":   sunrise,
+            "sunset":    sunset,
+        })
+        resp.headers['Cache-Control'] = 'public, max-age=3600'
+        return resp
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
 # Shadow — MVT tile endpoint
 # /shadow/tile/<z>/<x>/<y>.pbf?hour=14&minute=30&month=4&day=30
 # ---------------------------------------------------------------------------
