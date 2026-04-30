@@ -121,6 +121,16 @@ _shadow_cache = {}
 MAX_CACHE     = 10000
 SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
 
+# Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
+# Avoids re-running shadow geometry + encoding for repeated tile requests.
+# ~300 bytes/tile × 20 000 tiles ≈ 6 MB max.
+_tile_cache    = {}
+MAX_TILE_CACHE = 20000
+
+def _trim_tile_cache():
+    while len(_tile_cache) > MAX_TILE_CACHE:
+        _tile_cache.pop(next(iter(_tile_cache)))
+
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
 def _cache_grid(zoom):
@@ -1287,6 +1297,70 @@ def shadow_meta():
 
 
 # ---------------------------------------------------------------------------
+# Shadow — MVT tile helpers
+# ---------------------------------------------------------------------------
+
+def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
+    """Compute and return PBF bytes for one shadow tile. Returns None on error."""
+    try:
+        bounds = mercantile.bounds(x, y, z)
+        tile_west, tile_south, tile_east, tile_north = bounds
+        tile_cx = (tile_west  + tile_east)  / 2
+        tile_cy = (tile_south + tile_north) / 2
+        tile_bbox        = shapely_box(tile_west, tile_south, tile_east, tile_north)
+        tile_bounds_tuple = (tile_west, tile_south, tile_east, tile_north)
+
+        tz  = pytz.timezone("Europe/Vienna")
+        now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
+        elevation, azimuth = get_sun_angles(tile_cy, tile_cx, now)
+
+        def _enc(g0, g1, g2):
+            return bytes(mapbox_vector_tile.encode(
+                [{"name": "shadows", "features": [
+                    {"geometry": g0.wkt, "properties": {"layer": "shadow-l0"}},
+                    {"geometry": g1.wkt, "properties": {"layer": "shadow-l1"}},
+                    {"geometry": g2.wkt, "properties": {"layer": "shadow-l2"}},
+                ]}],
+                default_options={"quantize_bounds": tile_bounds_tuple, "extents": 4096},
+            ))
+
+        if elevation <= 0:
+            dark = orient(tile_bbox, sign=1.0)
+            return _enc(dark, dark, dark)
+
+        MAX_BLDG_H = 150
+        shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 1.0)))
+        buf_deg    = min(shadow_m / 111320.0, 0.05)
+
+        q_bounds = (
+            tile_south - buf_deg, tile_west - buf_deg,
+            tile_north + buf_deg, tile_east + buf_deg,
+        )
+
+        ck = _cache_key(hour, month, day, tile_cy, tile_cx, z)
+        sunlit, buf_e1, buf_e2 = _compute_shadow_data(
+            z, elevation, azimuth, q_bounds, ck, hour, month, day, tile_cy, tile_cx,
+        )
+
+        def _shadow_in_tile(eroded):
+            if eroded is None:
+                return tile_bbox
+            try:
+                return orient(tile_bbox.difference(eroded), sign=1.0)
+            except Exception:
+                return tile_bbox
+
+        return _enc(
+            _shadow_in_tile(sunlit),
+            _shadow_in_tile(buf_e1),
+            _shadow_in_tile(buf_e2),
+        )
+    except Exception as e:
+        print(f"[tile] error {z}/{x}/{y} h={hour}: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Shadow — MVT tile endpoint
 # /shadow/tile/<z>/<x>/<y>.pbf?hour=14&minute=30&month=4&day=30
 # ---------------------------------------------------------------------------
@@ -1306,70 +1380,26 @@ def shadow_tile(z, x, y):
         if hour is not None:
             now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        # Tile bounds (lon/lat)
-        bounds = mercantile.bounds(x, y, z)
-        tile_west, tile_south, tile_east, tile_north = bounds
-        tile_cx = (tile_west  + tile_east)  / 2
-        tile_cy = (tile_south + tile_north) / 2
-        tile_bbox = shapely_box(tile_west, tile_south, tile_east, tile_north)
+        h, mo, d = now.hour, now.month, now.day
+        tck = (z, x, y, h, mo, d)
 
-        elevation, azimuth = get_sun_angles(tile_cy, tile_cx, now)
-
-        tile_bounds_tuple = (tile_west, tile_south, tile_east, tile_north)
-
-        def _encode_pbf(geom_l0, geom_l1, geom_l2):
-            return mapbox_vector_tile.encode(
-                [{"name": "shadows", "features": [
-                    {"geometry": geom_l0.wkt, "properties": {"layer": "shadow-l0"}},
-                    {"geometry": geom_l1.wkt, "properties": {"layer": "shadow-l1"}},
-                    {"geometry": geom_l2.wkt, "properties": {"layer": "shadow-l2"}},
-                ]}],
-                default_options={"quantize_bounds": tile_bounds_tuple, "extents": 4096},
-            )
-
-        def _pbf_response(pbf):
-            resp = Response(bytes(pbf), status=200, mimetype="application/x-protobuf")
+        def _pbf_resp(data):
+            resp = Response(data, status=200, mimetype="application/x-protobuf")
             resp.headers['Cache-Control'] = 'public, max-age=3600'
             resp.headers['Access-Control-Allow-Origin'] = '*'
             return resp
 
-        # Nighttime — full tile is dark
-        if elevation <= 0:
-            dark = orient(tile_bbox, sign=1.0)
-            return _pbf_response(_encode_pbf(dark, dark, dark))
+        if tck in _tile_cache:
+            return _pbf_resp(_tile_cache[tck])
 
-        # Shadow buffer: buildings outside the tile can cast shadows into it.
-        # Use shadow_length = MAX_BLDG_H / tan(elevation).
-        MAX_BLDG_H = 150  # metres (conservative Vienna max)
-        shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 1.0)))
-        buf_deg    = min(shadow_m / 111320.0, 0.05)
+        pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
+        if pbf is None:
+            return Response(b'', status=500)
 
-        q_bounds = (
-            tile_south - buf_deg, tile_west - buf_deg,
-            tile_north + buf_deg, tile_east + buf_deg,
-        )
-
-        ck = _cache_key(now.hour, now.month, now.day, tile_cy, tile_cx, z)
-        sunlit, buf_e1, buf_e2 = _compute_shadow_data(
-            z, elevation, azimuth, q_bounds, ck,
-            now.hour, now.month, now.day, tile_cy, tile_cx,
-        )
-
-        def _shadow_in_tile(eroded):
-            """Shadow within this tile = tile minus the sunlit (eroded) region."""
-            if eroded is None:
-                return tile_bbox
-            try:
-                return orient(tile_bbox.difference(eroded), sign=1.0)
-            except Exception:
-                return tile_bbox
-
-        geom_l0 = _shadow_in_tile(sunlit)
-        geom_l1 = _shadow_in_tile(buf_e1)
-        geom_l2 = _shadow_in_tile(buf_e2)
-
-        print(f"🟦 [tile] z={z}/{x}/{y} elev={elevation:.1f}° buf={buf_deg:.4f}°", flush=True)
-        return _pbf_response(_encode_pbf(geom_l0, geom_l1, geom_l2))
+        _tile_cache[tck] = pbf
+        _trim_tile_cache()
+        print(f"🟦 [tile] z={z}/{x}/{y} h={h} cached={len(_tile_cache)}", flush=True)
+        return _pbf_resp(pbf)
 
     except Exception as e:
         import traceback
@@ -2483,7 +2513,28 @@ def _startup_prewarm():
         for f in futs:
             try:    f.result()
             except Exception as e: print(f"[startup] prewarm error: {e}")
-    print("[startup] Pre-warm complete.")
+    print("[startup] Shadow pre-warm complete.")
+
+    # Tile pre-warm: encode PBF for 3×3 tiles around Vienna center at z13-15.
+    # Runs after shadow cache is warm so tile encoding is instant.
+    lat, lon = 48.2082, 16.3738
+    tile_tasks = []
+    for zoom in (13, 14, 15):
+        ct = mercantile.tile(lon, lat, zoom)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                t = mercantile.Tile(ct.x + dx, ct.y + dy, zoom)
+                for h in hours:
+                    tile_tasks.append((zoom, t.x, t.y, h, now.month, now.day))
+    print(f"[startup] Pre-warming {len(tile_tasks)} PBF tiles ...")
+    for z, x, y, h, mo, d in tile_tasks:
+        tck = (z, x, y, h, mo, d)
+        if tck not in _tile_cache:
+            pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
+            if pbf:
+                _tile_cache[tck] = pbf
+                _trim_tile_cache()
+    print(f"[startup] Tile pre-warm complete. {len(_tile_cache)} tiles cached.")
 
 threading.Thread(target=_startup_prewarm, daemon=True).start()
 
