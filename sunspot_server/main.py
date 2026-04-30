@@ -23,6 +23,8 @@ from datetime import time as dtime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import pysolar.solar as ps
+import mercantile
+import mapbox_vector_tile
 
 # ---------------------------------------------------------------------------
 # OSM opening_hours parser (covers ~90% of real-world tags)
@@ -1235,6 +1237,97 @@ def shadow():
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Shadow — MVT tile endpoint
+# /shadow/tile/<z>/<x>/<y>.pbf?hour=14&minute=30&month=4&day=30
+# ---------------------------------------------------------------------------
+
+@app.route("/shadow/tile/<int:z>/<int:x>/<int:y>.pbf")
+def shadow_tile(z, x, y):
+    try:
+        hour   = request.args.get("hour",   default=None, type=int)
+        minute = request.args.get("minute", default=0,    type=int)
+        month  = request.args.get("month",  default=None, type=int)
+        day    = request.args.get("day",    default=None, type=int)
+
+        tz  = pytz.timezone("Europe/Vienna")
+        now = datetime.now(tz)
+        if month is not None and day is not None:
+            now = now.replace(month=month, day=day)
+        if hour is not None:
+            now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+        # Tile bounds (lon/lat)
+        bounds = mercantile.bounds(x, y, z)
+        tile_west, tile_south, tile_east, tile_north = bounds
+        tile_cx = (tile_west  + tile_east)  / 2
+        tile_cy = (tile_south + tile_north) / 2
+        tile_bbox = shapely_box(tile_west, tile_south, tile_east, tile_north)
+
+        elevation, azimuth = get_sun_angles(tile_cy, tile_cx, now)
+
+        tile_bounds_tuple = (tile_west, tile_south, tile_east, tile_north)
+
+        def _encode_pbf(geom_l0, geom_l1, geom_l2):
+            return mapbox_vector_tile.encode(
+                [{"name": "shadows", "features": [
+                    {"geometry": geom_l0.wkt, "properties": {"layer": "shadow-l0"}},
+                    {"geometry": geom_l1.wkt, "properties": {"layer": "shadow-l1"}},
+                    {"geometry": geom_l2.wkt, "properties": {"layer": "shadow-l2"}},
+                ]}],
+                default_options={"quantize_bounds": tile_bounds_tuple, "extents": 4096},
+            )
+
+        def _pbf_response(pbf):
+            resp = Response(bytes(pbf), status=200, mimetype="application/x-protobuf")
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Access-Control-Allow-Origin'] = '*'
+            return resp
+
+        # Nighttime — full tile is dark
+        if elevation <= 0:
+            dark = orient(tile_bbox, sign=1.0)
+            return _pbf_response(_encode_pbf(dark, dark, dark))
+
+        # Shadow buffer: buildings outside the tile can cast shadows into it.
+        # Use shadow_length = MAX_BLDG_H / tan(elevation).
+        MAX_BLDG_H = 150  # metres (conservative Vienna max)
+        shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 1.0)))
+        buf_deg    = min(shadow_m / 111320.0, 0.05)
+
+        q_bounds = (
+            tile_south - buf_deg, tile_west - buf_deg,
+            tile_north + buf_deg, tile_east + buf_deg,
+        )
+
+        ck = _cache_key(now.hour, now.month, now.day, tile_cy, tile_cx, z)
+        sunlit, buf_e1, buf_e2 = _compute_shadow_data(
+            z, elevation, azimuth, q_bounds, ck,
+            now.hour, now.month, now.day, tile_cy, tile_cx,
+        )
+
+        def _shadow_in_tile(eroded):
+            """Shadow within this tile = tile minus the sunlit (eroded) region."""
+            if eroded is None:
+                return tile_bbox
+            try:
+                return orient(tile_bbox.difference(eroded), sign=1.0)
+            except Exception:
+                return tile_bbox
+
+        geom_l0 = _shadow_in_tile(sunlit)
+        geom_l1 = _shadow_in_tile(buf_e1)
+        geom_l2 = _shadow_in_tile(buf_e2)
+
+        print(f"🟦 [tile] z={z}/{x}/{y} elev={elevation:.1f}° buf={buf_deg:.4f}°", flush=True)
+        return _pbf_response(_encode_pbf(geom_l0, geom_l1, geom_l2))
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response(b'', status=500)
 
 
 # ---------------------------------------------------------------------------

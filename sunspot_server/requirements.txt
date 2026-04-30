@@ -10,3 +10,5 @@ pytz>=2024
 pysolar==0.13
 requests>=2.32
 shapely>=2.0
+mapbox-vector-tile>=2.2
+mercantile>=1.2
