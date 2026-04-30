@@ -232,18 +232,20 @@ _CFG_MACRO_EROSION = {
 
 # Morphological close distance (deg) per zoom — z ≥ 15 only.
 # Applied as buffer(+d).buffer(-d×0.85), so net shadow expansion ≈ d×0.15.
+# Kept minimal so per-building shadows stay distinct (avoids detail inversion vs macro).
 _CFG_GAP_FILL = {
-    17: 0.000014,  # ~1.5 m net
-    16: 0.000020,  # ~2 m net
-    15: 0.000018,  # ~2 m net — keep buildings separate
+    17: 0.000003,  # ~0.3 m net
+    16: 0.000003,  # ~0.3 m net
+    15: 0.000003,  # ~0.3 m net
 }
 
 # Geometry simplification tolerance (deg) per zoom — z ≥ 15 only.
+# Must be finer than macro (0.0001 ≈ 11 m) so detail increases as zoom increases.
 _CFG_SIMPLIFY = {
-    18: 0.000005,  # ~0.5 m
-    17: 0.000010,  # ~1 m
-    16: 0.000020,  # ~2 m
-    15: 0.000025,  # ~2.5 m
+    18: 0.000003,  # ~0.3 m
+    17: 0.000005,  # ~0.5 m
+    16: 0.000007,  # ~0.8 m
+    15: 0.000010,  # ~1 m
 }
 
 # Two erosion distances (deg) for the 3-ring shadow depth effect — z ≥ 15 only.
