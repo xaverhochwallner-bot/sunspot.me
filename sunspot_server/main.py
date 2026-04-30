@@ -209,7 +209,7 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 # Macro / Micro split:
 #   z ≤ MACRO_ZOOM_THRESHOLD → super-block fast path (single l0 layer, ~150-500 ms cold)
 #   z >  MACRO_ZOOM_THRESHOLD → per-building pipeline with l0/l1/l2 erosion rings
-MACRO_ZOOM_THRESHOLD = 14
+MACRO_ZOOM_THRESHOLD = 13
 
 # Static Block Database — built once at startup, persisted in pickle cache.
 # All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
@@ -226,38 +226,42 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 _CFG_MACRO_EROSION = {
     12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
     13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
-    14: (0.00006, 0.00015),  # ~7 m / ~17 m — pulled toward micro to smooth z14→z15 jump
+    # z14 now uses the micro pipeline — no macro erosion entry needed
 }
 
-# Morphological close distance (deg) per zoom — z ≥ 15 only.
+# Morphological close distance (deg) per zoom — z ≥ 14 (micro pipeline).
 # Applied as buffer(+d).buffer(-d×0.85), so net shadow expansion ≈ d×0.15.
-# Kept minimal so per-building shadows stay distinct (avoids detail inversion vs macro).
+# Kept minimal so per-building shadows stay distinct.
 _CFG_GAP_FILL = {
     17: 0.000003,  # ~0.3 m net
     16: 0.000003,  # ~0.3 m net
     15: 0.000003,  # ~0.3 m net
+    14: 0.000003,  # ~0.3 m net
 }
 
-# Geometry simplification tolerance (deg) per zoom — z ≥ 15 only.
-# Must be finer than macro (0.0001 ≈ 11 m) so detail increases as zoom increases.
+# Geometry simplification tolerance (deg) per zoom — z ≥ 14 (micro pipeline).
+# Detail increases with zoom; z14 is coarser to bridge to z13 macro.
 _CFG_SIMPLIFY = {
     18: 0.000003,  # ~0.3 m
     17: 0.000005,  # ~0.5 m
     16: 0.000007,  # ~0.8 m
-    15: 0.000018,  # ~2 m — slightly coarser to smooth z14→z15 jump
+    15: 0.000015,  # ~1.7 m
+    14: 0.000025,  # ~3 m   — bridge between z13 macro and z15 micro
 }
 
-# Two erosion distances (deg) for the 3-ring shadow depth effect — z ≥ 15 only.
+# Two erosion distances (deg) for the 3-ring shadow depth effect — z ≥ 14 (micro pipeline).
 _CFG_EROSION = {
     17: (0.000012, 0.000030),
     16: (0.000022, 0.000055),
-    15: (0.000060, 0.000145),  # slightly larger — pulled toward macro to smooth z14→z15 jump
+    15: (0.000050, 0.000120),
+    14: (0.000075, 0.000180),  # ~8 m / ~20 m — bridge between z13 macro and z15 micro
 }
 
 # Pre-simplification of raw OSM building polygons at startup (deg).
-# Only z15 is needed now — macro zooms use the super-block DB instead.
+# z14 and z15 are micro pipeline zooms — pre-simplified for faster union at request time.
 PRE_SIMPLIFY = {
     15: 0.000010,  # ~1 m
+    14: 0.000025,  # ~3 m — matches _CFG_SIMPLIFY[14], reduces vertex count for wide z14 viewports
 }
 
 # Bounding box filter applied during parsing — keeps only relevant buildings
@@ -869,11 +873,12 @@ def _build_super_blocks(from_cache=None):
 
 
 def _min_sunlit_area(zoom):
-    """Minimum sunlit patch area (deg²) — z ≥ 15 pipeline only.
+    """Minimum sunlit patch area (deg²) — micro pipeline (z ≥ 14).
     Macro zooms use the constant MACRO_MIN_SUNLIT_AREA instead.
+    Uses base-2 progression so z14 (~980 m²) stays permissive enough to keep street gaps.
     """
     base = 2e-8   # ~200 m² at z16
-    return max(1e-10, base * (3 ** (16 - zoom)))
+    return max(1e-10, base * (2 ** (16 - zoom)))
 
 
 def _cfg_zoom(cfg, zoom):
