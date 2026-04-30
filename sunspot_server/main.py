@@ -226,7 +226,7 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 _CFG_MACRO_EROSION = {
     12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
     13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
-    14: (0.0001, 0.0003),   # ~11 m / ~33 m — city-block scale
+    14: (0.00006, 0.00015),  # ~7 m / ~17 m — pulled toward micro to smooth z14→z15 jump
 }
 
 # Morphological close distance (deg) per zoom — z ≥ 15 only.
@@ -244,14 +244,14 @@ _CFG_SIMPLIFY = {
     18: 0.000003,  # ~0.3 m
     17: 0.000005,  # ~0.5 m
     16: 0.000007,  # ~0.8 m
-    15: 0.000010,  # ~1 m
+    15: 0.000018,  # ~2 m — slightly coarser to smooth z14→z15 jump
 }
 
 # Two erosion distances (deg) for the 3-ring shadow depth effect — z ≥ 15 only.
 _CFG_EROSION = {
     17: (0.000012, 0.000030),
     16: (0.000022, 0.000055),
-    15: (0.000045, 0.000110),
+    15: (0.000060, 0.000145),  # slightly larger — pulled toward macro to smooth z14→z15 jump
 }
 
 # Pre-simplification of raw OSM building polygons at startup (deg).
