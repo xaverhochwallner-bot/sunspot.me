@@ -2491,7 +2491,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
               await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                  CameraPosition(target: cam.target, zoom: (cam.zoom + 1).clamp(1, 20))));
+                  CameraPosition(target: cam.target, zoom: (cam.zoom + 0.5).clamp(1, 20))));
             }),
           ),
           Positioned(
@@ -2502,7 +2502,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               final cam = _mapController?.cameraPosition;
               if (cam == null) return;
               await _mapController?.animateCamera(CameraUpdate.newCameraPosition(
-                  CameraPosition(target: cam.target, zoom: (cam.zoom - 1).clamp(1, 20))));
+                  CameraPosition(target: cam.target, zoom: (cam.zoom - 0.5).clamp(1, 20))));
             }),
           ),
         ],
