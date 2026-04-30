@@ -215,12 +215,12 @@ MACRO_ZOOM_THRESHOLD = 14
 # All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
 # each carrying an area-weighted average member height. Macro zooms project
 # shadows of these blocks instead of individual buildings.
-SUPER_BLOCK_BUFFER   = 0.000045   # ~5 m close radius — fuses touching footprints, keeps streets open
+SUPER_BLOCK_BUFFER   = 0.000025   # ~3 m close radius — fuses touching footprints, keeps streets open
 SUPER_BLOCK_SIMPLIFY = 0.0001     # ~11 m — sub-pixel at z14, applied after merge
 
 # Macro pipeline post-processing
 MACRO_SIMPLIFY        = 0.0001    # ~11 m — applied to sunlit difference
-MACRO_MIN_SUNLIT_AREA = 1e-7      # ~800 m² — keeps street-width sunlit patches
+MACRO_MIN_SUNLIT_AREA = 5e-8      # ~400 m² — keeps narrower street-width sunlit patches
 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
