@@ -1617,8 +1617,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // don't share cached results computed for a different aspect ratio.
       final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
       final cacheKey = '${zoom}_${_hour.toInt()}_${_selectedDate.month}_${_selectedDate.day}'
-          '_${_currentCenter.latitude.toStringAsFixed(3)}'
-          '_${_currentCenter.longitude.toStringAsFixed(3)}'
+          '_${_currentCenter.latitude.toStringAsFixed(4)}'
+          '_${_currentCenter.longitude.toStringAsFixed(4)}'
           '_$lonSpan';
       final cached = _shadowResultCache[cacheKey];
       if (cached != null) {
@@ -1776,8 +1776,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (!_mapReady || _mapController == null) return;
     final bounds = await _mapController!.getVisibleRegion();
     final prefetchKey = '${zoom}_${hour}_${_selectedDate.month}_${_selectedDate.day}'
-        '_${_currentCenter.latitude.toStringAsFixed(3)}'
-        '_${_currentCenter.longitude.toStringAsFixed(3)}';
+        '_${_currentCenter.latitude.toStringAsFixed(4)}'
+        '_${_currentCenter.longitude.toStringAsFixed(4)}';
     if (_shadowResultCache.containsKey(prefetchKey)) return;
 
     final uri = Uri.parse(
