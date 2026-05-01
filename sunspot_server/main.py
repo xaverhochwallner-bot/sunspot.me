@@ -1217,13 +1217,13 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
                 default_options={"quantize_bounds": tile_bounds_tuple, "extents": 4096},
             ))
 
-        if elevation < 4:
+        if elevation <= 0:
             dark = orient(tile_bbox, sign=1.0)
             return _enc(dark, dark, dark)
 
         MAX_BLDG_H = 150
-        shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 1.0)))
-        buf_deg    = min(shadow_m / 111320.0, 0.05)
+        shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 6.0)))
+        buf_deg    = min(shadow_m / 111320.0, 0.02)
 
         q_bounds = (
             tile_south - buf_deg, tile_west - buf_deg,
