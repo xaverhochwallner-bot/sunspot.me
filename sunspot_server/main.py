@@ -1337,7 +1337,7 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
             tile_north + buf_deg, tile_east + buf_deg,
         )
 
-        ck = _cache_key(hour, month, day, tile_cy, tile_cx, z)
+        ck = ('tile', z, x, y, hour, month, day)  # tile-unique — no lat/lon snapping collision
         sunlit, buf_e1, buf_e2 = _compute_shadow_data(
             z, elevation, azimuth, q_bounds, ck, hour, month, day, tile_cy, tile_cx,
         )
