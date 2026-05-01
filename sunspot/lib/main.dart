@@ -70,7 +70,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String              _loadingStage    = '';
   bool                _showPill        = false;  // only true after 150ms delay
   Timer?              _pillTimer;
-  html.EventSource?   _activeEventSource;
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
@@ -80,8 +79,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3_lonSpan'
   // zoom is the INTEGER camera zoom; lonSpan prevents reusing data at a different viewport size.
   // A cached result for z15 is NEVER returned for a z13 lookup (different key).
-  final Map<String, Map<String, dynamic>> _shadowResultCache = {};
-  static const int _shadowCacheMax = 50;
 
   // Panel
   bool _panelOpen = true;
@@ -1571,8 +1568,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> fetchShadows() async {
     if (!_mapReady || _mapController == null) return;
 
-    _activeEventSource?.close();
-    _activeEventSource = null;
     _pillTimer?.cancel();
     // Complete previous completer so any awaiting caller (animation) unblocks
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
@@ -1911,7 +1906,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _panelScroll.dispose();
     _mobileContentScroll.dispose();
     _sunSpinCtrl.dispose();
-    _activeEventSource?.close();
     if (_fetchCompleter != null && !_fetchCompleter!.isCompleted) {
       _fetchCompleter!.complete();
     }
