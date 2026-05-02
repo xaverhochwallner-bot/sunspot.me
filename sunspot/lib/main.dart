@@ -70,6 +70,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String              _loadingStage    = '';
   bool                _showPill        = false;  // only true after 150ms delay
   Timer?              _pillTimer;
+  Timer?              _sliderDebounce;
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
@@ -270,6 +271,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Monkey-patch maplibregl.Map.prototype.addSource so the first shadow-source
   // call captures the JS map instance and exposes areTilesLoaded() globally.
+  // Also intercepts window.fetch to count shadow tile requests for real progress.
   void _injectTileLoadHelper() {
     try {
       js.context.callMethod('eval', [r'''
@@ -289,6 +291,29 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             if (!window.__sunspot_map) return true;
             try { return window.__sunspot_map.areTilesLoaded(); } catch(e) { return true; }
           };
+
+          // Intercept fetch() for shadow tile URLs to track 0–100% progress.
+          window.__sp_pending = 0; window.__sp_done = 0;
+          window.__sunspot_resetProgress = function() { window.__sp_pending = 0; window.__sp_done = 0; };
+          window.__sunspot_tileProgress = function() {
+            var p = window.__sp_pending || 0, d = window.__sp_done || 0;
+            return p === 0 ? 1.0 : Math.min(d / p, 1.0);
+          };
+          (function() {
+            var _origFetch = window.fetch;
+            window.fetch = function(url, opts) {
+              var u = typeof url === 'string' ? url : (url && url.url) || '';
+              if (u.indexOf('/shadow/tile/') >= 0) {
+                window.__sp_pending = (window.__sp_pending || 0) + 1;
+                return _origFetch.apply(this, arguments).then(function(r) {
+                  window.__sp_done = (window.__sp_done || 0) + 1; return r;
+                }, function(e) {
+                  window.__sp_done = (window.__sp_done || 0) + 1; throw e;
+                });
+              }
+              return _origFetch.apply(this, arguments);
+            };
+          })();
         })();
       ''']);
     } catch (_) {}
@@ -301,6 +326,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {
       return true;
     }
+  }
+
+  void _resetTileProgress() {
+    try {
+      js.context.callMethod('eval',
+          ['window.__sunspot_resetProgress&&window.__sunspot_resetProgress()']);
+    } catch (_) {}
+  }
+
+  double _tileProgress() {
+    try {
+      return (js.context.callMethod('eval',
+          ['(window.__sunspot_tileProgress||function(){return 1.0;})()']) as num?)
+              ?.toDouble() ?? 1.0;
+    } catch (_) { return 1.0; }
   }
 
   void _setMapCanvasInteractive(bool interactive) {
@@ -1623,6 +1663,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _loadingStage    = '';
       _showPill        = false;
     });
+    // Block map pan/zoom while loading so the server isn't hammered by stacked requests.
+    if (!_animating) _setMapPointerEvents(false);
 
     // Show pill after 150 ms if still loading (not during animation or 24h preload).
     if (!_animating && !_preloading24h) {
@@ -1637,6 +1679,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Below zoom 12: skip tile fetch — zoom interpolation fades shadows naturally.
       if (rawZoom < 12.0) {
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        _setMapPointerEvents(true);
         if (!completer.isCompleted) completer.complete();
         return;
       }
@@ -1683,12 +1726,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
       if (!completer.isCompleted) completer.complete();
 
-      // Keep thin top-bar visible while MapLibre streams tiles; skip during animation.
+      // Poll real tile-fetch progress until MapLibre reports all tiles rendered.
+      // Skip during animation — tiles come from warm server cache so this is near-instant.
       if (!_animating) {
-        await Future.delayed(const Duration(milliseconds: 1500));
+        _resetTileProgress();
+        for (var i = 0; i < 80 && gen == _fetchGen && mounted; i++) {
+          await Future.delayed(const Duration(milliseconds: 100));
+          if (!mounted || gen != _fetchGen) break;
+          final prog = _tileProgress();
+          setState(() => _loadingProgress = prog);
+          if (_tilesLoaded() && prog >= 1.0) break;
+        }
       }
       if (gen == _fetchGen && mounted) {
         setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        _setMapPointerEvents(true);
       }
 
     } catch (e) {
@@ -1700,6 +1752,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         _showError('Could not load shadows — is the server running?');
       }
       if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; _showPill = false; });
+      _setMapPointerEvents(true);
       if (!completer.isCompleted) completer.complete();
     }
   }
@@ -2020,6 +2073,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void dispose() {
     _debounceTimer?.cancel();
     _pillTimer?.cancel();
+    _sliderDebounce?.cancel();
     _searchDebounce?.cancel();
     _liveTimer?.cancel();
     _searchController.dispose();
@@ -2193,7 +2247,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final mapArea = Stack(
       children: [
         AbsorbPointer(
-          absorbing: _draggingSlider,
+          absorbing: _draggingSlider || (_loading && !_animating),
           child: MapLibreMap(
             key: _mapKey,
             styleString: mapStyle,
@@ -2792,7 +2846,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         onChangeEnd: _liveMode ? null : (_) {
           setState(() => _draggingSlider = false);
           _setMapPointerEvents(true);
-          fetchShadows();
+          // Debounce: if user scrubs rapidly, only the final position triggers a fetch.
+          _sliderDebounce?.cancel();
+          _sliderDebounce = Timer(const Duration(milliseconds: 250), fetchShadows);
         },
       ),
     );

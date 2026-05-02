@@ -121,11 +121,17 @@ def _cache_grid(zoom):
     if zoom == 15: return 0.01   # ~1 km
     return 0.01                  # zoom ≥ 16 — same as z15, coarser for more cache hits
 
-def _cache_key(hour, month, day, lat, lon, zoom):
+def _cache_key(hour, month, day, lat, lon, zoom, elevation=None, azimuth=None):
     g = _cache_grid(zoom)
-    return (hour, month, day, zoom,
-            round(round(lat / g) * g, 6),
-            round(round(lon / g) * g, 6))
+    lat_s = round(round(lat / g) * g, 6)
+    lon_s = round(round(lon / g) * g, 6)
+    if elevation is not None and elevation > 0:
+        # Bucket by sun angle (3° elev, 6° azim ≈ 30-min granularity) so adjacent
+        # hours with nearly identical sun positions share the same cached geometry.
+        elev_b = round(elevation / 3.0) * 3
+        azim_b = round((azimuth or 0) / 6.0) * 6
+        return (elev_b, azim_b, month, zoom, lat_s, lon_s)
+    return (hour, month, day, zoom, lat_s, lon_s)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,7 +1085,7 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
     # Cross-zoom reuse: a cached z15 result is a geometry superset of z16/17/18.
     # NEVER reuse upward (larger bbox → smaller bbox) — postage-stamp artifact.
     if zoom >= 16:
-        z15_ck = _cache_key(hour, month, day, lat, lon, 15)
+        z15_ck = _cache_key(hour, month, day, lat, lon, 15, elevation=elevation, azimuth=azimuth)
         with _cache_lock:
             z15_cached = _shadow_cache.get(z15_ck)
         if z15_cached is not None:
@@ -1116,19 +1122,19 @@ _MAX_PREWARM_QUEUE  = 20
 def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
     """Pre-warm: compute and cache shadow for a given center/zoom if not already cached."""
     global _prewarm_queue_size
-    ck = _cache_key(hour, month, day, lat, lon, zoom)
-    with _cache_lock:
-        if ck in _shadow_cache:
-            with _prewarm_lock:
-                _prewarm_in_flight.discard(ck)
-                _prewarm_queue_size = max(0, _prewarm_queue_size - 1)
-            return
+    # hour-based key used only for prewarm dedup — actual geometry stored under angle key
+    hour_ck = _cache_key(hour, month, day, lat, lon, zoom)
     try:
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
         elevation, azimuth = get_sun_angles(lat, lon, now)
         if elevation <= 0:
             return
+        # Use angle-bucketed key so cross-hour geometry reuse works here too
+        ck = _cache_key(hour, month, day, lat, lon, zoom, elevation=elevation, azimuth=azimuth)
+        with _cache_lock:
+            if ck in _shadow_cache:
+                return
 
         pad = 0.15
         q_bounds = (
@@ -1142,7 +1148,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         print(f"[prewarm] error z={zoom}: {e}")
     finally:
         with _prewarm_lock:
-            _prewarm_in_flight.discard(ck)
+            _prewarm_in_flight.discard(hour_ck)
             _prewarm_queue_size = max(0, _prewarm_queue_size - 1)
 
 
@@ -1311,7 +1317,20 @@ def shadow_tile(z, x, y):
             now = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         h, mo, d = now.hour, now.month, now.day
-        tck = (z, x, y, h, mo, d)
+
+        # Angle-bucketed tile cache key: tiles with the same sun angle produce
+        # identical PBF bytes regardless of the exact date/time.  Cheap trig here
+        # lets us share cache entries across different hours AND different dates
+        # that happen to share the same sun position (e.g. May 3 14:00 ≈ Aug 10 14:30).
+        _n2z = 2.0 ** z
+        _tcx = (x + 0.5) / _n2z * 360.0 - 180.0
+        _tcy = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 0.5) / _n2z))))
+        _ts  = datetime(2000, mo, d, h, 0, 0, tzinfo=pytz.timezone("Europe/Vienna"))
+        _telev, _tazim = get_sun_angles(_tcy, _tcx, _ts)
+        if _telev <= 0:
+            tck = (z, x, y, 'night', mo)
+        else:
+            tck = (z, x, y, round(_telev / 3.0) * 3, round(_tazim / 6.0) * 6, mo)
 
         def _pbf_resp(data):
             resp = Response(data, status=200, mimetype="application/x-protobuf")
