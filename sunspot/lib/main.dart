@@ -62,7 +62,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool     _mapReady      = false;
   bool     _animating      = false;
   bool     _preloading24h  = false;
-  bool     _bgPreloading   = false;
   bool     _draggingSlider = false;
   String?  _errorMessage;
 
@@ -73,12 +72,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _fetchGen        = 0;
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
-  int                 _lastFetchZoom      = -1;
-  String              _currentTileUrlBase = '';
-
-  // Client-side shadow result cache: key = 'zoom_hour_month_day_lat3_lon3_lonSpan'
-  // zoom is the INTEGER camera zoom; lonSpan prevents reusing data at a different viewport size.
-  // A cached result for z15 is NEVER returned for a z13 lookup (different key).
+  int                 _lastFetchZoom     = -1;
+  String?             _currentTileUrl;
 
   // Panel
   bool _panelOpen = true;
@@ -280,6 +275,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
     _shadowLayersReady    = false;
+    _currentTileUrl       = null;
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
@@ -340,7 +336,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
     if (_sunnyPois.isNotEmpty) _refreshPoiPositions();
     if (_searchMarkerPos != null) _refreshSearchMarkerPosition();
-    _bgPreloading = false;
     _debounceTimer?.cancel();
     // When zoom changes significantly (> 0.5 levels), use a very short debounce so
     // stale shadow data from the previous zoom is not shown for a full 600 ms.
@@ -1590,20 +1585,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
 
     try {
-      final rawZoom  = _mapController!.cameraPosition?.zoom ?? 15.0;
-      final zoom     = rawZoom.toInt();
+      final rawZoom = _mapController!.cameraPosition?.zoom ?? 15.0;
 
-      // Below zoom 12: skip (VectorSource has minzoom: 12, MapLibre hides tiles automatically).
+      // Below zoom 12: hide shadow layers.
       if (rawZoom < 12.0) {
+        if (_shadowLayersReady) await _hideShadowLayers();
         _pillTimer?.cancel();
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         if (!completer.isCompleted) completer.complete();
         return;
       }
 
-      _lastFetchZoom = zoom;
+      _lastFetchZoom = rawZoom.toInt();
 
-      // Fetch sun angles — lightweight call, no geometry computation.
+      // Fetch sun angles + sunrise/sunset from lightweight meta endpoint.
       final metaUri = Uri.parse(
         '$flaskBaseUrl/shadow/meta'
         '?lat=${_currentCenter.latitude}'
@@ -1614,44 +1609,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&day=${_selectedDate.day}',
       );
       final metaResp = await http.get(metaUri).timeout(const Duration(seconds: 10));
-      if (gen != _fetchGen) {
-        _pillTimer?.cancel();
-        if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
-        if (!completer.isCompleted) completer.complete();
-        return;
-      }
+      if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
+
       final meta   = jsonDecode(metaResp.body) as Map<String, dynamic>;
       final elev   = (meta['elevation'] as num?)?.toDouble() ?? 0.0;
       final azim   = (meta['azimuth']   as num?)?.toDouble() ?? 0.0;
       final srHour = (meta['sunrise']   as num?)?.toDouble();
       final ssHour = (meta['sunset']    as num?)?.toDouble();
 
-      // Tile URL encodes time — MapLibre fetches {z}/{x}/{y} tiles automatically.
-      final tileUrlBase = '$flaskBaseUrl/shadow/tile/{z}/{x}/{y}.pbf'
-          '?hour=${_hour.toInt()}'
-          '&minute=${((_hour * 60).toInt() % 60)}'
-          '&month=${_selectedDate.month}'
-          '&day=${_selectedDate.day}';
-
-      if (tileUrlBase != _currentTileUrlBase || !_shadowLayersReady) {
-        await _rebuildShadowSource(tileUrlBase, elev);
-        _currentTileUrlBase = tileUrlBase;
-      } else {
-        await _updateShadowOpacity(elev);
-      }
-
-      Future.delayed(const Duration(milliseconds: 800), () {
-        if (!mounted || _draggingSlider || _loading) return;
-        _triggerBackgroundPreload();
-      });
+      // Wire up (or refresh) the vector tile source for this time step.
+      final tileUrl = _buildShadowTileUrl(
+        _hour.toInt(), ((_hour * 60).toInt() % 60), _selectedDate.month, _selectedDate.day,
+      );
+      await _ensureShadowTileSource(tileUrl, elev);
+      if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
 
       _pillTimer?.cancel();
       if (mounted) {
         setState(() {
-          _elevation    = elev;
-          _azimuth      = azim;
-          _sunriseHour  = srHour;
-          _sunsetHour   = ssHour;
+          _elevation   = elev;
+          _azimuth     = azim;
+          _sunriseHour = srHour;
+          _sunsetHour  = ssHour;
           if (srHour != null && ssHour != null) {
             _hour = _hour.clamp(srHour, ssHour);
           }
@@ -1662,7 +1641,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         });
       }
       if (!completer.isCompleted) completer.complete();
-      return completer.future;
 
     } catch (e) {
       debugPrint('Fetch error: $e');
@@ -1672,84 +1650,99 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
-  Future<void> _rebuildShadowSource(String tileUrlBase, double elevation) async {
+  // Build the tile URL template for the current time. MapLibre substitutes {z}/{x}/{y}.
+  String _buildShadowTileUrl(int hour, int minute, int month, int day) =>
+      '$flaskBaseUrl/shadow/tile/{z}/{x}/{y}.pbf'
+      '?hour=$hour&minute=$minute&month=$month&day=$day';
+
+  // Zero out shadow layer opacities without removing them (preserves source).
+  Future<void> _hideShadowLayers() async {
+    if (!_shadowLayersReady || _mapController == null) return;
+    try {
+      _mapController!.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillOpacity: 0.0));
+      _mapController!.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillOpacity: 0.0));
+      _mapController!.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillOpacity: 0.0));
+      _mapController!.setLayerProperties('shadow-l0-line', LineLayerProperties(lineOpacity: 0.0));
+      _mapController!.setLayerProperties('shadow-l1-line', LineLayerProperties(lineOpacity: 0.0));
+      _mapController!.setLayerProperties('shadow-l2-line', LineLayerProperties(lineOpacity: 0.0));
+    } catch (_) {}
+  }
+
+  // Create or refresh the vector tile source + 6 shadow layers.
+  // If only the elevation changed (URL same), skip source teardown and only update opacities.
+  Future<void> _ensureShadowTileSource(String tileUrl, double elevation) async {
     final ctrl = _mapController;
     if (ctrl == null) return;
-
-    if (_shadowLayersReady) {
-      for (final id in ['shadow-l2-line', 'shadow-l2-fill', 'shadow-l1-line',
-                         'shadow-l1-fill', 'shadow-l0-line', 'shadow-l0-fill']) {
-        try { await ctrl.removeLayer(id); } catch (_) {}
-      }
-      try { await ctrl.removeSource('dark-area'); } catch (_) {}
-      _shadowLayersReady = false;
-    }
 
     final t    = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
     final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
+    // Softer ramp: heatmap-like at z11, fully present at z16.
     List<dynamic> zoomOp(double op) =>
         ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
     List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
 
-    await ctrl.addSource('dark-area', VectorSourceProperties(
-      tiles: [tileUrlBase],
-      minzoom: 12,
-      maxzoom: 18,
+    if (_shadowLayersReady && tileUrl == _currentTileUrl) {
+      // URL unchanged — only update opacities.
+      try {
+        await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
+        await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
+        await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
+        await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
+        return;
+      } catch (_) {
+        _shadowLayersReady = false;
+      }
+    }
+
+    // Tear down existing layers + source before rebuilding with new URL.
+    if (_shadowLayersReady) {
+      for (final id in ['shadow-l0-fill','shadow-l0-line','shadow-l1-fill','shadow-l1-line','shadow-l2-fill','shadow-l2-line']) {
+        try { await ctrl.removeLayer(id); } catch (_) {}
+      }
+      try { await ctrl.removeSource('shadow-tiles'); } catch (_) {}
+      _shadowLayersReady = false;
+    }
+    _currentTileUrl = tileUrl;
+
+    // Add vector tile source — MapLibre requests tiles as needed per viewport/zoom.
+    await ctrl.addSource('shadow-tiles', VectorSourceProperties(
+      tiles: [tileUrl],
+      minzoom: 0,
+      maxzoom: 17,
     ));
 
-    await ctrl.addLayer('dark-area', 'shadow-l0-fill',
+    // Fills: l0 (outermost/darkest) → l1 (mid ring) → l2 (soft edge).
+    // Lines feather each ring boundary.
+    await ctrl.addLayer('shadow-tiles', 'shadow-l0-fill',
       FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer('dark-area', 'shadow-l0-line',
+    await ctrl.addLayer('shadow-tiles', 'shadow-l0-line',
       LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer('dark-area', 'shadow-l1-fill',
+    await ctrl.addLayer('shadow-tiles', 'shadow-l1-fill',
       FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer('dark-area', 'shadow-l1-line',
+    await ctrl.addLayer('shadow-tiles', 'shadow-l1-line',
       LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer('dark-area', 'shadow-l2-fill',
+    await ctrl.addLayer('shadow-tiles', 'shadow-l2-fill',
       FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
-    await ctrl.addLayer('dark-area', 'shadow-l2-line',
+    await ctrl.addLayer('shadow-tiles', 'shadow-l2-line',
       LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     _shadowLayersReady = true;
-  }
-
-  Future<void> _updateShadowOpacity(double elevation) async {
-    final ctrl = _mapController;
-    if (ctrl == null || !_shadowLayersReady) return;
-
-    final t    = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
-    final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
-    final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
-    final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
-
-    List<dynamic> zoomOp(double op) =>
-        ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
-    List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
-
-    try {
-      await ctrl.setLayerProperties('shadow-l0-fill', FillLayerProperties(visibility: 'visible', fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)));
-      await ctrl.setLayerProperties('shadow-l1-fill', FillLayerProperties(visibility: 'visible', fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)));
-      await ctrl.setLayerProperties('shadow-l2-fill', FillLayerProperties(visibility: 'visible', fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)));
-      await ctrl.setLayerProperties('shadow-l0-line', LineLayerProperties(visibility: 'visible', lineColor: '#5B6AA5', lineOpacity: zoomLineOp(opL0)));
-      await ctrl.setLayerProperties('shadow-l1-line', LineLayerProperties(visibility: 'visible', lineColor: '#4A5599', lineOpacity: zoomLineOp(opL1)));
-      await ctrl.setLayerProperties('shadow-l2-line', LineLayerProperties(visibility: 'visible', lineColor: '#3D3F85', lineOpacity: zoomLineOp(opL2)));
-    } catch (_) {
-      _shadowLayersReady = false;
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -1776,57 +1769,38 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
   }
 
+  // Warm the server tile cache for every daylight hour at the current viewport center.
+  // Fire-and-forget: sends tile requests for the center 3×3 tile grid per hour so the
+  // 24h animation plays smoothly from server cache without waiting for computation.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
-    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).toInt();
-    final bounds = await _mapController!.getVisibleRegion();
-    final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
-    final start  = (_sunriseHour ?? 6.0).toInt();
-    final end    = (_sunsetHour ?? 21.0).toInt();
-    final total  = end - start + 1;
+    final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
+    final start = (_sunriseHour ?? 6.0).toInt();
+    final end   = (_sunsetHour  ?? 21.0).toInt();
+    final total = end - start + 1;
+    final tileX = _lonToTileX(_currentCenter.longitude, zoom);
+    final tileY = _latToTileY(_currentCenter.latitude, zoom);
     for (int h = start; h <= end; h++) {
       if (!mounted || !_preloading24h) return;
-      await _prefetchHourAwaitable(h, zoom, lonSpan, bounds);
-      if (mounted) setState(() { _loadingProgress = (h - start + 1) / total; _loadingStage = 'Pre-loading ${h - start + 1}/$total'; });
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          final url = '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
+              '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
+          http.get(Uri.parse(url)).ignore();
+        }
+      }
+      if (mounted) setState(() {
+        _loadingProgress = (h - start + 1) / total;
+        _loadingStage    = 'Pre-loading ${h - start + 1}/$total';
+      });
+      await Future.delayed(const Duration(milliseconds: 40));
     }
   }
 
-  // With MVT, MapLibre's own tile cache handles animation replay efficiently.
-  // Server-side shadow_cache is keyed per tile, not per viewport.
-  Future<void> _prefetchHourAwaitable(int hour, int zoom, String lonSpan, dynamic bounds) async {}
-
-  void _triggerBackgroundPreload() {
-    if (_bgPreloading || _animating || _preloading24h) return;
-    _bgPreloading = true;
-    Future.microtask(() async {
-      try {
-        if (!_mapReady || _mapController == null) return;
-        // Use toInt() to match fetchShadows — round() can snap to a different
-        // zoom integer and produce cache keys that are never hit by the main fetch.
-        final zoom    = (_mapController!.cameraPosition?.zoom ?? 14).toInt();
-        final bounds  = await _mapController!.getVisibleRegion();
-        final lonSpan = (bounds.northeast.longitude - bounds.southwest.longitude).toStringAsFixed(2);
-        final start   = (_sunriseHour ?? 6.0).toInt();
-        final end     = (_sunsetHour  ?? 21.0).toInt();
-        final curHour = _hour.toInt();
-        // Adjacent hours first — H-1 and H+1 ready before anything else
-        final adjacent = [curHour - 1, curHour + 1]
-            .where((h) => h >= start && h <= end)
-            .toList();
-        await Future.wait(adjacent.map((h) => _prefetchHourAwaitable(h, zoom, lonSpan, bounds)));
-        // Remaining hours in batches of 3
-        final remaining = List.generate(end - start + 1, (i) => start + i)
-            .where((h) => !adjacent.contains(h) && h != curHour)
-            .toList();
-        for (var i = 0; i < remaining.length; i += 3) {
-          if (!mounted || _animating || _preloading24h) break;
-          final batch = remaining.skip(i).take(3).toList();
-          await Future.wait(batch.map((h) => _prefetchHourAwaitable(h, zoom, lonSpan, bounds)));
-        }
-      } finally {
-        _bgPreloading = false;
-      }
-    });
+  int _lonToTileX(double lon, int z) => ((lon + 180.0) / 360.0 * (1 << z)).floor();
+  int _latToTileY(double lat, int z) {
+    final latRad = lat * pi / 180.0;
+    return ((1.0 - (log(tan(latRad) + 1.0 / cos(latRad)) / pi)) / 2.0 * (1 << z)).floor();
   }
 
   Future<void> _run24hStep() async {
