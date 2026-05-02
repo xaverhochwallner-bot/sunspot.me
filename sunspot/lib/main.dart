@@ -74,6 +74,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool                _shadowLayersReady = false;
   int                 _lastFetchZoom     = -1;
   String?             _currentTileUrl;
+  int                 _shadowSourceNonce = 0;  // bumped per rebuild so MapLibre never reuses cached tiles
 
   // Panel
   bool _panelOpen = true;
@@ -276,6 +277,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _mapReady = true;
     _shadowLayersReady    = false;
     _currentTileUrl       = null;
+    _shadowSourceNonce    = 0;
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
@@ -1608,7 +1610,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&month=${_selectedDate.month}'
         '&day=${_selectedDate.day}',
       );
-      final metaResp = await http.get(metaUri).timeout(const Duration(seconds: 10));
+      final metaResp = await http.get(metaUri).timeout(const Duration(seconds: 5));
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
 
       final meta   = jsonDecode(metaResp.body) as Map<String, dynamic>;
@@ -1644,7 +1646,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     } catch (e) {
       debugPrint('Fetch error: $e');
-      _showError('Could not load shadows — is the server running?');
+      _pillTimer?.cancel();
+      if (_shadowLayersReady) {
+        // Already have tiles on screen — silently keep them; don't flash an error.
+      } else {
+        _showError('Could not load shadows — is the server running?');
+      }
       if (mounted) setState(() { _loading = false; _loadingProgress = 0.0; _showPill = false; });
       if (!completer.isCompleted) completer.complete();
     }
@@ -1704,13 +1711,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       for (final id in ['shadow-l0-fill','shadow-l0-line','shadow-l1-fill','shadow-l1-line','shadow-l2-fill','shadow-l2-line']) {
         try { await ctrl.removeLayer(id); } catch (_) {}
       }
-      try { await ctrl.removeSource('shadow-tiles'); } catch (_) {}
+      // Remove by the current nonce so the old MapLibre source (and its tile cache) is fully discarded.
+      try { await ctrl.removeSource('shadow-tiles-$_shadowSourceNonce'); } catch (_) {}
       _shadowLayersReady = false;
     }
     _currentTileUrl = tileUrl;
+    // Each rebuild gets a new source name — MapLibre cannot reuse cached tiles from a previous source.
+    _shadowSourceNonce++;
+    final _srcId = 'shadow-tiles-$_shadowSourceNonce';
 
     // Add vector tile source — MapLibre requests tiles as needed per viewport/zoom.
-    await ctrl.addSource('shadow-tiles', VectorSourceProperties(
+    await ctrl.addSource(_srcId, VectorSourceProperties(
       tiles: [tileUrl],
       minzoom: 0,
       maxzoom: 17,
@@ -1718,27 +1729,27 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     // Fills: l0 (outermost/darkest) → l1 (mid ring) → l2 (soft edge).
     // Lines feather each ring boundary.
-    await ctrl.addLayer('shadow-tiles', 'shadow-l0-fill',
+    await ctrl.addLayer(_srcId, 'shadow-l0-fill',
       FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: zoomOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer('shadow-tiles', 'shadow-l0-line',
+    await ctrl.addLayer(_srcId, 'shadow-l0-line',
       LineLayerProperties(lineColor: '#5B6AA5', lineWidth: 1.2, lineOpacity: zoomLineOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
-    await ctrl.addLayer('shadow-tiles', 'shadow-l1-fill',
+    await ctrl.addLayer(_srcId, 'shadow-l1-fill',
       FillLayerProperties(fillColor: '#4A5599', fillAntialias: true, fillOpacity: zoomOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer('shadow-tiles', 'shadow-l1-line',
+    await ctrl.addLayer(_srcId, 'shadow-l1-line',
       LineLayerProperties(lineColor: '#4A5599', lineWidth: 1.2, lineOpacity: zoomLineOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
-    await ctrl.addLayer('shadow-tiles', 'shadow-l2-fill',
+    await ctrl.addLayer(_srcId, 'shadow-l2-fill',
       FillLayerProperties(fillColor: '#3D3F85', fillAntialias: true, fillOpacity: zoomOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
-    await ctrl.addLayer('shadow-tiles', 'shadow-l2-line',
+    await ctrl.addLayer(_srcId, 'shadow-l2-line',
       LineLayerProperties(lineColor: '#3D3F85', lineWidth: 1.2, lineOpacity: zoomLineOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
