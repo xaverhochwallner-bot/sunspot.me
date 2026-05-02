@@ -1777,11 +1777,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _shadowSourceNonce++;
     final macroSrc = 'shadow-macro-$_shadowSourceNonce';
     final microSrc = 'shadow-micro-$_shadowSourceNonce';
+    // Cache-buster: ensures MapLibre never serves stale tiles from a prior source's request.
+    // Both sources share the same fetchUrl; nonce differs per rebuild so URLs are unique.
+    final fetchUrl = '$tileUrl&_n=$_shadowSourceNonce';
 
     // Macro source: capped at z14 — uses z14 macro tiles and overzooms them past z14.
-    await ctrl.addSource(macroSrc, VectorSourceProperties(tiles: [tileUrl], minzoom: 0, maxzoom: 14));
+    await ctrl.addSource(macroSrc, VectorSourceProperties(tiles: [fetchUrl], minzoom: 0, maxzoom: 14));
     // Micro source: full range — switches to z15 per-building tiles when camera crosses z15.
-    await ctrl.addSource(microSrc, VectorSourceProperties(tiles: [tileUrl], minzoom: 0, maxzoom: 17));
+    await ctrl.addSource(microSrc, VectorSourceProperties(tiles: [fetchUrl], minzoom: 0, maxzoom: 17));
 
     // Macro layers: fade out as micro fades in across z14→z15.
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-fill',
