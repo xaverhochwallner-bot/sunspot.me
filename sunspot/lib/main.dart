@@ -1587,8 +1587,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _showPill        = false;
     });
 
-    // Normal loads only show the thin top-bar spinner (no pill).
-    // The pill with progress% is reserved for 24h preload (_toggle24h).
+    // Show pill after 150 ms if still loading (not during animation or 24h preload).
+    if (!_animating && !_preloading24h) {
+      _pillTimer = Timer(const Duration(milliseconds: 150), () {
+        if (mounted && _fetchGen == gen) setState(() => _showPill = true);
+      });
+    }
 
     try {
       final rawZoom = _mapController!.cameraPosition?.zoom ?? 15.0;
@@ -1642,8 +1646,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
       if (!completer.isCompleted) completer.complete();
 
-      // Keep thin top-bar visible for ~1.5 s while MapLibre streams tiles.
-      await Future.delayed(const Duration(milliseconds: 1500));
+      // Keep thin top-bar visible while MapLibre streams tiles; skip during animation.
+      if (!_animating) {
+        await Future.delayed(const Duration(milliseconds: 1500));
+      }
       if (gen == _fetchGen && mounted) {
         setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
       }
