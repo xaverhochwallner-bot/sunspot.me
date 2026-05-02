@@ -195,7 +195,7 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 # Macro / Micro split:
 #   z ≤ MACRO_ZOOM_THRESHOLD → super-block fast path (single l0 layer, ~150-500 ms cold)
 #   z >  MACRO_ZOOM_THRESHOLD → per-building pipeline with l0/l1/l2 erosion rings
-MACRO_ZOOM_THRESHOLD = 13
+MACRO_ZOOM_THRESHOLD = 14  # z14 moved back to macro: per-tile micro was 28-33s (too slow)
 
 # Static Block Database — built once at startup, persisted in pickle cache.
 # All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
@@ -212,7 +212,7 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 _CFG_MACRO_EROSION = {
     12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
     13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
-    # z14 now uses the micro pipeline — no macro erosion entry needed
+    14: (0.000100, 0.000250),  # ~11 m / ~28 m — street scale, finer than z13
 }
 
 # Morphological close distance (deg) per zoom — z ≥ 14 (micro pipeline).
@@ -244,10 +244,10 @@ _CFG_EROSION = {
 }
 
 # Pre-simplification of raw OSM building polygons at startup (deg).
-# z14 and z15 are micro pipeline zooms — pre-simplified for faster union at request time.
+# z15+ are micro pipeline zooms — pre-simplified for faster union at request time.
 PRE_SIMPLIFY = {
     15: 0.000010,  # ~1 m
-    14: 0.000025,  # ~3 m — matches _CFG_SIMPLIFY[14], reduces vertex count for wide z14 viewports
+    14: 0.000025,  # ~3 m — kept for pre-warm compat; z14 now uses macro pipeline
 }
 
 # Bounding box filter applied during parsing — keeps only relevant buildings
