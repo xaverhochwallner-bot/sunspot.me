@@ -217,7 +217,7 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 _CFG_MACRO_EROSION = {
     12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
     13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
-    14: (0.000100, 0.000250),  # ~11 m / ~28 m — street scale, finer than z13
+    14: (0.000060, 0.000140),  # ~6.5 m / ~15 m — close to z15 micro (5.5 m / 13 m) to minimise seam
 }
 
 # Morphological close distance (deg) per zoom — z ≥ 14 (micro pipeline).
