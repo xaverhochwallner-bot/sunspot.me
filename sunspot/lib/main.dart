@@ -1581,18 +1581,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _showPill        = false;
     });
 
-    // Only show the pill if loading takes longer than 150ms (skips cached hits)
-    _pillTimer = Timer(const Duration(milliseconds: 150), () {
-      if (mounted && _loading) setState(() => _showPill = true);
-    });
+    // Normal loads only show the thin top-bar spinner (no pill).
+    // The pill with progress% is reserved for 24h preload (_toggle24h).
 
     try {
       final rawZoom = _mapController!.cameraPosition?.zoom ?? 15.0;
 
-      // Below zoom 12: hide shadow layers.
+      // Below zoom 12: skip tile fetch — zoom interpolation fades shadows naturally.
       if (rawZoom < 12.0) {
-        if (_shadowLayersReady) await _hideShadowLayers();
-        _pillTimer?.cancel();
         if (mounted) setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
         if (!completer.isCompleted) completer.complete();
         return;
@@ -1626,7 +1622,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _ensureShadowTileSource(tileUrl, elev);
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
 
-      _pillTimer?.cancel();
       if (mounted) {
         setState(() {
           _elevation   = elev;
@@ -1636,13 +1631,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (srHour != null && ssHour != null) {
             _hour = _hour.clamp(srHour, ssHour);
           }
-          _loading         = false;
-          _showPill        = false;
-          _loadingProgress = 0.0;
           _loadingStage    = '';
         });
       }
       if (!completer.isCompleted) completer.complete();
+
+      // Keep thin top-bar visible for ~1.5 s while MapLibre streams tiles.
+      await Future.delayed(const Duration(milliseconds: 1500));
+      if (gen == _fetchGen && mounted) {
+        setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+      }
 
     } catch (e) {
       debugPrint('Fetch error: $e');
@@ -1686,9 +1684,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
     final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
 
-    // Softer ramp: heatmap-like at z11, fully present at z16.
+    // Fade from z10=0 → z12=50% → z14=78% → z16=full. Smooth crossing at z12.
     List<dynamic> zoomOp(double op) =>
-        ['interpolate', ['exponential', 1.4], ['zoom'], 11, op * 0.35, 12, op * 0.50, 14, op * 0.78, 16, op];
+        ['interpolate', ['exponential', 1.4], ['zoom'], 10, 0.0, 12, op * 0.50, 14, op * 0.78, 16, op];
     List<dynamic> zoomLineOp(double op) => zoomOp(op * 0.6);
 
     if (_shadowLayersReady && tileUrl == _currentTileUrl) {

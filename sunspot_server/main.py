@@ -18,7 +18,10 @@ import json
 import time
 import re
 import gzip as _gzip
-from datetime import time as dtime
+import atexit
+import tempfile
+from collections import OrderedDict
+from datetime import time as dtime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import pysolar.solar as ps
@@ -94,6 +97,7 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 _shadow_cache = {}
 MAX_CACHE     = 10000
 SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
+_cache_lock   = threading.RLock()  # guards _shadow_cache and _tile_cache
 
 # Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
 # Avoids re-running shadow geometry + encoding for repeated tile requests.
@@ -102,6 +106,7 @@ _tile_cache    = {}
 MAX_TILE_CACHE = 20000
 
 def _trim_tile_cache():
+    # Caller must hold _cache_lock.
     while len(_tile_cache) > MAX_TILE_CACHE:
         _tile_cache.pop(next(iter(_tile_cache)))
 
@@ -973,8 +978,8 @@ def _unpack_shadow_cache(entry):
 
 
 def _trim_cache():
-    """FIFO eviction if cache exceeds limit."""
-    if len(_shadow_cache) > MAX_CACHE:
+    # Caller must hold _cache_lock.
+    while len(_shadow_cache) > MAX_CACHE:
         _shadow_cache.pop(next(iter(_shadow_cache)))
 
 
@@ -985,9 +990,9 @@ def _build_shadow_features(viewport_bbox, sunlit, buf_e1, buf_e2, prec):
                   "properties": {"layer": "shadow-l0"}}]
     if buf_e1 is not None:
         try:    shadow_l1 = orient(viewport_bbox.difference(buf_e1), sign=1.0)
-        except: shadow_l1 = shadow_l0
+        except Exception: shadow_l1 = shadow_l0
         try:    shadow_l2 = orient(viewport_bbox.difference(buf_e2), sign=1.0)
-        except: shadow_l2 = shadow_l1
+        except Exception: shadow_l2 = shadow_l1
         features += [
             {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), prec),
              "properties": {"layer": "shadow-l1"}},
@@ -1011,7 +1016,8 @@ def _compute_micro_shadow(zoom, elevation, azimuth, q_bounds):
     def _proj(args):
         return project_shadow(args[0], args[1], elevation, azimuth)
 
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    _shadow_workers = min(max(1, (os.cpu_count() or 4) // 2), 8)
+    with ThreadPoolExecutor(max_workers=_shadow_workers) as ex:
         all_shadows = list(ex.map(_proj, buildings))
 
     tall_geoms = [
@@ -1052,16 +1058,19 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
 
     Returns (sunlit_filtered, buf_e1, buf_e2).
     Callers supply pre-padded q_bounds; this function only routes and caches.
+    Lock is held only around dict operations — never during expensive compute.
     """
-    if ck in _shadow_cache:
-        return _unpack_shadow_cache(_shadow_cache[ck])
+    with _cache_lock:
+        if ck in _shadow_cache:
+            return _unpack_shadow_cache(_shadow_cache[ck])
 
     if zoom <= MACRO_ZOOM_THRESHOLD:
         t0 = time.time()
         sunlit, buf_e1, buf_e2, n_blocks = _macro_compute(elevation, azimuth, q_bounds, zoom)
         entry = (sunlit, buf_e1, buf_e2, q_bounds)
-        _shadow_cache[ck] = entry
-        _trim_cache()
+        with _cache_lock:
+            _shadow_cache[ck] = entry
+            _trim_cache()
         print(f"macro | z={zoom} blocks={n_blocks} {time.time()-t0:.2f}s")
         return sunlit, buf_e1, buf_e2
 
@@ -1069,13 +1078,16 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
     # NEVER reuse upward (larger bbox → smaller bbox) — postage-stamp artifact.
     if zoom >= 16:
         z15_ck = _cache_key(hour, month, day, lat, lon, 15)
-        if z15_ck in _shadow_cache:
-            z15_sunlit, _, _ = _unpack_shadow_cache(_shadow_cache[z15_ck])
+        with _cache_lock:
+            z15_cached = _shadow_cache.get(z15_ck)
+        if z15_cached is not None:
+            z15_sunlit, _, _ = _unpack_shadow_cache(z15_cached)
             sunlit = filter_small_polygons(z15_sunlit, _min_sunlit_area(zoom))
             e1, e2 = _shadow_erosion_steps(zoom)
             entry  = (sunlit, sunlit.buffer(e1), sunlit.buffer(e2))
-            _shadow_cache[ck] = entry
-            _trim_cache()
+            with _cache_lock:
+                _shadow_cache[ck] = entry
+                _trim_cache()
             print(f"micro | z={zoom} CACHE HIT (z15→z{zoom} reuse)")
             return entry
 
@@ -1083,8 +1095,9 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
     t0 = time.time()
     sunlit, buf_e1, buf_e2 = _compute_micro_shadow(zoom, elevation, azimuth, q_bounds)
     entry = (sunlit, buf_e1, buf_e2)
-    _shadow_cache[ck] = entry
-    _trim_cache()
+    with _cache_lock:
+        _shadow_cache[ck] = entry
+        _trim_cache()
     print(f"micro | z={zoom} {time.time()-t0:.2f}s")
     return entry
 
@@ -1092,15 +1105,22 @@ def _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, da
 # Background pre-warming — compute lower-zoom shadows while user browses
 # ---------------------------------------------------------------------------
 
-_prewarm_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prewarm")
-_prewarm_in_flight = set()
-_prewarm_lock = threading.Lock()
+_prewarm_executor   = ThreadPoolExecutor(max_workers=2, thread_name_prefix="prewarm")
+_prewarm_in_flight  = set()
+_prewarm_lock       = threading.Lock()
+_prewarm_queue_size = 0
+_MAX_PREWARM_QUEUE  = 20
 
 def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
     """Pre-warm: compute and cache shadow for a given center/zoom if not already cached."""
+    global _prewarm_queue_size
     ck = _cache_key(hour, month, day, lat, lon, zoom)
-    if ck in _shadow_cache:
-        return
+    with _cache_lock:
+        if ck in _shadow_cache:
+            with _prewarm_lock:
+                _prewarm_in_flight.discard(ck)
+                _prewarm_queue_size = max(0, _prewarm_queue_size - 1)
+            return
     try:
         tz  = pytz.timezone("Europe/Vienna")
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
@@ -1121,22 +1141,32 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
     finally:
         with _prewarm_lock:
             _prewarm_in_flight.discard(ck)
+            _prewarm_queue_size = max(0, _prewarm_queue_size - 1)
 
 
 def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
     """Pre-warm lower zoom levels in the background while the user browses."""
+    global _prewarm_queue_size
     if zoom < 15:
         return
     targets = [z for z in [14, 13, 12] if z < zoom]
     for z in targets:
+        # Drop task if queue is overloaded — prevents unbounded memory growth
+        with _prewarm_lock:
+            if _prewarm_queue_size >= _MAX_PREWARM_QUEUE:
+                continue
         # Scale viewport — cap at 4× to prevent z12 from querying enormous areas
         scale = min(2 ** (zoom - z), 4)
         w, h  = vp_w * scale, vp_h * scale
         ck = _cache_key(hour, month, day, lat, lon, z)
         with _prewarm_lock:
-            if ck in _shadow_cache or ck in _prewarm_in_flight:
+            if ck in _prewarm_in_flight:
                 continue
+            with _cache_lock:
+                if ck in _shadow_cache:
+                    continue
             _prewarm_in_flight.add(ck)
+            _prewarm_queue_size += 1
         _prewarm_executor.submit(_compute_shadow_cached, hour, month, day, lat, lon, z, w, h)
 
 
@@ -1260,6 +1290,11 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
 
 @app.route("/shadow/tile/<int:z>/<int:x>/<int:y>.pbf")
 def shadow_tile(z, x, y):
+    if not (0 <= z <= 22):
+        return Response(b'', status=400)
+    max_tile = 2 ** z
+    if not (0 <= x < max_tile and 0 <= y < max_tile):
+        return Response(b'', status=400)
     try:
         hour   = request.args.get("hour",   default=None, type=int)
         minute = request.args.get("minute", default=0,    type=int)
@@ -1282,15 +1317,17 @@ def shadow_tile(z, x, y):
             resp.headers['Access-Control-Allow-Origin'] = '*'
             return resp
 
-        if tck in _tile_cache:
-            return _pbf_resp(_tile_cache[tck])
+        with _cache_lock:
+            if tck in _tile_cache:
+                return _pbf_resp(_tile_cache[tck])
 
         pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
         if pbf is None:
             return Response(b'', status=500)
 
-        _tile_cache[tck] = pbf
-        _trim_tile_cache()
+        with _cache_lock:
+            _tile_cache[tck] = pbf
+            _trim_tile_cache()
         print(f"🟦 [tile] z={z}/{x}/{y} h={h} cached={len(_tile_cache)}", flush=True)
         return _pbf_resp(pbf)
 
@@ -1511,7 +1548,8 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
                      'outdoor_seating': tags.get('outdoor_seating', '')})
     return pois
 
-_poi_cache = {}  # fallback cache for non-city locations
+_poi_cache = OrderedDict()  # fallback cache for non-city locations (LRU, max 50 entries)
+_MAX_POI_CACHE = 50
 
 
 MIN_POI_SEPARATION = 0.0009  # ~100 m in degrees
@@ -1524,7 +1562,9 @@ def sunny_pois():
         hour       = int(request.args.get('hour', 12))
         minute     = int(request.args.get('minute', 0))
         date_str   = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
-        types      = request.args.get('types', 'cafe,bar,restaurant').split(',')
+        _ALLOWED_POI_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square', 'terrace'}
+        raw_types  = request.args.get('types', 'cafe,bar,restaurant').split(',')
+        types      = [t.strip() for t in raw_types if t.strip() in _ALLOWED_POI_TYPES] or ['cafe', 'bar', 'restaurant']
         zoom       = float(request.args.get('zoom', 15))
         vp_min_lat = request.args.get('minLat', type=float)
         vp_min_lon = request.args.get('minLon', type=float)
@@ -1536,6 +1576,9 @@ def sunny_pois():
 
         tz        = pytz.timezone('Europe/Vienna')
         date      = datetime.strptime(date_str, '%Y-%m-%d').date()
+        _today    = datetime.now(tz).date()
+        if not (_today - timedelta(days=365) <= date <= _today + timedelta(days=365)):
+            return jsonify({'error': 'date out of range'}), 400
         t         = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
         elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
 
@@ -1581,8 +1624,10 @@ def sunny_pois():
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
             if cache_key not in _poi_cache:
                 _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
-                if len(_poi_cache) > 50:
-                    _poi_cache.pop(next(iter(_poi_cache)))
+                if len(_poi_cache) > _MAX_POI_CACHE:
+                    _poi_cache.popitem(last=False)  # evict LRU entry
+            else:
+                _poi_cache.move_to_end(cache_key)   # mark as recently used
             candidates += [p for p in _poi_cache[cache_key]
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
@@ -1590,8 +1635,10 @@ def sunny_pois():
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(overpass_types)))
             if cache_key not in _poi_cache:
                 _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
-                if len(_poi_cache) > 50:
-                    _poi_cache.pop(next(iter(_poi_cache)))
+                if len(_poi_cache) > _MAX_POI_CACHE:
+                    _poi_cache.popitem(last=False)  # evict LRU entry
+            else:
+                _poi_cache.move_to_end(cache_key)   # mark as recently used
             candidates += [p for p in _poi_cache[cache_key]
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
@@ -2132,13 +2179,19 @@ def _disk_cache_saver():
     while True:
         time.sleep(120)
         try:
-            with open(SHADOW_DISK_CACHE_PATH, "wb") as _f:
-                pickle.dump(dict(_shadow_cache), _f)
-            print(f"[disk cache] Saved {len(_shadow_cache):,} entries.")
+            with _cache_lock:
+                snapshot = dict(_shadow_cache)
+            _dir = os.path.dirname(SHADOW_DISK_CACHE_PATH) or '.'
+            with tempfile.NamedTemporaryFile(dir=_dir, delete=False, suffix='.pkl') as _tmp:
+                pickle.dump(snapshot, _tmp)
+                _tmp_path = _tmp.name
+            os.replace(_tmp_path, SHADOW_DISK_CACHE_PATH)
+            print(f"[disk cache] Saved {len(snapshot):,} entries.")
         except Exception as _e:
             print(f"[disk cache] Save failed: {_e}")
 
 threading.Thread(target=_disk_cache_saver, daemon=True).start()
+atexit.register(lambda: _prewarm_executor.shutdown(wait=False))
 
 
 def _startup_prewarm():
@@ -2177,11 +2230,14 @@ def _startup_prewarm():
     print(f"[startup] Pre-warming {len(tile_tasks)} PBF tiles ...")
     for z, x, y, h, mo, d in tile_tasks:
         tck = (z, x, y, h, mo, d)
-        if tck not in _tile_cache:
+        with _cache_lock:
+            already = tck in _tile_cache
+        if not already:
             pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
             if pbf:
-                _tile_cache[tck] = pbf
-                _trim_tile_cache()
+                with _cache_lock:
+                    _tile_cache[tck] = pbf
+                    _trim_tile_cache()
     print(f"[startup] Tile pre-warm complete. {len(_tile_cache)} tiles cached.")
 
 threading.Thread(target=_startup_prewarm, daemon=True).start()
