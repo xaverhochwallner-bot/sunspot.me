@@ -102,8 +102,10 @@ _cache_lock   = threading.RLock()  # guards _shadow_cache and _tile_cache
 # Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
 # Avoids re-running shadow geometry + encoding for repeated tile requests.
 # ~300 bytes/tile × 20 000 tiles ≈ 6 MB max.
-_tile_cache    = {}
-MAX_TILE_CACHE = 20000
+_tile_cache          = {}
+MAX_TILE_CACHE       = 20000
+_tile_in_flight      = {}    # {tck: threading.Event} — deduplicates concurrent tile requests
+_tile_in_flight_lock = threading.Lock()
 
 def _trim_tile_cache():
     # Caller must hold _cache_lock.
@@ -1321,15 +1323,37 @@ def shadow_tile(z, x, y):
             if tck in _tile_cache:
                 return _pbf_resp(_tile_cache[tck])
 
-        pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
-        if pbf is None:
+        # Deduplicate: if another thread is already computing this exact tile, wait for it
+        # instead of running the expensive shadow computation a second time.
+        with _tile_in_flight_lock:
+            if tck in _tile_in_flight:
+                evt = _tile_in_flight[tck]
+                is_computing = False
+            else:
+                evt = threading.Event()
+                _tile_in_flight[tck] = evt
+                is_computing = True
+
+        if not is_computing:
+            evt.wait(timeout=60)
+            with _cache_lock:
+                if tck in _tile_cache:
+                    return _pbf_resp(_tile_cache[tck])
             return Response(b'', status=500)
 
-        with _cache_lock:
-            _tile_cache[tck] = pbf
-            _trim_tile_cache()
-        print(f"🟦 [tile] z={z}/{x}/{y} h={h} cached={len(_tile_cache)}", flush=True)
-        return _pbf_resp(pbf)
+        try:
+            pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
+            if pbf is None:
+                return Response(b'', status=500)
+            with _cache_lock:
+                _tile_cache[tck] = pbf
+                _trim_tile_cache()
+            print(f"🟦 [tile] z={z}/{x}/{y} h={h} cached={len(_tile_cache)}", flush=True)
+            return _pbf_resp(pbf)
+        finally:
+            with _tile_in_flight_lock:
+                _tile_in_flight.pop(tck, None)
+            evt.set()
 
     except Exception as e:
         import traceback
@@ -1548,8 +1572,9 @@ def _fetch_pois_overpass(center_lat, center_lon, types, radius=600):
                      'outdoor_seating': tags.get('outdoor_seating', '')})
     return pois
 
-_poi_cache = OrderedDict()  # fallback cache for non-city locations (LRU, max 50 entries)
-_MAX_POI_CACHE = 50
+_poi_cache      = OrderedDict()  # fallback cache for non-city locations (LRU, max 50 entries)
+_MAX_POI_CACHE  = 50
+_poi_cache_lock = threading.Lock()
 
 
 MIN_POI_SEPARATION = 0.0009  # ~100 m in degrees
@@ -1622,24 +1647,38 @@ def sunny_pois():
                     pass
         elif city_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
-            if cache_key not in _poi_cache:
-                _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
-                if len(_poi_cache) > _MAX_POI_CACHE:
-                    _poi_cache.popitem(last=False)  # evict LRU entry
-            else:
-                _poi_cache.move_to_end(cache_key)   # mark as recently used
-            candidates += [p for p in _poi_cache[cache_key]
+            with _poi_cache_lock:
+                if cache_key in _poi_cache:
+                    _poi_cache.move_to_end(cache_key)
+                    _city_result = list(_poi_cache[cache_key])
+                else:
+                    _city_result = None
+            if _city_result is None:
+                _city_result = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
+                with _poi_cache_lock:
+                    if cache_key not in _poi_cache:
+                        _poi_cache[cache_key] = _city_result
+                        if len(_poi_cache) > _MAX_POI_CACHE:
+                            _poi_cache.popitem(last=False)
+            candidates += [p for p in _city_result
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
         if overpass_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(overpass_types)))
-            if cache_key not in _poi_cache:
-                _poi_cache[cache_key] = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
-                if len(_poi_cache) > _MAX_POI_CACHE:
-                    _poi_cache.popitem(last=False)  # evict LRU entry
-            else:
-                _poi_cache.move_to_end(cache_key)   # mark as recently used
-            candidates += [p for p in _poi_cache[cache_key]
+            with _poi_cache_lock:
+                if cache_key in _poi_cache:
+                    _poi_cache.move_to_end(cache_key)
+                    _ovp_result = list(_poi_cache[cache_key])
+                else:
+                    _ovp_result = None
+            if _ovp_result is None:
+                _ovp_result = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
+                with _poi_cache_lock:
+                    if cache_key not in _poi_cache:
+                        _poi_cache[cache_key] = _ovp_result
+                        if len(_poi_cache) > _MAX_POI_CACHE:
+                            _poi_cache.popitem(last=False)
+            candidates += [p for p in _ovp_result
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
         # Build index of cached shadow geometries for this hour/date (fast path)

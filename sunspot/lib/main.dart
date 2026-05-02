@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
+import 'dart:js' as js;
 import 'package:geolocator/geolocator.dart';
 import 'dart:math';
 import 'package:flutter/material.dart';
@@ -264,6 +265,42 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _onMapCreated(MapLibreMapController controller) {
     _mapController = controller;
+    _injectTileLoadHelper();
+  }
+
+  // Monkey-patch maplibregl.Map.prototype.addSource so the first shadow-source
+  // call captures the JS map instance and exposes areTilesLoaded() globally.
+  void _injectTileLoadHelper() {
+    try {
+      js.context.callMethod('eval', [r'''
+        (function() {
+          if (window.__sunspot_patched) return;
+          window.__sunspot_patched = true;
+          function patch() {
+            if (typeof maplibregl === 'undefined') { setTimeout(patch, 50); return; }
+            var orig = maplibregl.Map.prototype.addSource;
+            maplibregl.Map.prototype.addSource = function(id, src) {
+              if (!window.__sunspot_map) window.__sunspot_map = this;
+              return orig.call(this, id, src);
+            };
+          }
+          patch();
+          window.__sunspot_tilesLoaded = function() {
+            if (!window.__sunspot_map) return true;
+            try { return window.__sunspot_map.areTilesLoaded(); } catch(e) { return true; }
+          };
+        })();
+      ''']);
+    } catch (_) {}
+  }
+
+  bool _tilesLoaded() {
+    try {
+      return js.context.callMethod('eval',
+          ['(window.__sunspot_tilesLoaded||function(){return true;})()']) as bool? ?? true;
+    } catch (_) {
+      return true;
+    }
   }
 
   void _setMapCanvasInteractive(bool interactive) {
@@ -1865,8 +1902,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // Warm the server tile cache for every daylight hour at the current viewport center.
-  // Fire-and-forget: sends tile requests for the center 3×3 tile grid per hour so the
-  // 24h animation plays smoothly from server cache without waiting for computation.
+  // Awaits all 9 tiles per hour in parallel — animation only starts once server cache is hot.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
     final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
@@ -1877,18 +1913,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final tileY = _latToTileY(_currentCenter.latitude, zoom);
     for (int h = start; h <= end; h++) {
       if (!mounted || !_preloading24h) return;
+      // Fetch all 9 tiles for this hour in parallel and await all responses.
+      // This guarantees the server has computed and cached each tile before we advance.
+      final futs = <Future>[];
       for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
           final url = '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
               '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
-          http.get(Uri.parse(url)).ignore();
+          futs.add(
+            http.get(Uri.parse(url))
+                .timeout(const Duration(seconds: 30))
+                .catchError((_) => http.Response('', 0)),
+          );
         }
       }
-      if (mounted) setState(() {
+      await Future.wait(futs);
+      if (!mounted || !_preloading24h) return;
+      setState(() {
         _loadingProgress = (h - start + 1) / total;
-        _loadingStage    = 'Pre-loading ${h - start + 1}/$total';
+        _loadingStage    = 'Caching ${h - start + 1}/$total hours';
       });
-      await Future.delayed(const Duration(milliseconds: 40));
     }
   }
 
@@ -1902,12 +1946,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     while (_animating) {
       await fetchShadows();
       if (!_animating) break;
+
+      // Wait for MapLibre to finish rendering tiles from the server cache (max 2 s).
+      // Tiles should already be cached from preload, so this is usually near-instant.
+      for (var i = 0; i < 40 && _animating && !_tilesLoaded(); i++) {
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      if (!_animating) break;
+
       final end = _sunsetHour ?? 20.0;
       if (_hour >= end) {
         setState(() => _animating = false);
         break;
       }
-      final ms = _animSpeed == 4 ? 100 : _animSpeed == 2 ? 300 : 600;
+      final ms = _animSpeed == 4 ? 150 : _animSpeed == 2 ? 350 : 650;
       await Future.delayed(Duration(milliseconds: ms));
       if (!_animating) break;
       setState(() => _hour = _hour + 1.0);
