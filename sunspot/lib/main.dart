@@ -2544,7 +2544,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         // Zoom-in hint badge — shown at z13 and below
         if (_currentZoom <= 13.0)
           Positioned(
-            top: 12, left: 0, right: 0,
+            bottom: 24, left: 0, right: 0,
             child: IgnorePointer(
               child: Center(
                 child: Container(
