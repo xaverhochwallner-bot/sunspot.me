@@ -218,7 +218,7 @@ SUPER_BLOCK_BUFFER   = 0.000010   # ~1 m close radius — only fuses overlapping
 SUPER_BLOCK_SIMPLIFY = 0.000025   # ~3 m — preserves individual building outline shapes
 # Macro pipeline post-processing
 MACRO_SIMPLIFY        = 0.000025   # ~3 m — fine output, close to micro quality at z14
-MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps between buildings
+MACRO_MIN_SUNLIT_AREA = 1e-8       # ~80 m² — show smaller sunny gaps (was 2e-8 ~160 m²)
 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
