@@ -89,7 +89,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Live mode
   bool   _liveMode  = false;
   Timer? _liveTimer;
-  int    _animSpeed = 1; // 1×=600ms, 2×=300ms, 4×=100ms per hour step
+  // _animSpeed removed — animation runs at a single fixed pace (no speed cycling)
 
   // Sunrise / sunset (local hours, e.g. 6.0, 20.0)
   double? _sunriseHour;
@@ -2243,50 +2243,71 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
     if (_animating) {
-      if (_animSpeed == 1) { setState(() => _animSpeed = 2); return; }
-      if (_animSpeed == 2) { setState(() => _animSpeed = 4); return; }
-      setState(() { _animating = false; _animSpeed = 1; });
+      setState(() => _animating = false);
       return;
     }
     final start = _sunriseHour ?? 6.0;
-    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Pre-loading'; _loadingProgress = 0; });
+    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
-      setState(() { _preloading24h = false; _animating = true; _animSpeed = 1; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
+      setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
       _run24hStep();
     });
   }
 
-  // Warm the server tile cache for every daylight hour at the current viewport center.
-  // Fires all hours in parallel (1 center tile each) — down from 144 sequential requests to
-  // ~16 parallel requests. Server computes all sun angles simultaneously; progress updates
-  // as each hour completes. Typical time: 20–60 s vs 10–15 min for the old 3×3 approach.
+  // Warm the server tile cache for every daylight hour — 3×3 tile grid, all hours in parallel.
+  // 144 simultaneous requests let the server compute all sun angles at once.
+  // Progress updates per tile so the bar moves immediately on cold server.
+  // Typical time: 30–90 s cold, under 20 s warm (geometry already cached).
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
-    final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
-    final start = (_sunriseHour ?? 6.0).toInt();
-    final end   = (_sunsetHour  ?? 21.0).toInt();
-    final total = end - start + 1;
-    int completedTiles = 0;
+    final zoom       = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
+    final start      = (_sunriseHour ?? 6.0).toInt();
+    final end        = (_sunsetHour  ?? 21.0).toInt();
+    final total      = end - start + 1;
+    final totalTiles = total * 9;
+    int completed    = 0;
     final tileX = _lonToTileX(_currentCenter.longitude, zoom);
     final tileY = _latToTileY(_currentCenter.latitude, zoom);
 
     await Future.wait([
       for (int h = start; h <= end; h++)
-        http.get(Uri.parse(
-          '$flaskBaseUrl/shadow/tile/$zoom/$tileX/$tileY.pbf'
-          '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
-        ))
-            .timeout(const Duration(seconds: 120))
-            .catchError((_) => http.Response('', 0))
-            .then((_) {
-              completedTiles++;
-              if (mounted && _preloading24h) setState(() {
-                _loadingProgress = completedTiles / total;
-                _loadingStage    = 'Warming $completedTiles/$total hours';
-              });
-            }),
+        for (var dx = -1; dx <= 1; dx++)
+          for (var dy = -1; dy <= 1; dy++)
+            http.get(Uri.parse(
+              '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
+              '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
+            ))
+                .timeout(const Duration(seconds: 120))
+                .catchError((_) => http.Response('', 0))
+                .then((_) {
+                  completed++;
+                  if (mounted && _preloading24h) setState(() {
+                    _loadingProgress = completed / totalTiles;
+                    _loadingStage    = 'Warming ${(completed / 9).ceil()}/$total hours';
+                  });
+                }),
     ]);
+  }
+
+  // Fire-and-forget: warm the server cache for a single hour's 3×3 tile grid.
+  // Called during the animation hold period so the next step's tiles are hot
+  // before MapLibre requests them. No await — runs concurrently with the hold delay.
+  void _warmHourTiles(int hour) {
+    if (!_mapReady || _mapController == null) return;
+    final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
+    final tileX = _lonToTileX(_currentCenter.longitude, zoom);
+    final tileY = _latToTileY(_currentCenter.latitude, zoom);
+    for (var dx = -1; dx <= 1; dx++) {
+      for (var dy = -1; dy <= 1; dy++) {
+        http.get(Uri.parse(
+          '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
+          '?hour=$hour&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
+        ))
+            .timeout(const Duration(seconds: 30))
+            .catchError((_) => http.Response('', 0));
+      }
+    }
   }
 
   int _lonToTileX(double lon, int z) => ((lon + 180.0) / 360.0 * (1 << z)).floor();
@@ -2300,18 +2321,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await fetchShadows();
       if (!_animating) break;
 
-      // Wait for MapLibre's 'idle' event — fires only after all tiles are fully painted.
-      // areTilesLoaded() returns true when tiles are fetched but not yet rendered, causing
-      // a blank flash when ghost layers are removed too early. _isIdle() is the safe gate.
-      for (var i = 0; i < 60 && _animating && !_isIdle(); i++) {
+      // Wait for MapLibre idle — fires only after all tiles are fully painted to canvas.
+      // Hard ceiling: 5 s (100 × 50 ms). Track whether idle actually fired or we timed out.
+      for (var i = 0; i < 100 && _animating && !_isIdle(); i++) {
         await Future.delayed(const Duration(milliseconds: 50));
       }
       if (!_animating) break;
-      _stopIdleWait(); // reset idle tracking for the next step
+      final idleFired = _isIdle();
+      _stopIdleWait();
 
-      // Remove ghost layers now that new tiles are confirmed rendered.
-      // fetchShadows() skips the idle-wait cleanup path during animation, so we do it here.
-      if (_prevNonce >= 0) {
+      // 80 ms GPU buffer — compositing pipeline has a few ms lag after idle event.
+      if (idleFired) await Future.delayed(const Duration(milliseconds: 80));
+      if (!_animating) break;
+
+      // Only remove ghost when tiles are confirmed fully rendered.
+      // On timeout, keep the ghost: old shadows stay visible as fallback, and the
+      // next step's _ensureShadowTileSource() will clean them up before adding new layers.
+      if (idleFired && _prevNonce >= 0) {
         final old = _prevNonce;
         _prevNonce = -1;
         final mc = _mapController;
@@ -2329,8 +2355,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         setState(() => _animating = false);
         break;
       }
-      final ms = _animSpeed == 4 ? 150 : _animSpeed == 2 ? 350 : 650;
-      await Future.delayed(Duration(milliseconds: ms));
+
+      // During the hold, pre-warm the next hour's 3×3 tiles on the server.
+      // Runs concurrently with the delay so tiles are hot before MapLibre requests them.
+      _warmHourTiles((_hour + 1.0).toInt());
+
+      // Fixed hold — each shadow is shown for 500 ms after it finishes rendering.
+      await Future.delayed(const Duration(milliseconds: 500));
       if (!_animating) break;
       setState(() => _hour = _hour + 1.0);
     }
@@ -3419,7 +3450,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 color: (_animating || _preloading24h) ? Colors.white : Colors.grey.shade500,
               ),
               const SizedBox(width: 3),
-              Text(_preloading24h ? '…' : (_animating ? '${_animSpeed}×' : '24h'),
+              Text(_preloading24h ? '…' : (_animating ? '■' : '24h'),
                   style: TextStyle(
                     fontSize: 14, fontWeight: FontWeight.w600,
                     color: (_animating || _preloading24h) ? Colors.white : Colors.grey.shade500,
