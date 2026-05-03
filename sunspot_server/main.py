@@ -208,7 +208,7 @@ MIN_BUILDING_AREA = 5e-9  # ~25 m²
 # Macro / Micro split:
 #   z ≤ MACRO_ZOOM_THRESHOLD → super-block fast path (single l0 layer, ~150-500 ms cold)
 #   z >  MACRO_ZOOM_THRESHOLD → per-building pipeline with l0/l1/l2 erosion rings
-MACRO_ZOOM_THRESHOLD = 14  # z14 moved back to macro: per-tile micro was 28-33s (too slow)
+MACRO_ZOOM_THRESHOLD = 13  # z14 promoted to micro pipeline; startup pre-warm covers all Vienna tiles
 
 # Static Block Database — built once at startup, persisted in pickle cache.
 # All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
@@ -2264,41 +2264,71 @@ def _startup_prewarm():
         return
     lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
     hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
+
+    # Shadow cache: Vienna center at z12-15 (quick wins before tile warm starts).
     zooms = [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04), (15, 0.025, 0.02)]
     tasks = [(h, now.month, now.day, lat, lon, z, w, v)
              for h in hours for z, w, v in zooms]
-    print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} "
-          f"({len(tasks)} tasks in parallel) ...")
+    print(f"[startup] Pre-warming Vienna center z12-15 for hours {hours} ({len(tasks)} tasks) ...")
     with ThreadPoolExecutor(max_workers=1) as ex:
         futs = [ex.submit(_compute_shadow_cached, h, mo, d, la, lo, z, w, v)
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
             try:    f.result()
-            except Exception as e: print(f"[startup] prewarm error: {e}")
+            except Exception as e: print(f"[startup] shadow prewarm error: {e}")
     print("[startup] Shadow pre-warm complete.")
 
-    # Tile pre-warm: encode PBF for 3×3 tiles around Vienna center at z13-15.
-    # Runs after shadow cache is warm so tile encoding is instant.
-    lat, lon = 48.2082, 16.3738
-    tile_tasks = []
-    for zoom in (13, 14, 15):
-        ct = mercantile.tile(lon, lat, zoom)
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                t = mercantile.Tile(ct.x + dx, ct.y + dy, zoom)
-                for h in hours:
-                    tile_tasks.append((zoom, t.x, t.y, h, now.month, now.day))
-    print(f"[startup] Pre-warming {len(tile_tasks)} PBF tiles ...")
-    for z, x, y, h, mo, d in tile_tasks:
+    # Tile PBF pre-warm:
+    #   z13/z15: 5×5 neighbourhood around Vienna center
+    #   z14: ALL Vienna tiles (micro pipeline), sorted centre-out so most-visited
+    #         tiles are cached first; disk cache persists across restarts.
+    ct13 = mercantile.tile(lon, lat, 13)
+    ct14 = mercantile.tile(lon, lat, 14)
+    ct15 = mercantile.tile(lon, lat, 15)
+
+    tile_list = []
+    for dx in range(-2, 3):
+        for dy in range(-2, 3):
+            tile_list.append((13, ct13.x + dx, ct13.y + dy))
+            tile_list.append((15, ct15.x + dx, ct15.y + dy))
+
+    # Full Vienna bbox at z14: west=16.10, south=48.05, east=16.65, north=48.40
+    z14_tiles = sorted(
+        mercantile.tiles(16.10, 48.05, 16.65, 48.40, zooms=14),
+        key=lambda t: abs(t.x - ct14.x) + abs(t.y - ct14.y)
+    )
+    tile_list += [(14, t.x, t.y) for t in z14_tiles]
+
+    tile_tasks = [(z, x, y, h, now.month, now.day)
+                  for z, x, y in tile_list for h in hours]
+
+    print(f"[startup] Pre-warming {len(tile_tasks)} PBF tiles "
+          f"(z13 5×5, {len(z14_tiles)} z14 Vienna, z15 5×5) ...")
+
+    def _warm_tile(args):
+        z, x, y, h, mo, d = args
         tck = (z, x, y, h, mo, d)
         with _cache_lock:
-            already = tck in _tile_cache
-        if not already:
-            pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
-            if pbf:
-                with _cache_lock:
-                    _tile_cache[tck] = pbf
-                    _trim_tile_cache()
+            if tck in _tile_cache:
+                return
+        pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
+        if pbf:
+            with _cache_lock:
+                _tile_cache[tck] = pbf
+                _trim_tile_cache()
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(_warm_tile, t) for t in tile_tasks]
+        done = 0
+        for f in futs:
+            try:
+                f.result()
+                done += 1
+                if done % 100 == 0:
+                    print(f"[startup] Tile warm progress: {done}/{len(tile_tasks)}")
+            except Exception as e:
+                print(f"[startup] tile warm error: {e}")
+
     print(f"[startup] Tile pre-warm complete. {len(_tile_cache)} tiles cached.")
 
 threading.Thread(target=_startup_prewarm, daemon=True).start()
