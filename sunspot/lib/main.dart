@@ -75,6 +75,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Completer<void>?    _fetchCompleter;
   bool                _shadowLayersReady = false;
   int                 _lastFetchZoom     = -1;
+  double              _currentZoom       = 14.0;
   String?             _currentTileUrl;
   int                 _shadowSourceNonce = 0;  // bumped per time-change rebuild; used for both macro + micro source IDs
   int                 _prevNonce         = -1; // nonce of ghost layers kept dimmed while new tiles load; cleaned up after idle
@@ -466,6 +467,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentCenter = center;
 
     final zoom = pos?.zoom ?? 0;
+    if (zoom != _currentZoom) setState(() => _currentZoom = zoom);
     if (_suppressResultClear) {
       _lastSearchCenter = center;
       _lastSearchZoom   = zoom;
@@ -2538,6 +2540,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
         ),
+
+        // Zoom-in hint badge — shown at z13 and below
+        if (_currentZoom <= 13.0)
+          Positioned(
+            top: 12, left: 0, right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.92),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12),
+                        blurRadius: 8, offset: const Offset(0, 2))],
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.zoom_in_rounded, size: 14, color: Colors.orange.shade500),
+                    const SizedBox(width: 6),
+                    Text('For more details, please zoom in.',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade700,
+                            fontWeight: FontWeight.w500)),
+                  ]),
+                ),
+              ),
+            ),
+          ),
 
         // Tap-to-inspect hint badge (Saved tab only)
         if (_isMobile && _mobileTab == 3)
