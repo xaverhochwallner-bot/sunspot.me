@@ -2113,8 +2113,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
     }
 
-    // Time changed (new URL) — dim existing layers and keep them as ghost while new tiles load.
-    // Ghost layers are removed after idle (new tiles ready) in fetchShadows(), same as zoom-change behavior.
+    // Time changed (new URL) — keep existing layers as ghost while new tiles load.
+    // Animation: ghost stays at full opacity (tiles load from preload cache in ~50ms, _run24hStep cleans up).
+    // Manual swap: ghost is dimmed so it doesn't mislead while new tiles may take seconds to arrive.
     if (_shadowLayersReady) {
       final mc = ctrl;
       // If a previous ghost is still pending cleanup (rapid time changes), remove it now.
@@ -2127,23 +2128,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         try { await ctrl.removeSource('shadow-macro-$old'); } catch (_) {}
         try { await ctrl.removeSource('shadow-micro-$old'); } catch (_) {}
       }
-      // Dim current layers — they remain visible as ghost beneath the freeze overlay.
       _prevNonce = _shadowSourceNonce;
       final g = _prevNonce;
-      try {
-        mc.setLayerProperties('shadow-macro-l0-fill-$g', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.15));
-        mc.setLayerProperties('shadow-macro-l1-fill-$g', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.10));
-        mc.setLayerProperties('shadow-macro-l2-fill-$g', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.08));
-        mc.setLayerProperties('shadow-macro-l0-line-$g', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.09));
-        mc.setLayerProperties('shadow-macro-l1-line-$g', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.06));
-        mc.setLayerProperties('shadow-macro-l2-line-$g', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.05));
-        mc.setLayerProperties('shadow-micro-l0-fill-$g', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.12));
-        mc.setLayerProperties('shadow-micro-l1-fill-$g', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.08));
-        mc.setLayerProperties('shadow-micro-l2-fill-$g', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.06));
-        mc.setLayerProperties('shadow-micro-l0-line-$g', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.07));
-        mc.setLayerProperties('shadow-micro-l1-line-$g', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.05));
-        mc.setLayerProperties('shadow-micro-l2-line-$g', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.04));
-      } catch (_) {}
+      if (!_animating) {
+        // Dim ghost layers for manual tile swap — they should not dominate while new tiles load.
+        try {
+          mc.setLayerProperties('shadow-macro-l0-fill-$g', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.15));
+          mc.setLayerProperties('shadow-macro-l1-fill-$g', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.10));
+          mc.setLayerProperties('shadow-macro-l2-fill-$g', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.08));
+          mc.setLayerProperties('shadow-macro-l0-line-$g', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.09));
+          mc.setLayerProperties('shadow-macro-l1-line-$g', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.06));
+          mc.setLayerProperties('shadow-macro-l2-line-$g', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.05));
+          mc.setLayerProperties('shadow-micro-l0-fill-$g', FillLayerProperties(fillColor: '#5B6AA5', fillOpacity: 0.12));
+          mc.setLayerProperties('shadow-micro-l1-fill-$g', FillLayerProperties(fillColor: '#4A5599', fillOpacity: 0.08));
+          mc.setLayerProperties('shadow-micro-l2-fill-$g', FillLayerProperties(fillColor: '#3D3F85', fillOpacity: 0.06));
+          mc.setLayerProperties('shadow-micro-l0-line-$g', LineLayerProperties(lineColor: '#5B6AA5', lineOpacity: 0.07));
+          mc.setLayerProperties('shadow-micro-l1-line-$g', LineLayerProperties(lineColor: '#4A5599', lineOpacity: 0.05));
+          mc.setLayerProperties('shadow-micro-l2-line-$g', LineLayerProperties(lineColor: '#3D3F85', lineOpacity: 0.04));
+        } catch (_) {}
+      }
       // Ghost layers stay on the map — do NOT removeLayer/removeSource here.
       _shadowLayersReady = false;
     }
@@ -2256,18 +2259,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Warm the server tile cache for every daylight hour at the current viewport center.
   // Awaits all 9 tiles per hour in parallel — animation only starts once server cache is hot.
+  // Progress updates per individual tile so the bar moves immediately even on cold server start.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
     final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
     final start = (_sunriseHour ?? 6.0).toInt();
     final end   = (_sunsetHour  ?? 21.0).toInt();
     final total = end - start + 1;
+    final totalTiles = total * 9;
+    int completedTiles = 0;
     final tileX = _lonToTileX(_currentCenter.longitude, zoom);
     final tileY = _latToTileY(_currentCenter.latitude, zoom);
     for (int h = start; h <= end; h++) {
       if (!mounted || !_preloading24h) return;
-      // Fetch all 9 tiles for this hour in parallel and await all responses.
-      // This guarantees the server has computed and cached each tile before we advance.
+      final hourIdx = h - start + 1;
       final futs = <Future>[];
       for (var dx = -1; dx <= 1; dx++) {
         for (var dy = -1; dy <= 1; dy++) {
@@ -2276,16 +2281,19 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           futs.add(
             http.get(Uri.parse(url))
                 .timeout(const Duration(seconds: 30))
-                .catchError((_) => http.Response('', 0)),
+                .catchError((_) => http.Response('', 0))
+                .then((_) {
+                  completedTiles++;
+                  if (mounted && _preloading24h) setState(() {
+                    _loadingProgress = completedTiles / totalTiles;
+                    _loadingStage    = 'Caching $hourIdx/$total hours';
+                  });
+                }),
           );
         }
       }
       await Future.wait(futs);
       if (!mounted || !_preloading24h) return;
-      setState(() {
-        _loadingProgress = (h - start + 1) / total;
-        _loadingStage    = 'Caching ${h - start + 1}/$total hours';
-      });
     }
   }
 
@@ -2306,6 +2314,21 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         await Future.delayed(const Duration(milliseconds: 50));
       }
       if (!_animating) break;
+
+      // Remove ghost layers now that new tiles are confirmed rendered.
+      // fetchShadows() skips the idle-wait cleanup path during animation, so we do it here.
+      if (_prevNonce >= 0) {
+        final old = _prevNonce;
+        _prevNonce = -1;
+        final mc = _mapController;
+        if (mc != null) {
+          for (final id in _shadowGhostLayerIds(old)) {
+            try { await mc.removeLayer(id); } catch (_) {}
+          }
+          try { await mc.removeSource('shadow-macro-$old'); } catch (_) {}
+          try { await mc.removeSource('shadow-micro-$old'); } catch (_) {}
+        }
+      }
 
       final end = _sunsetHour ?? 20.0;
       if (_hour >= end) {
@@ -2801,6 +2824,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
 
 
+        // Time-of-day pill — fades in below search bar during 24h animation
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+          top: 66, left: 0, right: 0,
+          child: Center(child: _buildTimePill()),
+        ),
+
         // Loading pill
         AnimatedPositioned(
           duration: const Duration(milliseconds: 300),
@@ -3012,6 +3043,51 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     backgroundColor: Colors.orange.shade100,
                     color: Colors.orange,
                   ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTimePill() {
+    final h     = _hour.toInt();
+    final m     = ((_hour % 1.0) * 60).round().clamp(0, 59);
+    final ampm  = h < 12 ? 'AM' : 'PM';
+    final dispH = h == 0 ? 12 : (h > 12 ? h - 12 : h);
+    final timeStr = '$dispH:${m.toString().padLeft(2, '0')} $ampm';
+    return AnimatedOpacity(
+      opacity: _animating ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 400),
+      child: IgnorePointer(
+        ignoring: !_animating,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+          decoration: BoxDecoration(
+            color: const Color(0xD21A1A2E),
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.orange.withValues(alpha: 0.28),
+                blurRadius: 20,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.wb_sunny_rounded, color: Colors.orange, size: 14),
+              const SizedBox(width: 8),
+              Text(
+                timeStr,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
                 ),
               ),
             ],
