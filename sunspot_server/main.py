@@ -97,6 +97,8 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 _shadow_cache = {}
 MAX_CACHE     = 500   # each entry is a large Shapely geom; 500 × ~400 KB ≈ 200 MB per worker
 SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
+# Bump this whenever geometry-affecting server params change to auto-invalidate disk cache.
+CACHE_VERSION = 2
 _cache_lock   = threading.RLock()  # guards _shadow_cache and _tile_cache
 
 # Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
@@ -130,8 +132,8 @@ def _cache_key(hour, month, day, lat, lon, zoom, elevation=None, azimuth=None):
         # hours with nearly identical sun positions share the same cached geometry.
         elev_b = round(elevation / 3.0) * 3
         azim_b = round((azimuth or 0) / 6.0) * 6
-        return (elev_b, azim_b, month, zoom, lat_s, lon_s)
-    return (hour, month, day, zoom, lat_s, lon_s)
+        return (CACHE_VERSION, elev_b, azim_b, month, zoom, lat_s, lon_s)
+    return (CACHE_VERSION, hour, month, day, zoom, lat_s, lon_s)
 
 
 # ---------------------------------------------------------------------------
@@ -223,8 +225,8 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
 _CFG_MACRO_EROSION = {
-    12: (0.00022, 0.00052),  # ~24 m / ~58 m — district scale (was 33/78, reduced ~30% for crispness)
-    13: (0.00015, 0.00038),  # ~17 m / ~42 m — neighbourhood scale (was 22/56, reduced ~25%)
+    12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
+    13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
     14: (0.000060, 0.000140),  # ~6.5 m / ~15 m — close to z15 micro (5.5 m / 13 m) to minimise seam
 }
 
