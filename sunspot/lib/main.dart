@@ -1701,9 +1701,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Block map pan/zoom while loading so the server isn't hammered by stacked requests.
     if (!_animating) _setMapPointerEvents(false);
 
-    // Show pill after 150 ms if still loading (not during animation or 24h preload).
+    // Show pill after 50 ms if still loading (not during animation or 24h preload).
+    // 50 ms is short enough to catch even fast macro-zoom cached loads.
     if (!_animating && !_preloading24h) {
-      _pillTimer = Timer(const Duration(milliseconds: 150), () {
+      _pillTimer = Timer(const Duration(milliseconds: 50), () {
         if (mounted && _fetchGen == gen) setState(() => _showPill = true);
       });
     }
@@ -1768,13 +1769,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         for (var i = 0; i < maxIter && gen == _fetchGen && mounted; i++) {
           await Future.delayed(const Duration(milliseconds: 100));
           if (!mounted || gen != _fetchGen) break;
-          // Show fetch-based % when available; 0.0 keeps the bar indeterminate.
-          setState(() => _loadingProgress = _tileProgress());
+          final fetchProg = _tileProgress();
+          // When tiles are served from MapLibre's in-memory cache, fetch() is never
+          // called so fetchProg stays 0. Use a time-based easing curve as fallback so
+          // the bar visually advances; cap at 0.92 so idle completion always "finishes" it.
+          final fakeProgress = (1.0 - pow(0.94, i + 1)).clamp(0.0, 0.92);
+          setState(() => _loadingProgress = fetchProg > 0 ? fetchProg : fakeProgress);
           if (_isIdle()) break;
           // After 5 s with no idle signal, label changes to "Rendering…"
           if (i == 49 && mounted) setState(() => _loadingStage = 'Rendering…');
         }
         _stopIdleWait();
+        // Snap to 100% so user sees completion before pill fades out.
+        if (gen == _fetchGen && mounted) setState(() => _loadingProgress = 1.0);
+        await Future.delayed(const Duration(milliseconds: 180));
       }
       if (gen == _fetchGen && mounted) {
         setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; _loadingStage = ''; });
