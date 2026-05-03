@@ -278,11 +278,26 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         (function() {
           if (window.__sunspot_patched) return;
           window.__sunspot_patched = true;
+
+          // --- idle-event tracking ---
+          window.__sp_idle    = false;
+          window.__sp_waiting = false;
+          // Called right before addSource so idle fires AFTER our tiles load.
+          window.__sunspot_startWait = function() { window.__sp_idle = false; window.__sp_waiting = true; };
+          window.__sunspot_isIdle    = function() { return window.__sp_idle === true; };
+          window.__sunspot_stopWait  = function() { window.__sp_waiting = false; window.__sp_idle = false; };
+
           function patch() {
             if (typeof maplibregl === 'undefined') { setTimeout(patch, 50); return; }
             var orig = maplibregl.Map.prototype.addSource;
             maplibregl.Map.prototype.addSource = function(id, src) {
-              if (!window.__sunspot_map) window.__sunspot_map = this;
+              if (!window.__sunspot_map) {
+                window.__sunspot_map = this;
+                // Hook the idle event once — fires when all tiles are rendered.
+                this.on('idle', function() {
+                  if (window.__sp_waiting) window.__sp_idle = true;
+                });
+              }
               return orig.call(this, id, src);
             };
           }
@@ -297,7 +312,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           window.__sunspot_resetProgress = function() { window.__sp_pending = 0; window.__sp_done = 0; };
           window.__sunspot_tileProgress = function() {
             var p = window.__sp_pending || 0, d = window.__sp_done || 0;
-            return p === 0 ? 1.0 : Math.min(d / p, 1.0);
+            // Return 0.0 (not 1.0) when no fetches observed — indeterminate, not "done".
+            return p === 0 ? 0.0 : Math.min(d / p, 1.0);
           };
           (function() {
             var _origFetch = window.fetch;
@@ -338,9 +354,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double _tileProgress() {
     try {
       return (js.context.callMethod('eval',
-          ['(window.__sunspot_tileProgress||function(){return 1.0;})()']) as num?)
-              ?.toDouble() ?? 1.0;
-    } catch (_) { return 1.0; }
+          ['(window.__sunspot_tileProgress||function(){return 0.0;})()']) as num?)
+              ?.toDouble() ?? 0.0;
+    } catch (_) { return 0.0; }
+  }
+
+  void _startIdleWait() {
+    try {
+      js.context.callMethod('eval', ['window.__sunspot_startWait&&window.__sunspot_startWait()']);
+    } catch (_) {}
+  }
+
+  bool _isIdle() {
+    try {
+      return js.context.callMethod('eval',
+          ['(window.__sunspot_isIdle||function(){return true;})()']) as bool? ?? true;
+    } catch (_) { return true; }
+  }
+
+  void _stopIdleWait() {
+    try {
+      js.context.callMethod('eval', ['window.__sunspot_stopWait&&window.__sunspot_stopWait()']);
+    } catch (_) {}
   }
 
   void _setMapCanvasInteractive(bool interactive) {
@@ -1726,20 +1761,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
       if (!completer.isCompleted) completer.complete();
 
-      // Poll real tile-fetch progress until MapLibre reports all tiles rendered.
-      // Skip during animation — tiles come from warm server cache so this is near-instant.
+      // Wait for MapLibre's 'idle' event — fires exactly when all tiles are rendered.
+      // Skip during animation (tiles come from warm cache, animation manages its own state).
       if (!_animating) {
-        _resetTileProgress();
-        for (var i = 0; i < 80 && gen == _fetchGen && mounted; i++) {
+        const maxIter = 300; // 30 s hard ceiling
+        for (var i = 0; i < maxIter && gen == _fetchGen && mounted; i++) {
           await Future.delayed(const Duration(milliseconds: 100));
           if (!mounted || gen != _fetchGen) break;
-          final prog = _tileProgress();
-          setState(() => _loadingProgress = prog);
-          if (_tilesLoaded() && prog >= 1.0) break;
+          // Show fetch-based % when available; 0.0 keeps the bar indeterminate.
+          setState(() => _loadingProgress = _tileProgress());
+          if (_isIdle()) break;
+          // After 5 s with no idle signal, label changes to "Rendering…"
+          if (i == 49 && mounted) setState(() => _loadingStage = 'Rendering…');
         }
+        _stopIdleWait();
       }
       if (gen == _fetchGen && mounted) {
-        setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; });
+        setState(() { _loading = false; _showPill = false; _loadingProgress = 0.0; _loadingStage = ''; });
         _setMapPointerEvents(true);
       }
 
@@ -1815,6 +1853,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_shadowLayersReady && tileUrl == _currentTileUrl) {
       // URL unchanged (same time) — only update opacities, no source teardown.
       // This path fires on every zoom change; MapLibre's zoom expressions handle the cross-fade.
+      // Arm idle wait: MapLibre may already be fetching new-zoom tiles autonomously.
+      _startIdleWait();
+      _resetTileProgress();
       try {
         await Future.wait([
           ctrl.setLayerProperties('shadow-macro-l0-fill', FillLayerProperties(fillColor: '#5B6AA5', fillAntialias: true, fillOpacity: macroOp(opL0))),
@@ -1870,6 +1911,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Cache-buster: ensures MapLibre never serves stale tiles from a prior source's request.
     // Both sources share the same fetchUrl; nonce differs per rebuild so URLs are unique.
     final fetchUrl = '$tileUrl&_n=$_shadowSourceNonce';
+
+    // Arm idle wait + reset fetch counter BEFORE addSource triggers tile fetches.
+    _startIdleWait();
+    _resetTileProgress();
 
     // Macro source: capped at z14 — uses z14 macro tiles and overzooms them past z14.
     await ctrl.addSource(macroSrc, VectorSourceProperties(tiles: [fetchUrl], minzoom: 0, maxzoom: 14));
@@ -2268,6 +2313,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               child: CustomPaint(painter: _VignettePainter()),
             ),
           ),
+
+        // Map freeze overlay — dims the map while new shadow tiles are loading so the
+        // user can clearly see it's updating (not stuck). Fades in/out smoothly.
+        Positioned.fill(
+          child: IgnorePointer(
+            child: AnimatedOpacity(
+              opacity: (_loading && !_animating) ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 150),
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.32),
+                ),
+              ),
+            ),
+          ),
+        ),
 
         // Tap-to-inspect hint badge (Saved tab only)
         if (_isMobile && _mobileTab == 3)
