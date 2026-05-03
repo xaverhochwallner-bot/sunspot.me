@@ -2754,23 +2754,29 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             ),
           ),
 
-        // Compass button — appears only when map is rotated away from North.
-        // Tapping resets bearing to 0 and exits GPS tracking.
-        if (!keyboardOpen && _mapBearing.abs() > 1.0)
+        // Compass needle — top-right, just below the search bar.
+        // Fades in when map is rotated; fades out when North-up.
+        // Tap: animate back to North + exit any GPS tracking state.
+        if (!keyboardOpen)
           Positioned(
-            bottom: 120,
-            left:  isMobile ? null : 16,
-            right: isMobile ? 16   : null,
-            child: FloatingActionButton.small(
-              heroTag: 'compass',
-              onPressed: _resetToNorth,
-              backgroundColor: Colors.white,
-              foregroundColor: Colors.red.shade600,
-              elevation: 2,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              child: Transform.rotate(
-                angle: -_mapBearing * pi / 180,
-                child: const Icon(Icons.navigation, size: 20),
+            top: 64, right: 12,
+            child: AnimatedOpacity(
+              opacity: _mapBearing.abs() > 1.0 ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 250),
+              child: IgnorePointer(
+                ignoring: _mapBearing.abs() <= 1.0,
+                child: FloatingActionButton.small(
+                  heroTag: 'compass',
+                  onPressed: _resetToNorth,
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.red.shade600,
+                  elevation: 2,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  child: Transform.rotate(
+                    angle: -_mapBearing * pi / 180,
+                    child: const Icon(Icons.navigation, size: 20),
+                  ),
+                ),
               ),
             ),
           ),
