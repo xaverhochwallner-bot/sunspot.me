@@ -112,6 +112,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Timer?                    _compassPollTimer;
   double                    _lastHeading     = 0;
 
+  // Current map bearing (degrees CW from north) — drives compass button
+  double                    _mapBearing      = 0;
+
   // Sunny spots
   List<Map<String, dynamic>> _sunnySpots          = [];
   bool                       _sunnySpotsLayerReady = false;
@@ -473,12 +476,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (_tourSpots.isNotEmpty) _refreshTourMarkerPositions();
     if (_sunnyPois.isNotEmpty) _refreshPoiPositions();
     if (_searchMarkerPos != null) _refreshSearchMarkerPosition();
+
+    // Update compass needle when bearing changes.
+    final bearing = pos?.bearing ?? 0.0;
+    if ((bearing - _mapBearing).abs() > 0.5) setState(() => _mapBearing = bearing);
+
     _debounceTimer?.cancel();
     // When zoom changes significantly (> 0.5 levels), use a very short debounce so
     // stale shadow data from the previous zoom is not shown for a full 600 ms.
     final zoomDelta = _lastFetchZoom >= 0 ? (zoom - _lastFetchZoom).abs() : 0.0;
     final debounceMs = zoomDelta > 0.5 ? 100 : 600;
-    _debounceTimer = Timer(Duration(milliseconds: debounceMs), fetchShadows);
+    // Skip shadow refetch when GPS tracking merely re-centres the map (no zoom change).
+    if (_gpsState == 0 || zoomDelta > 0.1) {
+      _debounceTimer = Timer(Duration(milliseconds: debounceMs), fetchShadows);
+    }
   }
 
   void _onMapClick(Point<double> point, LatLng coordinates) {
@@ -1644,6 +1655,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (mounted) setState(() => _gpsState = 0);
   }
 
+  Future<void> _resetToNorth() async {
+    _enterState0();
+    final cam = _mapController?.cameraPosition;
+    if (cam == null) return;
+    await _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        CameraPosition(target: cam.target, zoom: cam.zoom, bearing: 0),
+      ),
+    );
+  }
+
   Future<void> _enterState1() async {
     var perm = await Geolocator.checkPermission();
     if (perm == LocationPermission.denied) {
@@ -2728,6 +2750,27 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               child: Icon(
                 _gpsState == 2 ? Icons.explore : Icons.my_location,
                 size: 20,
+              ),
+            ),
+          ),
+
+        // Compass button — appears only when map is rotated away from North.
+        // Tapping resets bearing to 0 and exits GPS tracking.
+        if (!keyboardOpen && _mapBearing.abs() > 1.0)
+          Positioned(
+            bottom: 120,
+            left:  isMobile ? null : 16,
+            right: isMobile ? 16   : null,
+            child: FloatingActionButton.small(
+              heroTag: 'compass',
+              onPressed: _resetToNorth,
+              backgroundColor: Colors.white,
+              foregroundColor: Colors.red.shade600,
+              elevation: 2,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              child: Transform.rotate(
+                angle: -_mapBearing * pi / 180,
+                child: const Icon(Icons.navigation, size: 20),
               ),
             ),
           ),
