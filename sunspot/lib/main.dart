@@ -1657,11 +1657,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _resetToNorth() async {
     _enterState0();
-    final cam = _mapController?.cameraPosition;
-    if (cam == null) return;
+    // Use _currentCenter as fallback so this never silently bails out because
+    // cameraPosition is null (happens when onCameraIdle never fired, e.g. during
+    // continuous compass-mode animations).
+    final zoom = _mapController?.cameraPosition?.zoom ?? 15.0;
     await _mapController?.animateCamera(
       CameraUpdate.newCameraPosition(
-        CameraPosition(target: cam.target, zoom: cam.zoom, bearing: 0),
+        CameraPosition(target: _currentCenter, zoom: zoom, bearing: 0),
       ),
     );
   }
@@ -2742,6 +2744,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             left:  isMobile ? 16  : null,
             right: isMobile ? null : 16,
             child: FloatingActionButton.small(
+              heroTag: 'gps',
               onPressed: _onGpsButtonTap,
               backgroundColor: Colors.white,
               foregroundColor: _gpsState == 0 ? Colors.black54 : Colors.blue,
