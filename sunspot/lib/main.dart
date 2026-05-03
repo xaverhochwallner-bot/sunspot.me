@@ -2300,12 +2300,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await fetchShadows();
       if (!_animating) break;
 
-      // Wait for MapLibre to finish rendering tiles from the server cache (max 2 s).
-      // Tiles should already be cached from preload, so this is usually near-instant.
-      for (var i = 0; i < 40 && _animating && !_tilesLoaded(); i++) {
+      // Wait for MapLibre's 'idle' event — fires only after all tiles are fully painted.
+      // areTilesLoaded() returns true when tiles are fetched but not yet rendered, causing
+      // a blank flash when ghost layers are removed too early. _isIdle() is the safe gate.
+      for (var i = 0; i < 60 && _animating && !_isIdle(); i++) {
         await Future.delayed(const Duration(milliseconds: 50));
       }
       if (!_animating) break;
+      _stopIdleWait(); // reset idle tracking for the next step
 
       // Remove ghost layers now that new tiles are confirmed rendered.
       // fetchShadows() skips the idle-wait cleanup path during animation, so we do it here.
