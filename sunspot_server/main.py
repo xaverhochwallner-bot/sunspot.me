@@ -223,8 +223,8 @@ MACRO_MIN_SUNLIT_AREA = 2e-8       # ~160 m² — keeps very narrow sunlit gaps 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
 # Values are ~10× larger than micro because super-blocks are city-block-sized (~50–200 m).
 _CFG_MACRO_EROSION = {
-    12: (0.0003, 0.0007),   # ~33 m / ~78 m — district scale
-    13: (0.0002, 0.0005),   # ~22 m / ~56 m — neighbourhood scale
+    12: (0.00022, 0.00052),  # ~24 m / ~58 m — district scale (was 33/78, reduced ~30% for crispness)
+    13: (0.00015, 0.00038),  # ~17 m / ~42 m — neighbourhood scale (was 22/56, reduced ~25%)
     14: (0.000060, 0.000140),  # ~6.5 m / ~15 m — close to z15 micro (5.5 m / 13 m) to minimise seam
 }
 
