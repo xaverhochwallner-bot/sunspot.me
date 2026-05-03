@@ -2768,16 +2768,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               duration: const Duration(milliseconds: 250),
               child: IgnorePointer(
                 ignoring: _mapBearing.abs() <= 1.0,
-                child: FloatingActionButton.small(
-                  heroTag: 'compass',
-                  onPressed: _resetToNorth,
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.red.shade600,
-                  elevation: 2,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  child: Transform.rotate(
-                    angle: -_mapBearing * pi / 180,
-                    child: const Icon(Icons.navigation, size: 20),
+                child: PointerInterceptor(
+                  child: FloatingActionButton.small(
+                    heroTag: 'compass',
+                    onPressed: _resetToNorth,
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.red.shade600,
+                    elevation: 2,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    child: Transform.rotate(
+                      angle: -_mapBearing * pi / 180,
+                      child: const Icon(Icons.navigation, size: 20),
+                    ),
                   ),
                 ),
               ),
