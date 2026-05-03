@@ -64,6 +64,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool     _animating      = false;
   bool     _preloading24h  = false;
   bool     _draggingSlider = false;
+  bool     _splashVisible  = true;
   String?  _errorMessage;
 
   double              _loadingProgress = 0.0;
@@ -423,20 +424,27 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final tLon = double.tryParse(params['tour_lon'] ?? '');
     if (tLat != null && tLon != null) {
       final dur = int.tryParse(params['tour_duration'] ?? '') ?? _tourDuration;
-      _currentCenter = LatLng(tLat, tLon);
-      _tourDuration  = dur;
+      _currentCenter  = LatLng(tLat, tLon);
+      _tourDuration   = dur;
       _pendingTourLat = tLat;
       _pendingTourLon = tLon;
+      // Dismiss splash before animating to the shared location
+      if (mounted) setState(() => _splashVisible = false);
       await _mapController?.animateCamera(
           CameraUpdate.newLatLngZoom(_currentCenter, 15.0));
       if (_isMobile) setState(() => _mobileTab = 2);
       await Future.delayed(const Duration(milliseconds: 800));
+      fetchShadows();
       _buildTour();
+      return; // skip GPS acquisition for tour links
     }
 
-    fetchShadows();
-    _initGpsOnStart();
+    // Normal startup: acquire GPS silently first, then reveal map + fetch shadows.
+    // _initGpsOnStart() will reposition the camera, dismiss the splash, and call
+    // fetchShadows() once the correct center is known — avoiding a wasted tile
+    // fetch for the Vienna fallback that would otherwise get discarded by GPS.
     _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
+    _initGpsOnStart();
   }
 
   void _injectAttributionCss() {
@@ -1621,17 +1629,40 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _initGpsOnStart() async {
-    final newPos = await _getGpsPosition();
-    if (newPos == null || !mounted) return;
-    setState(() {
-      _gpsPosition   = newPos;
-      _currentCenter = newPos;
-    });
-    _fetchWeather(newPos.latitude, newPos.longitude);
-    await _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
-    );
-    await _showMyLocationDot(newPos);
+    // Silently attempt GPS with a 5 s timeout; fall back to Vienna with no toast.
+    LatLng? newPos;
+    try {
+      final permission = await Geolocator.checkPermission();
+      if (permission != LocationPermission.denied &&
+          permission != LocationPermission.deniedForever) {
+        final pos = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(accuracy: LocationAccuracy.lowest),
+        ).timeout(const Duration(seconds: 5));
+        newPos = LatLng(pos.latitude, pos.longitude);
+      }
+    } catch (_) {
+      // Silently fall back to default center (Vienna).
+    }
+
+    if (!mounted) return;
+
+    if (newPos != null) {
+      setState(() {
+        _gpsPosition   = newPos!;
+        _currentCenter = newPos!;
+      });
+      _fetchWeather(newPos.latitude, newPos.longitude);
+      // Move camera instantly while splash still covers the map, so there is no
+      // visible jump when the splash fades out.
+      await _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
+      );
+      await _showMyLocationDot(newPos);
+    }
+
+    // Reveal the map, then start fetching shadows for the correct center.
+    if (mounted) setState(() => _splashVisible = false);
+    fetchShadows();
   }
 
   void _onGpsButtonTap() {
@@ -2855,33 +2886,38 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
 
     return Scaffold(
-      body: isMobile
-          ? LayoutBuilder(builder: (ctx, constraints) {
-              final totalH     = constraints.maxHeight;
-              const collapsedH = 256.0;
-              final safeBottom = MediaQuery.of(ctx).padding.bottom;
-              final hiddenH    = 24.0 + 1.0 + 56.0 + safeBottom; // handle + divider + tabbar
-              final bottomH    = keyboardOpen ? 57.0 : (_panelHidden ? hiddenH : (_panelExpanded ? totalH : collapsedH));
-              final mapH       = totalH - bottomH;
-              return Column(children: [
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 280),
-                  curve: Curves.easeInOut,
-                  height: mapH,
-                  child: mapArea,
-                ),
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 280),
-                  curve: Curves.easeInOut,
-                  height: bottomH,
-                  child: _buildMobileBottom(keyboardOpen: keyboardOpen),
-                ),
-              ]);
-            })
-          : Row(children: [
-              Expanded(child: mapArea),
-              SizedBox(width: 280, child: _buildDesktopSidebar()),
-            ]),
+      body: Stack(
+        children: [
+          isMobile
+              ? LayoutBuilder(builder: (ctx, constraints) {
+                  final totalH     = constraints.maxHeight;
+                  const collapsedH = 256.0;
+                  final safeBottom = MediaQuery.of(ctx).padding.bottom;
+                  final hiddenH    = 24.0 + 1.0 + 56.0 + safeBottom;
+                  final bottomH    = keyboardOpen ? 57.0 : (_panelHidden ? hiddenH : (_panelExpanded ? totalH : collapsedH));
+                  final mapH       = totalH - bottomH;
+                  return Column(children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 280),
+                      curve: Curves.easeInOut,
+                      height: mapH,
+                      child: mapArea,
+                    ),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 280),
+                      curve: Curves.easeInOut,
+                      height: bottomH,
+                      child: _buildMobileBottom(keyboardOpen: keyboardOpen),
+                    ),
+                  ]);
+                })
+              : Row(children: [
+                  Expanded(child: mapArea),
+                  SizedBox(width: 280, child: _buildDesktopSidebar()),
+                ]),
+          _buildSplash(),
+        ],
+      ),
     );
   }
 
@@ -2964,6 +3000,40 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSplash() {
+    return AnimatedOpacity(
+      opacity: _splashVisible ? 1.0 : 0.0,
+      duration: const Duration(milliseconds: 600),
+      child: IgnorePointer(
+        ignoring: !_splashVisible,
+        child: Container(
+          color: const Color(0xFFFFFBF5),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RotationTransition(
+                  turns: _sunSpinCtrl,
+                  child: const Icon(Icons.wb_sunny, color: Colors.orange, size: 64),
+                ),
+                const SizedBox(height: 20),
+                const Text(
+                  'sunspot',
+                  style: TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w300,
+                    color: Color(0xFF444444),
+                    letterSpacing: 5,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
