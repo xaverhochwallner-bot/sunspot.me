@@ -2258,43 +2258,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // Warm the server tile cache for every daylight hour at the current viewport center.
-  // Awaits all 9 tiles per hour in parallel — animation only starts once server cache is hot.
-  // Progress updates per individual tile so the bar moves immediately even on cold server start.
+  // Fires all hours in parallel (1 center tile each) — down from 144 sequential requests to
+  // ~16 parallel requests. Server computes all sun angles simultaneously; progress updates
+  // as each hour completes. Typical time: 20–60 s vs 10–15 min for the old 3×3 approach.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
     final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
     final start = (_sunriseHour ?? 6.0).toInt();
     final end   = (_sunsetHour  ?? 21.0).toInt();
     final total = end - start + 1;
-    final totalTiles = total * 9;
     int completedTiles = 0;
     final tileX = _lonToTileX(_currentCenter.longitude, zoom);
     final tileY = _latToTileY(_currentCenter.latitude, zoom);
-    for (int h = start; h <= end; h++) {
-      if (!mounted || !_preloading24h) return;
-      final hourIdx = h - start + 1;
-      final futs = <Future>[];
-      for (var dx = -1; dx <= 1; dx++) {
-        for (var dy = -1; dy <= 1; dy++) {
-          final url = '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
-              '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
-          futs.add(
-            http.get(Uri.parse(url))
-                .timeout(const Duration(seconds: 30))
-                .catchError((_) => http.Response('', 0))
-                .then((_) {
-                  completedTiles++;
-                  if (mounted && _preloading24h) setState(() {
-                    _loadingProgress = completedTiles / totalTiles;
-                    _loadingStage    = 'Caching $hourIdx/$total hours';
-                  });
-                }),
-          );
-        }
-      }
-      await Future.wait(futs);
-      if (!mounted || !_preloading24h) return;
-    }
+
+    await Future.wait([
+      for (int h = start; h <= end; h++)
+        http.get(Uri.parse(
+          '$flaskBaseUrl/shadow/tile/$zoom/$tileX/$tileY.pbf'
+          '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
+        ))
+            .timeout(const Duration(seconds: 120))
+            .catchError((_) => http.Response('', 0))
+            .then((_) {
+              completedTiles++;
+              if (mounted && _preloading24h) setState(() {
+                _loadingProgress = completedTiles / total;
+                _loadingStage    = 'Warming $completedTiles/$total hours';
+              });
+            }),
+    ]);
   }
 
   int _lonToTileX(double lon, int z) => ((lon + 180.0) / 360.0 * (1 << z)).floor();
