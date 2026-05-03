@@ -2258,7 +2258,7 @@ atexit.register(lambda: _prewarm_executor.shutdown(wait=False))
 
 
 def _startup_prewarm():
-    time.sleep(30)  # let the server finish booting before consuming CPU
+    time.sleep(5)   # let the server finish booting before consuming CPU
     tz  = pytz.timezone("Europe/Vienna")
     now = datetime.now(tz)
     if now.hour < 6 or now.hour > 20:

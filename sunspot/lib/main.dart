@@ -1929,7 +1929,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '&month=${_selectedDate.month}'
         '&day=${_selectedDate.day}',
       );
-      final metaResp = await http.get(metaUri).timeout(const Duration(seconds: 5));
+      // Retry with backoff while server is cold-starting (typically 5–60 s after restart).
+      late http.Response metaResp;
+      const maxRetries = 12;
+      for (int attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          metaResp = await http.get(metaUri).timeout(const Duration(seconds: 5));
+          break;
+        } catch (_) {
+          if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
+          if (attempt >= maxRetries) rethrow;
+          final delaySec = attempt < 3 ? 3 : attempt < 6 ? 5 : 8;
+          if (mounted) setState(() => _loadingStage = 'Connecting…');
+          await Future.delayed(Duration(seconds: delaySec));
+          if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
+        }
+      }
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
 
       final meta   = jsonDecode(metaResp.body) as Map<String, dynamic>;
