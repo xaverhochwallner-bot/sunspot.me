@@ -214,7 +214,7 @@ MACRO_ZOOM_THRESHOLD = 14  # z14 moved back to macro: per-tile micro was 28-33s 
 # All Vienna buildings are buffered+unioned into ~500-2000 city-block super-polygons,
 # each carrying an area-weighted average member height. Macro zooms project
 # shadows of these blocks instead of individual buildings.
-SUPER_BLOCK_BUFFER   = 0.000010   # ~1 m close radius — only fuses overlapping footprints, streets stay open
+SUPER_BLOCK_BUFFER   = 0.000003   # ~0.3 m close radius — less fusion, more separate building shadows (was 1 m)
 SUPER_BLOCK_SIMPLIFY = 0.000025   # ~3 m — preserves individual building outline shapes
 # Macro pipeline post-processing
 MACRO_SIMPLIFY        = 0.000025   # ~3 m — fine output, close to micro quality at z14
