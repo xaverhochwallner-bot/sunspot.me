@@ -217,7 +217,7 @@ MACRO_ZOOM_THRESHOLD = 14  # z14 moved back to macro: per-tile micro was 28-33s 
 SUPER_BLOCK_BUFFER   = 0.000003   # ~0.3 m close radius — less fusion, more separate building shadows (was 1 m)
 SUPER_BLOCK_SIMPLIFY = 0.000025   # ~3 m — preserves individual building outline shapes
 # Macro pipeline post-processing
-MACRO_SIMPLIFY        = 0.000025   # ~3 m — fine output, close to micro quality at z14
+MACRO_SIMPLIFY        = 0.000012   # ~1.3 m — sharper geometry, less merging of small features (was 3 m)
 MACRO_MIN_SUNLIT_AREA = 1e-8       # ~80 m² — show smaller sunny gaps (was 2e-8 ~160 m²)
 
 # Macro erosion rings — cheap sunlit buffer-insets produce l1/l2 depth at block scale.
