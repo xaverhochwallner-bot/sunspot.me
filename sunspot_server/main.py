@@ -95,15 +95,15 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
 # for macro zoom — so cache hits never re-run the expensive buffer operations.
 # ---------------------------------------------------------------------------
 _shadow_cache = {}
-MAX_CACHE     = 10000
+MAX_CACHE     = 500   # each entry is a large Shapely geom; 500 × ~400 KB ≈ 200 MB per worker
 SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
 _cache_lock   = threading.RLock()  # guards _shadow_cache and _tile_cache
 
 # Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
 # Avoids re-running shadow geometry + encoding for repeated tile requests.
-# ~300 bytes/tile × 20 000 tiles ≈ 6 MB max.
+# ~300 bytes/tile × 5 000 tiles ≈ 1.5 MB max.
 _tile_cache          = {}
-MAX_TILE_CACHE       = 20000
+MAX_TILE_CACHE       = 5000
 _tile_in_flight      = {}    # {tck: threading.Event} — deduplicates concurrent tile requests
 _tile_in_flight_lock = threading.Lock()
 
@@ -2227,6 +2227,9 @@ if os.path.exists(SHADOW_DISK_CACHE_PATH):
     try:
         with open(SHADOW_DISK_CACHE_PATH, "rb") as _f:
             _loaded = pickle.load(_f)
+        # Keep only the most recent MAX_CACHE entries to avoid loading a stale, oversized file.
+        if len(_loaded) > MAX_CACHE:
+            _loaded = dict(list(_loaded.items())[-MAX_CACHE:])
         _shadow_cache.update(_loaded)
         print(f"[disk cache] Loaded {len(_loaded):,} shadow entries from disk.")
     except Exception as _e:
