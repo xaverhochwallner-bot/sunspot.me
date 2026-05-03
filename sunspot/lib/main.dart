@@ -106,6 +106,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   LatLng? _gpsPosition;
   bool    _myLocationLayerReady = false;
 
+  // GPS tracking state machine: 0=inactive, 1=location, 2=compass
+  int                       _gpsState        = 0;
+  StreamSubscription<Position>? _positionStreamSub;
+  Timer?                    _compassPollTimer;
+  double                    _lastHeading     = 0;
+
   // Sunny spots
   List<Map<String, dynamic>> _sunnySpots          = [];
   bool                       _sunnySpotsLayerReady = false;
@@ -298,6 +304,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 this.on('idle', function() {
                   if (window.__sp_waiting) window.__sp_idle = true;
                 });
+                // Detect user-initiated pans (originalEvent is null for programmatic moves).
+                window.__sunspot_userPanned = false;
+                this.on('movestart', function(e) {
+                  if (e.originalEvent) window.__sunspot_userPanned = true;
+                });
               }
               return orig.call(this, id, src);
             };
@@ -434,8 +445,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     html.document.head!.append(style);
   }
 
+  bool _checkAndClearUserPanned() {
+    try {
+      final panned = js.context.callMethod('eval', ['!!window.__sunspot_userPanned']) as bool? ?? false;
+      if (panned) js.context.callMethod('eval', ['window.__sunspot_userPanned = false']);
+      return panned;
+    } catch (_) { return false; }
+  }
+
   void _onCameraIdle() {
     if (_mapController == null) return;
+    // User panned the map while GPS tracking was active → drop back to inactive.
+    if (_gpsState > 0 && _checkAndClearUserPanned()) _enterState0();
     final pos    = _mapController!.cameraPosition;
     final center = pos?.target;
     if (center == null) return;
@@ -1600,23 +1621,139 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     await _showMyLocationDot(newPos);
   }
 
-  void _goToMyLocation() async {
-    final newPos = await _getGpsPosition();
-    if (newPos == null || !mounted) return;
-    setState(() {
-      _gpsPosition   = newPos;
-      _currentCenter = newPos;
+  void _onGpsButtonTap() {
+    if (_gpsState == 0) {
+      _enterState1();
+    } else if (_gpsState == 1) {
+      if (_isMobile) {
+        _enterState2();
+      } else {
+        _enterState0();
+      }
+    } else {
+      _enterState0();
+    }
+  }
+
+  void _enterState0() {
+    _positionStreamSub?.cancel();
+    _positionStreamSub = null;
+    _compassPollTimer?.cancel();
+    _compassPollTimer = null;
+    try { js.context.callMethod('eval', ['window.__sunspot_heading = null']); } catch (_) {}
+    if (mounted) setState(() => _gpsState = 0);
+  }
+
+  Future<void> _enterState1() async {
+    var perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        _showError('GPS: permission denied');
+        return;
+      }
+    }
+    if (!mounted) return;
+    setState(() => _gpsState = 1);
+
+    // Initial fix — zoom in one step (same UX as before)
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 10));
+      if (!mounted || _gpsState != 1) return;
+      final latlng = LatLng(pos.latitude, pos.longitude);
+      setState(() { _gpsPosition = latlng; _currentCenter = latlng; });
+      final currentZoom = _mapController?.cameraPosition?.zoom ?? 0;
+      final targetZoom  = currentZoom < 15 ? 15.0 : currentZoom < 16 ? 16.0 : 17.0;
+      await _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(CameraPosition(target: latlng, zoom: targetZoom)),
+      );
+      await _showMyLocationDot(latlng);
+      fetchShadows();
+    } on TimeoutException {
+      _showError('GPS: location timed out');
+      _enterState0();
+      return;
+    } catch (e) {
+      _showError('GPS: ${e.toString().split('\n').first}');
+      _enterState0();
+      return;
+    }
+
+    // Continuous stream — updates dot and re-centers in State 1 only
+    _positionStreamSub?.cancel();
+    _positionStreamSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 5,
+      ),
+    ).listen((pos) async {
+      if (!mounted || _gpsState < 1) return;
+      final latlng = LatLng(pos.latitude, pos.longitude);
+      setState(() { _gpsPosition = latlng; _currentCenter = latlng; });
+      await _showMyLocationDot(latlng);
+      if (_gpsState == 1) {
+        final zoom = _mapController?.cameraPosition?.zoom ?? 15.0;
+        await _mapController?.animateCamera(
+          CameraUpdate.newCameraPosition(CameraPosition(target: latlng, zoom: zoom)),
+        );
+      }
     });
-    // Each tap zooms in one step: first tap → 15, second → 16, third → 17, then caps
-    final currentZoom = _mapController?.cameraPosition?.zoom ?? 0;
-    final targetZoom  = currentZoom < 15 ? 15.0
-                      : currentZoom < 16 ? 16.0
-                      : 17.0;
-    await _mapController?.animateCamera(
-      CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: targetZoom)),
-    );
-    await _showMyLocationDot(newPos);
-    fetchShadows();
+  }
+
+  Future<void> _enterState2() async {
+    if (!_isMobile) return;
+    setState(() => _gpsState = 2);
+
+    // Start device orientation listener (requests iOS permission from within user gesture).
+    try {
+      js.context.callMethod('eval', [r'''
+        (function() {
+          window.__sunspot_heading = null;
+          function startDO() {
+            window.addEventListener('deviceorientationabsolute', function(e) {
+              if (e.alpha !== null && e.alpha !== undefined)
+                window.__sunspot_heading = (360 - e.alpha) % 360;
+            }, true);
+            window.addEventListener('deviceorientation', function(e) {
+              if (e.webkitCompassHeading !== undefined && e.webkitCompassHeading !== null)
+                window.__sunspot_heading = e.webkitCompassHeading;
+              else if ((window.__sunspot_heading === null) && e.alpha !== null && e.alpha !== undefined)
+                window.__sunspot_heading = (360 - e.alpha) % 360;
+            }, true);
+          }
+          if (typeof DeviceOrientationEvent !== 'undefined' &&
+              typeof DeviceOrientationEvent.requestPermission === 'function') {
+            DeviceOrientationEvent.requestPermission()
+              .then(function(p) { if (p === 'granted') startDO(); })
+              .catch(function() { startDO(); });
+          } else {
+            startDO();
+          }
+        })();
+      ''']);
+    } catch (_) {}
+
+    _compassPollTimer?.cancel();
+    _compassPollTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+      if (!mounted || _gpsState != 2) return;
+      final gps = _gpsPosition;
+      if (gps == null) return;
+      try {
+        final raw = js.context.callMethod('eval', ['window.__sunspot_heading']);
+        if (raw == null) return;
+        final heading = (raw as num).toDouble();
+        if ((heading - _lastHeading).abs() < 2.0) return;
+        _lastHeading = heading;
+        final zoom = _mapController?.cameraPosition?.zoom ?? 15.0;
+        await _mapController?.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(target: gps, zoom: zoom, bearing: heading),
+          ),
+        );
+      } catch (_) {}
+    });
   }
 
   Future<void> _showMyLocationDot(LatLng pos) async {
@@ -2167,6 +2304,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _sliderDebounce?.cancel();
     _searchDebounce?.cancel();
     _liveTimer?.cancel();
+    _positionStreamSub?.cancel();
+    _compassPollTimer?.cancel();
     _searchController.dispose();
     _searchFocus.dispose();
     _panelScroll.dispose();
@@ -2574,18 +2713,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
 
         // GPS button — bottom-left on mobile, bottom-right on desktop
+        // State 0: grey my_location  State 1: blue my_location  State 2: blue explore
         if (!keyboardOpen)
           Positioned(
             bottom: 16,
             left:  isMobile ? 16  : null,
             right: isMobile ? null : 16,
             child: FloatingActionButton.small(
-              onPressed: _goToMyLocation,
+              onPressed: _onGpsButtonTap,
               backgroundColor: Colors.white,
-              foregroundColor: Colors.black87,
+              foregroundColor: _gpsState == 0 ? Colors.black54 : Colors.blue,
               elevation: 2,
               materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              child: const Icon(Icons.my_location, size: 20),
+              child: Icon(
+                _gpsState == 2 ? Icons.explore : Icons.my_location,
+                size: 20,
+              ),
             ),
           ),
 
