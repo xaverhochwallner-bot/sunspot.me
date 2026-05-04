@@ -80,6 +80,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String?             _currentTileUrl;
   int                 _shadowSourceNonce = 0;  // bumped per time-change rebuild; used for both macro + micro source IDs
   int                 _prevNonce         = -1; // nonce of ghost layers kept dimmed while new tiles load; cleaned up after idle
+  int                 _dimmedGhostNonce  = -1; // second ghost kept at 0-opacity during animation idle-timeout fallback
+  int                 _preloadGen        = 0;  // incremented each preload run; stale .then() callbacks check this
 
   // Panel
   bool _panelOpen = true;
@@ -408,6 +410,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentTileUrl       = null;
     _shadowSourceNonce    = 0;
     _prevNonce            = -1;
+    _dimmedGhostNonce     = -1;
+    _preloading24h        = false;
+    _animating            = false;
+    _preloadGen++;
     _pinLayerReady        = false;
     _myLocationLayerReady = false;
     _sunnySpotsLayerReady = false;
@@ -2118,15 +2124,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Manual swap: ghost is dimmed so it doesn't mislead while new tiles may take seconds to arrive.
     if (_shadowLayersReady) {
       final mc = ctrl;
-      // If a previous ghost is still pending cleanup (rapid time changes), remove it now.
+      // If a previous ghost is still pending cleanup from a timed-out animation step:
+      // during animation, dim it to invisible and park in _dimmedGhostNonce so _run24hStep()
+      // can clean it up after the next idle event. Outside animation, remove it immediately.
       if (_prevNonce >= 0) {
         final old = _prevNonce;
         _prevNonce = -1;
-        for (final id in _shadowGhostLayerIds(old)) {
-          try { await ctrl.removeLayer(id); } catch (_) {}
+        if (_animating) {
+          _dimmedGhostNonce = old;
+          try {
+            ctrl.setLayerProperties('shadow-macro-l0-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-macro-l1-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-macro-l2-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-macro-l0-line-$old', LineLayerProperties(lineOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-macro-l1-line-$old', LineLayerProperties(lineOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-macro-l2-line-$old', LineLayerProperties(lineOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l0-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l1-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l2-fill-$old', FillLayerProperties(fillOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l0-line-$old', LineLayerProperties(lineOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l1-line-$old', LineLayerProperties(lineOpacity: 0.0));
+            ctrl.setLayerProperties('shadow-micro-l2-line-$old', LineLayerProperties(lineOpacity: 0.0));
+          } catch (_) {}
+        } else {
+          for (final id in _shadowGhostLayerIds(old)) {
+            try { await ctrl.removeLayer(id); } catch (_) {}
+          }
+          try { await ctrl.removeSource('shadow-macro-$old'); } catch (_) {}
+          try { await ctrl.removeSource('shadow-micro-$old'); } catch (_) {}
         }
-        try { await ctrl.removeSource('shadow-macro-$old'); } catch (_) {}
-        try { await ctrl.removeSource('shadow-micro-$old'); } catch (_) {}
       }
       _prevNonce = _shadowSourceNonce;
       final g = _prevNonce;
@@ -2239,6 +2265,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   void _toggle24h() {
     if (_preloading24h) {
+      _preloadGen++; // cancel in-flight preload callbacks
       setState(() { _preloading24h = false; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
       return;
     }
@@ -2247,6 +2274,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
     final start = _sunriseHour ?? 6.0;
+    _preloadGen++; // new run — stale callbacks from any previous preload self-abort
     setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
@@ -2257,37 +2285,69 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // Warm the server tile cache for every daylight hour — 3×3 tile grid, all hours in parallel.
   // 144 simultaneous requests let the server compute all sun angles at once.
-  // Progress updates per tile so the bar moves immediately on cold server.
-  // Typical time: 30–90 s cold, under 20 s warm (geometry already cached).
+  // Gen counter (_preloadGen) lets stale callbacks self-abort when a new run starts.
+  // Only HTTP 200 counts as success; failed tiles are retried up to 2 extra times.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
-    final zoom       = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
-    final start      = (_sunriseHour ?? 6.0).toInt();
-    final end        = (_sunsetHour  ?? 21.0).toInt();
-    final total      = end - start + 1;
-    final totalTiles = total * 9;
-    int completed    = 0;
-    final tileX = _lonToTileX(_currentCenter.longitude, zoom);
-    final tileY = _latToTileY(_currentCenter.latitude, zoom);
+    final gen    = _preloadGen; // snapshot — if _preloadGen advances, we've been cancelled
+    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
+    final startH = (_sunriseHour ?? 6.0).toInt();
+    final endH   = (_sunsetHour  ?? 21.0).toInt();
+    final total  = endH - startH + 1;
+    final tileX  = _lonToTileX(_currentCenter.longitude, zoom);
+    final tileY  = _latToTileY(_currentCenter.latitude, zoom);
 
-    await Future.wait([
-      for (int h = start; h <= end; h++)
+    final specs = <(int, int, int)>[
+      for (int h = startH; h <= endH; h++)
         for (var dx = -1; dx <= 1; dx++)
           for (var dy = -1; dy <= 1; dy++)
-            http.get(Uri.parse(
-              '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
-              '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
-            ))
-                .timeout(const Duration(seconds: 120))
-                .catchError((_) => http.Response('', 0))
-                .then((_) {
-                  completed++;
-                  if (mounted && _preloading24h) setState(() {
-                    _loadingProgress = completed / totalTiles;
-                    _loadingStage    = 'Warming ${(completed / 9).ceil()}/$total hours';
-                  });
-                }),
+            (h, tileX + dx, tileY + dy),
+    ];
+    final totalTiles = specs.length;
+    int progressCount = 0;
+
+    String tileUrl(int h, int x, int y) =>
+        '$flaskBaseUrl/shadow/tile/$zoom/$x/$y.pbf'
+        '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
+
+    Future<bool> fetchTile(int h, int x, int y) async {
+      try {
+        final res = await http.get(Uri.parse(tileUrl(h, x, y)))
+            .timeout(const Duration(seconds: 20));
+        return res.statusCode == 200;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // First pass: all tiles in parallel; track which fail.
+    final okFlags = List<bool>.filled(totalTiles, false);
+    await Future.wait([
+      for (var i = 0; i < specs.length; i++)
+        () async {
+          final (h, x, y) = specs[i];
+          final ok = await fetchTile(h, x, y);
+          if (_preloadGen != gen) return;
+          okFlags[i] = ok;
+          if (mounted && _preloading24h) {
+            progressCount++;
+            setState(() {
+              _loadingProgress = progressCount / totalTiles;
+              _loadingStage    = 'Warming ${(progressCount / 9).ceil()}/$total hours';
+            });
+          }
+        }(),
     ]);
+    if (_preloadGen != gen || !mounted || !_preloading24h) return;
+
+    // Retry failed tiles — up to 2 extra passes, silent (no progress bar update).
+    var failed = [for (var i = 0; i < specs.length; i++) if (!okFlags[i]) specs[i]];
+    for (var pass = 0; pass < 2 && failed.isNotEmpty; pass++) {
+      if (_preloadGen != gen) return;
+      final results = await Future.wait(failed.map((s) => fetchTile(s.$1, s.$2, s.$3)));
+      if (_preloadGen != gen || !mounted || !_preloading24h) return;
+      failed = [for (var i = 0; i < failed.length; i++) if (!results[i]) failed[i]];
+    }
   }
 
   // Fire-and-forget: warm the server cache for a single hour's 3×3 tile grid.
@@ -2334,20 +2394,23 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (idleFired) await Future.delayed(const Duration(milliseconds: 80));
       if (!_animating) break;
 
-      // Only remove ghost when tiles are confirmed fully rendered.
-      // On timeout, keep the ghost: old shadows stay visible as fallback, and the
-      // next step's _ensureShadowTileSource() will clean them up before adding new layers.
-      if (idleFired && _prevNonce >= 0) {
-        final old = _prevNonce;
-        _prevNonce = -1;
+      // Only remove ghosts when tiles are confirmed fully rendered.
+      // Cleans up both _prevNonce (current ghost) and _dimmedGhostNonce (any 0-opacity
+      // ghost parked by _ensureShadowTileSource during a previous timed-out step).
+      if (idleFired && (_prevNonce >= 0 || _dimmedGhostNonce >= 0)) {
         final mc = _mapController;
         if (mc != null) {
-          for (final id in _shadowGhostLayerIds(old)) {
-            try { await mc.removeLayer(id); } catch (_) {}
+          for (final nonce in [_prevNonce, _dimmedGhostNonce]) {
+            if (nonce < 0) continue;
+            for (final id in _shadowGhostLayerIds(nonce)) {
+              try { await mc.removeLayer(id); } catch (_) {}
+            }
+            try { await mc.removeSource('shadow-macro-$nonce'); } catch (_) {}
+            try { await mc.removeSource('shadow-micro-$nonce'); } catch (_) {}
           }
-          try { await mc.removeSource('shadow-macro-$old'); } catch (_) {}
-          try { await mc.removeSource('shadow-micro-$old'); } catch (_) {}
         }
+        _prevNonce = -1;
+        _dimmedGhostNonce = -1;
       }
 
       final end = _sunsetHour ?? 20.0;
