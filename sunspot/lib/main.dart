@@ -1946,7 +1946,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
           if (attempt >= maxRetries) rethrow;
           final delaySec = attempt < 3 ? 3 : attempt < 6 ? 5 : 8;
-          if (mounted) setState(() => _loadingStage = 'Connecting…');
+          final retryProg = ((attempt + 1) / maxRetries * 0.3).clamp(0.0, 0.3);
+          if (mounted) setState(() {
+            _loadingStage    = 'Connecting… (${attempt + 1}/$maxRetries)';
+            _loadingProgress = retryProg;
+          });
           await Future.delayed(Duration(seconds: delaySec));
           if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
         }
@@ -1963,7 +1967,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final tileUrl = _buildShadowTileUrl(
         _hour.toInt(), ((_hour * 60).toInt() % 60), _selectedDate.month, _selectedDate.day,
       );
+      final nonceBefore = _shadowSourceNonce;
       await _ensureShadowTileSource(tileUrl, elev);
+      final sourceRebuilt = _shadowSourceNonce != nonceBefore;
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
 
       if (mounted) {
@@ -2013,6 +2019,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             try { await mc.removeSource('shadow-macro-$old'); } catch (_) {}
             try { await mc.removeSource('shadow-micro-$old'); } catch (_) {}
           }
+        }
+        if (gen == _fetchGen && mounted && sourceRebuilt) {
+          await _fadeShadowLayersIn(_shadowSourceNonce, elev);
         }
         await Future.delayed(const Duration(milliseconds: 180));
       }
@@ -2196,55 +2205,69 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     final n = _shadowSourceNonce;
 
-    // Macro layers: fade out as micro fades in across z14→z15.
+    // Macro layers: start at 0 opacity so we can fade them in after tiles arrive (non-animation path).
+    // During animation tiles come from warm cache immediately, so we use full opacity to avoid blank frames.
+    final initMacroL0 = _animating ? macroOp(opL0) : 0.0;
+    final initMacroL1 = _animating ? macroOp(opL1) : 0.0;
+    final initMacroL2 = _animating ? macroOp(opL2) : 0.0;
+    final initMacroLineL0 = _animating ? macroLineOp(opL0) : 0.0;
+    final initMacroLineL1 = _animating ? macroLineOp(opL1) : 0.0;
+    final initMacroLineL2 = _animating ? macroLineOp(opL2) : 0.0;
+    final initMicroL0 = _animating ? microOp(opL0) : 0.0;
+    final initMicroL1 = _animating ? microOp(opL1) : 0.0;
+    final initMicroL2 = _animating ? microOp(opL2) : 0.0;
+    final initMicroLineL0 = _animating ? microLineOp(opL0) : 0.0;
+    final initMicroLineL1 = _animating ? microLineOp(opL1) : 0.0;
+    final initMicroLineL2 = _animating ? microLineOp(opL2) : 0.0;
+
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: macroOp(opL0)),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: initMacroL0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: macroLineOp(opL0)),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: initMacroLineL0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: macroOp(opL1)),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: initMacroL1),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: macroLineOp(opL1)),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: initMacroLineL1),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: macroOp(opL2)),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: initMacroL2),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: macroLineOp(opL2)),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: initMacroLineL2),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
 
     // Micro layers: invisible at z14, fade in to per-building detail at z15+.
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: microOp(opL0)),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: initMicroL0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: microLineOp(opL0)),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: initMicroLineL0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: microOp(opL1)),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: initMicroL1),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: microLineOp(opL1)),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: initMicroLineL1),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: microOp(opL2)),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: initMicroL2),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: microLineOp(opL2)),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: initMicroLineL2),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     _shadowLayersReady = true;
@@ -2258,6 +2281,44 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     'shadow-micro-l1-fill-$nonce', 'shadow-micro-l1-line-$nonce',
     'shadow-micro-l2-fill-$nonce', 'shadow-micro-l2-line-$nonce',
   ];
+
+  // Ramps shadow layers from 0 → full opacity over 4 × 100 ms steps after tiles are rendered.
+  Future<void> _fadeShadowLayersIn(int nonce, double elevation) async {
+    final t    = elevation <= 0 ? 1.0 : (elevation.clamp(0.0, 60.0) / 60.0);
+    final opL0 = elevation <= 0 ? 0.82 : 0.40 + t * 0.10;
+    final opL1 = elevation <= 0 ? 0.0  : 0.28 + t * 0.15;
+    final opL2 = elevation <= 0 ? 0.0  : 0.30 + t * 0.18;
+
+    List<dynamic> mo(double op, double s)  => ['interpolate', ['exponential', 1.4], ['zoom'], 10, 0.0, 12, op * 0.50 * s, 14, op * 0.78 * s, 15, 0.0];
+    List<dynamic> mlo(double op, double s) => mo(op * 0.6, s);
+    List<dynamic> ui(double op, double s)  => ['interpolate', ['exponential', 1.4], ['zoom'], 10, 0.0, 14, 0.0, 15, op * 0.78 * s, 16, op * s];
+    List<dynamic> ulo(double op, double s) => ui(op * 0.6, s);
+
+    const steps = 4;
+    final n = nonce;
+    for (int step = 1; step <= steps; step++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      final mc = _mapController;
+      if (mc == null || _shadowSourceNonce != n || !mounted) return;
+      final s = step / steps;
+      try {
+        await Future.wait([
+          mc.setLayerProperties('shadow-macro-l0-fill-$n', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: mo(opL0, s))),
+          mc.setLayerProperties('shadow-macro-l1-fill-$n', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: mo(opL1, s))),
+          mc.setLayerProperties('shadow-macro-l2-fill-$n', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: mo(opL2, s))),
+          mc.setLayerProperties('shadow-macro-l0-line-$n', LineLayerProperties(lineColor: '#455A64', lineOpacity: mlo(opL0, s))),
+          mc.setLayerProperties('shadow-macro-l1-line-$n', LineLayerProperties(lineColor: '#37474F', lineOpacity: mlo(opL1, s))),
+          mc.setLayerProperties('shadow-macro-l2-line-$n', LineLayerProperties(lineColor: '#263238', lineOpacity: mlo(opL2, s))),
+          mc.setLayerProperties('shadow-micro-l0-fill-$n', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: ui(opL0, s))),
+          mc.setLayerProperties('shadow-micro-l1-fill-$n', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: ui(opL1, s))),
+          mc.setLayerProperties('shadow-micro-l2-fill-$n', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: ui(opL2, s))),
+          mc.setLayerProperties('shadow-micro-l0-line-$n', LineLayerProperties(lineColor: '#455A64', lineOpacity: ulo(opL0, s))),
+          mc.setLayerProperties('shadow-micro-l1-line-$n', LineLayerProperties(lineColor: '#37474F', lineOpacity: ulo(opL1, s))),
+          mc.setLayerProperties('shadow-micro-l2-line-$n', LineLayerProperties(lineColor: '#263238', lineOpacity: ulo(opL2, s))),
+        ]);
+      } catch (_) {}
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Animation

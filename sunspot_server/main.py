@@ -2258,14 +2258,27 @@ atexit.register(lambda: _prewarm_executor.shutdown(wait=False))
 
 
 def _startup_prewarm():
-    time.sleep(5)   # let the server finish booting before consuming CPU
+    time.sleep(1)   # brief grace; buildings are already loaded from pickle by now
     tz  = pytz.timezone("Europe/Vienna")
     now = datetime.now(tz)
     if now.hour < 6 or now.hour > 20:
         print("[startup] Nighttime — skipping pre-warm.")
         return
     lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
-    hours = [h for h in (now.hour - 1, now.hour, now.hour + 1) if 6 <= h <= 20]
+    h_now = now.hour
+    hours = [h for h in (h_now - 1, h_now, h_now + 1) if 6 <= h <= 20]
+
+    def _warm_tile(args):
+        z, x, y, h, mo, d = args
+        tck = (z, x, y, h, mo, d)
+        with _cache_lock:
+            if tck in _tile_cache:
+                return
+        pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
+        if pbf:
+            with _cache_lock:
+                _tile_cache[tck] = pbf
+                _trim_tile_cache()
 
     # Shadow cache: Vienna center at z12-15 (quick wins before tile warm starts).
     zooms = [(12, 0.20, 0.15), (13, 0.10, 0.08), (14, 0.05, 0.04), (15, 0.025, 0.02)]
@@ -2280,14 +2293,26 @@ def _startup_prewarm():
             except Exception as e: print(f"[startup] shadow prewarm error: {e}")
     print("[startup] Shadow pre-warm complete.")
 
-    # Tile PBF pre-warm:
-    #   z13/z15: 5×5 neighbourhood around Vienna center
-    #   z14: ALL Vienna tiles (micro pipeline), sorted centre-out so most-visited
-    #         tiles are cached first; disk cache persists across restarts.
     ct13 = mercantile.tile(lon, lat, 13)
     ct14 = mercantile.tile(lon, lat, 14)
     ct15 = mercantile.tile(lon, lat, 15)
 
+    # Phase 1: current-hour center 3×3 at z13/z14/z15 — fastest path to first paint.
+    # 4 workers so these 27 tiles are hot before the user's first request arrives.
+    priority = [
+        (z, cx + dx, cy + dy, h_now, now.month, now.day)
+        for z, (cx, cy) in [(13, (ct13.x, ct13.y)), (14, (ct14.x, ct14.y)), (15, (ct15.x, ct15.y))]
+        for dx in range(-1, 2) for dy in range(-1, 2)
+    ]
+    print(f"[startup] Phase 1: {len(priority)} priority center tiles z13-15 for hour {h_now} ...")
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for f in [ex.submit(_warm_tile, t) for t in priority]:
+            try: f.result()
+            except Exception as e: print(f"[startup] phase1 error: {e}")
+    print("[startup] Phase 1 complete.")
+
+    # Phase 2: broader tile PBF pre-warm for hours ±1.
+    #   z13/z15: 5×5 neighbourhood; z14: ALL Vienna sorted centre-out (disk cache persists).
     tile_list = []
     for dx in range(-2, 3):
         for dy in range(-2, 3):
@@ -2304,20 +2329,8 @@ def _startup_prewarm():
     tile_tasks = [(z, x, y, h, now.month, now.day)
                   for z, x, y in tile_list for h in hours]
 
-    print(f"[startup] Pre-warming {len(tile_tasks)} PBF tiles "
+    print(f"[startup] Phase 2: {len(tile_tasks)} PBF tiles "
           f"(z13 5×5, {len(z14_tiles)} z14 Vienna, z15 5×5) ...")
-
-    def _warm_tile(args):
-        z, x, y, h, mo, d = args
-        tck = (z, x, y, h, mo, d)
-        with _cache_lock:
-            if tck in _tile_cache:
-                return
-        pbf = _compute_shadow_tile_pbf(z, x, y, h, mo, d)
-        if pbf:
-            with _cache_lock:
-                _tile_cache[tck] = pbf
-                _trim_tile_cache()
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         futs = [ex.submit(_warm_tile, t) for t in tile_tasks]
@@ -2327,11 +2340,11 @@ def _startup_prewarm():
                 f.result()
                 done += 1
                 if done % 100 == 0:
-                    print(f"[startup] Tile warm progress: {done}/{len(tile_tasks)}")
+                    print(f"[startup] Phase 2 progress: {done}/{len(tile_tasks)}")
             except Exception as e:
-                print(f"[startup] tile warm error: {e}")
+                print(f"[startup] phase2 error: {e}")
 
-    print(f"[startup] Tile pre-warm complete. {len(_tile_cache)} tiles cached.")
+    print(f"[startup] Phase 2 complete. {len(_tile_cache)} tiles cached.")
 
 threading.Thread(target=_startup_prewarm, daemon=True).start()
 
