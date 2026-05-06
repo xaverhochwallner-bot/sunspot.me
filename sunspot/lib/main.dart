@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
 import 'dart:math';
@@ -11,6 +10,8 @@ import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:provider/provider.dart';
 import 'services/api_client.dart';
 import 'state/app_shell_state.dart';
+import 'state/saved_spots_state.dart';
+import 'state/search_state.dart';
 import 'state/weather_state.dart';
 import 'utils/time_utils.dart';
 import 'widgets/weather_widget.dart';
@@ -28,6 +29,8 @@ class MyApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => AppShellState()),
         ChangeNotifierProvider(create: (_) => WeatherState()),
+        ChangeNotifierProvider(create: (_) => SavedSpotsState()),
+        ChangeNotifierProvider(create: (_) => SearchState()),
       ],
       child: const MaterialApp(
         title: 'Sunshadow Map',
@@ -60,8 +63,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   late final ApiClient _api = ApiClient(flaskBaseUrl);
 
-  AppShellState get _shell  => context.read<AppShellState>();
-  WeatherState  get _weather => context.read<WeatherState>();
+  AppShellState   get _shell   => context.read<AppShellState>();
+  WeatherState    get _weather => context.read<WeatherState>();
+  SavedSpotsState get _saved   => context.read<SavedSpotsState>();
+  SearchState     get _search  => context.read<SearchState>();
 
   final GlobalKey _mapKey = GlobalKey();
   MapLibreMapController? _mapController;
@@ -160,11 +165,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
 
 
-  // Reverse-geocoded addresses — keyed by "lat,lon"
-  Map<String, String> _spotAddresses = {};
-
-  // Saved spots — persisted to localStorage
-  List<Map<String, dynamic>> _savedSpots = [];
+  // Saved spots + addresses live in SavedSpotsState
 
   // Sunny Tour
   int                        _tourDuration    = 30;   // minutes
@@ -174,8 +175,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double?                    _pendingTourLat;
   double?                    _pendingTourLon;
 
-  // Saved spots sunny status  key = 'lat,lon', null=loading, true=sunny, false=shadow
-  Map<String, bool?> _savedSunny = {};
+  // Saved spots sunny status lives in SavedSpotsState
 
   // Spot detail navigation (spot+idx live in AppShellState)
   LatLng? _detailReturnCenter;
@@ -192,13 +192,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   bool get _isMobile => _screenWidth < 650;
 
-  // Search
+  // Search UI controls (lifecycle-bound — kept here; data lives in SearchState)
   final TextEditingController _searchController = TextEditingController();
   final FocusNode             _searchFocus      = FocusNode();
-  List<Map<String, dynamic>>  _searchResults    = [];
-  bool                        _searchLoading    = false;
-  Timer?                      _searchDebounce;
-  Map<String, dynamic>?       _homeAddress;
 
   late final AnimationController _sunSpinCtrl = AnimationController(
     vsync: this,
@@ -376,9 +372,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _tourLayerReady       = false;
     _poiMarkersReady      = false;
     _injectAttributionCss();
-    _loadSaved();
-    _loadHomeAddress();
-    Future.delayed(const Duration(milliseconds: 500), _refreshSavedSunny);
+    _saved.load();
+    _search.load();
+    Future.delayed(const Duration(milliseconds: 500),
+        () => _saved.refreshSunnyStatus(_api, _selectedDate, _hour));
 
     // Handle shared tour link: ?tour_lat=...&tour_lon=...&tour_duration=...
     final params = Uri.base.queryParameters;
@@ -471,8 +468,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
     // Reject clicks in the sidebar zone (desktop only)
     if (!_isMobile && point.x > _screenWidth - 280) return;
-    if (_searchResults.isNotEmpty) {
-      setState(() => _searchResults = []);
+    if (_search.results.isNotEmpty) {
+      _search.clearResults(setPointerEvents: _setMapPointerEvents);
       return;
     }
     // Point inspection only active on Saved tab
@@ -869,60 +866,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // -------------------------------------------------------------------------
-  // Saved spots — localStorage persistence
+  // Saved spots + home address — delegated to SavedSpotsState / SearchState
   // -------------------------------------------------------------------------
 
-  void _loadSaved() {
-    try {
-      final raw = html.window.localStorage['sunspot_saved'];
-      if (raw != null) {
-        setState(() {
-          _savedSpots = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
-        });
-      }
-    } catch (_) {}
-  }
-
-  void _persistSaved() {
-    html.window.localStorage['sunspot_saved'] = jsonEncode(_savedSpots);
-  }
-
-  void _loadHomeAddress() {
-    try {
-      final raw = html.window.localStorage['sunspot_home'];
-      if (raw != null) setState(() => _homeAddress = jsonDecode(raw) as Map<String, dynamic>);
-    } catch (_) {}
-  }
-
-  void _setHomeAddress(Map<String, dynamic> result) {
-    final home = {
-      'lat': result['lat'],
-      'lon': result['lon'],
-      'display_name': result['display_name'],
-    };
-    html.window.localStorage['sunspot_home'] = jsonEncode(home);
-    setState(() => _homeAddress = home);
-  }
+  void _setHomeAddress(Map<String, dynamic> result) => _search.setHome(result);
 
   void _navigateToHome() {
-    if (_homeAddress == null) return;
-    _selectSearchResult(_homeAddress!);
-  }
-
-  Future<void> _refreshSavedSunny() async {
-    if (_savedSpots.isEmpty) return;
-    final d   = _selectedDate;
-    final h   = _hour.toInt();
-    final min = ((_hour * 60).toInt() % 60);
-    final dateStr = formatDate(d);
-    for (final s in _savedSpots) {
-      final lat = s['lat'] as double;
-      final lon = s['lon'] as double;
-      final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-      if (mounted) setState(() => _savedSunny[key] = null);
-      final sunny = await _api.isSunny(lat, lon, dateStr, h, min);
-      if (mounted) setState(() => _savedSunny[key] = sunny);
-    }
+    final home = _search.homeAddress;
+    if (home == null) return;
+    _selectSearchResult(home);
   }
 
   // -------------------------------------------------------------------------
@@ -977,9 +929,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<String> _reverseGeocode(double lat, double lon) async {
     final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-    if (_spotAddresses.containsKey(key)) return _spotAddresses[key]!;
+    if (_saved.addresses.containsKey(key)) return _saved.addresses[key]!;
     final label = await _api.reverseGeocode(lat, lon);
-    if (mounted && label.isNotEmpty) setState(() => _spotAddresses[key] = label);
+    if (mounted && label.isNotEmpty) _saved.cacheAddress(key, label);
     return label;
   }
 
@@ -995,26 +947,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _shell.collapsePanel();
     _suppressResultClear = true;
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
-    final key          = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-    final poiName      = spot['_poi_name'] as String? ?? '';
-    final address      = poiName.isNotEmpty ? poiName : (_spotAddresses[key] ?? 'Sunny spot ${idx + 1}');
-    final sunHoursLeft = (spot['sun_hours_left'] as int?) ?? 0;
-    final sunUntil     = spot['sun_until'] as int?;
-    final openingHours   = spot['_opening_hours'] as String? ?? '';
-    final outdoorSeating = spot['_outdoor_seating'] as String? ?? '';
-    final gps          = _gpsPosition;
-    final distLabel    = gps != null ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon))) : null;
-    final category     = spot['_category'] as String? ?? '';
-    final poiAmenity   = spot['_poi_amenity'] as String? ?? '';
-    final (catIcon, catLabel) = category == 'park'
-        ? (Icons.park, 'Park')
-        : category == 'square'
-            ? (Icons.location_city, 'Square')
-            : poiAmenity.isNotEmpty
-                ? (_poiIcon(poiAmenity), _poiLabel(poiAmenity))
-                : (Icons.wb_sunny, 'Spot');
-    final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
-
     _shell.selectSpot(spot, idx);
     _panelScroll.jumpTo(0);
   }
@@ -1032,13 +964,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildSpotDetail() {
+    final saved  = context.watch<SavedSpotsState>();
     final spot   = _shell.selectedSpot!;
     final idx    = _shell.selectedSpotIdx;
     final lat    = spot['lat'] as double;
     final lon    = spot['lon'] as double;
     final key    = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
     final poiName = spot['_poi_name'] as String? ?? '';
-    final address = poiName.isNotEmpty ? poiName : (_spotAddresses[key] ?? 'Sunny spot ${idx + 1}');
+    final address = poiName.isNotEmpty ? poiName : (saved.addresses[key] ?? 'Sunny spot ${idx + 1}');
     final sunHoursLeft  = (spot['sun_hours_left'] as int?) ?? 0;
     final sunUntil      = spot['sun_until'] as int?;
     final openingHours  = spot['_opening_hours'] as String? ?? '';
@@ -1055,7 +988,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ? (_poiIcon(poiAmenity), _poiLabel(poiAmenity))
                 : (Icons.wb_sunny, 'Spot');
     final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
-    final isSaved   = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+    final isSaved   = saved.isSaved(lat, lon);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -1149,15 +1082,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             label: isSaved ? 'Saved' : 'Save',
             color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
             onTap: () {
-              setState(() {
-                if (isSaved) {
-                  _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
-                } else {
-                  _savedSpots.add({'lat': lat, 'lon': lon, 'address': address,
-                      'sun_hours_left': sunHoursLeft, 'sun_until': sunUntil});
-                }
-                _persistSaved();
-              });
+              if (isSaved) {
+                _saved.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
+              } else {
+                _saved.add({'lat': lat, 'lon': lon, 'address': address,
+                    'sun_hours_left': sunHoursLeft, 'sun_until': sunUntil});
+              }
             },
           ),
           const SizedBox(width: 8),
@@ -1256,13 +1186,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         builder: (ctx, setSheet) {
           _refreshPointSheet = () { if (ctx.mounted) setSheet(() {}); };
 
+          final sheetSaved = ctx.watch<SavedSpotsState>();
           final info      = _pointInfo;
           final loading   = _pointInfoLoading;
           final inShadow  = info == null ? null : (info['in_shadow'] as bool? ?? true);
           final sunCount  = info?['sun_hours_count'] as int? ?? 0;
           final periods   = (info?['sun_periods'] as List<dynamic>?) ?? [];
-          final address   = _spotAddresses[key] ?? '';
-          final isSaved   = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          final address   = sheetSaved.addresses[key] ?? '';
+          final isSaved   = sheetSaved.isSaved(lat, lon);
           final statusColor = inShadow == false ? const Color(0xFFFF8C00) : const Color(0xFF2d4862);
 
           String fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
@@ -1376,19 +1307,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     label: isSaved ? 'Saved' : 'Save',
                     color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
                     onTap: () {
-                      setState(() {
-                        if (isSaved) {
-                          _savedSpots.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
-                        } else {
-                          _savedSpots.add({
-                            'lat': lat, 'lon': lon,
-                            'address': address.isNotEmpty ? address : '${lat.toStringAsFixed(4)}°N',
-                            'sun_hours_left': sunCount,
-                            'sun_until': periods.isNotEmpty ? (periods.last['to'] as int?) : null,
-                          });
-                        }
-                        _persistSaved();
-                      });
+                      if (isSaved) {
+                        _saved.removeWhere((s) => s['lat'] == lat && s['lon'] == lon);
+                      } else {
+                        _saved.add({
+                          'lat': lat, 'lon': lon,
+                          'address': address.isNotEmpty ? address : '${lat.toStringAsFixed(4)}°N',
+                          'sun_hours_left': sunCount,
+                          'sun_until': periods.isNotEmpty ? (periods.last['to'] as int?) : null,
+                        });
+                      }
                       setSheet(() {});
                     },
                   ),
@@ -2375,7 +2303,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _debounceTimer?.cancel();
     _pillTimer?.cancel();
     _sliderDebounce?.cancel();
-    _searchDebounce?.cancel();
     _liveTimer?.cancel();
     _positionStreamSub?.cancel();
     _compassPollTimer?.cancel();
@@ -2394,27 +2321,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Address search (Nominatim)
   // -------------------------------------------------------------------------
 
-  void _onSearchChanged(String query) {
-    _searchDebounce?.cancel();
-    if (query.trim().isEmpty) {
-      setState(() => _searchResults = []);
-      _setMapPointerEvents(true);
-      return;
-    }
-    _searchDebounce = Timer(const Duration(milliseconds: 400), () => _runSearch(query.trim()));
-  }
+  void _onSearchChanged(String query) =>
+      _search.onQueryChanged(query, _api, _setMapPointerEvents);
 
-  Future<void> _runSearch(String query) async {
-    setState(() => _searchLoading = true);
-    try {
-      final results = await _api.searchPlaces(query);
-      setState(() => _searchResults = results);
-      if (_searchResults.isNotEmpty) _setMapPointerEvents(false);
-    } catch (_) {
-    } finally {
-      setState(() => _searchLoading = false);
-    }
-  }
+  Future<void> _runSearch(String query) =>
+      _search.runSearch(query, _api, _setMapPointerEvents);
 
   Widget _buildSearchDropdown(List<Map<String, dynamic>> results, {bool isHomeSuggestion = false}) {
     return Container(
@@ -2435,10 +2346,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final sub    = isHomeSuggestion
               ? (parts.length > 1 ? '${parts[1].trim()} ${parts[0].trim()}' : parts.first.trim())
               : (parts.length > 1 ? parts.skip(1).take(2).map((s) => s.trim()).join(', ') : '');
+          final homeAddr = context.read<SearchState>().homeAddress;
           final isHome = isHomeSuggestion || (
-            _homeAddress != null &&
-            result['lat'] == _homeAddress!['lat'] &&
-            result['lon'] == _homeAddress!['lon']
+            homeAddr != null &&
+            result['lat'] == homeAddr['lat'] &&
+            result['lon'] == homeAddr['lon']
           );
           return Column(
             mainAxisSize: MainAxisSize.min,
@@ -2496,8 +2408,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final name = (result['display_name'] as String).split(',').first.trim();
     final target = LatLng(lat, lon);
     _searchController.text = name;
+    _search.clearResults();
     setState(() {
-      _searchResults = [];
       _currentCenter = target;
       _searchMarkerPos = target;
       _searchMarkerName = name;
@@ -2539,6 +2451,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final panelExpanded = shell.panelExpanded;
     final panelHidden   = shell.panelHidden;
     final mobileTab     = shell.mobileTab;
+    final search   = context.watch<SearchState>();
 
     // Map area — used as Expanded child on mobile, full Scaffold body on desktop
     final mapArea = Stack(
@@ -2683,11 +2596,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
 
         // Full-screen map blocker — prevents MapLibre from stealing touches when results are visible
-        if (_searchResults.isNotEmpty)
+        if (search.results.isNotEmpty)
           Positioned.fill(
             child: PointerInterceptor(
               child: GestureDetector(
-                onTap: () { setState(() => _searchResults = []); _setMapPointerEvents(true); },
+                onTap: () => _search.clearResults(setPointerEvents: _setMapPointerEvents),
                 child: Container(color: Colors.transparent),
               ),
             ),
@@ -2735,7 +2648,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         ),
                       ),
                     ),
-                    if (_searchLoading)
+                    if (search.loading)
                       Padding(
                         padding: const EdgeInsets.only(right: 12),
                         child: SizedBox(width: 14, height: 14,
@@ -2745,7 +2658,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       MouseRegion(
                         cursor: SystemMouseCursors.click,
                         child: GestureDetector(
-                          onTap: () { _searchController.clear(); setState(() => _searchResults = []); _setMapPointerEvents(true); },
+                          onTap: () { _searchController.clear(); _search.clearResults(setPointerEvents: _setMapPointerEvents); },
                           child: Padding(
                             padding: const EdgeInsets.only(right: 12),
                             child: Icon(Icons.close, color: Colors.grey.shade400, size: 18),
@@ -2756,7 +2669,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          if (_homeAddress != null)
+                          if (search.homeAddress != null)
                             GestureDetector(
                               onTap: _navigateToHome,
                               child: Padding(
@@ -2773,10 +2686,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   ],
                 ),
               ),
-              if (_searchFocus.hasFocus && _searchResults.isEmpty && _homeAddress != null && _searchController.text.isEmpty)
-                _buildSearchDropdown([_homeAddress!], isHomeSuggestion: true),
-              if (_searchResults.isNotEmpty)
-                _buildSearchDropdown(_searchResults),
+              if (_searchFocus.hasFocus && search.results.isEmpty && search.homeAddress != null && _searchController.text.isEmpty)
+                _buildSearchDropdown([search.homeAddress!], isHomeSuggestion: true),
+              if (search.results.isNotEmpty)
+                _buildSearchDropdown(search.results),
             ],
             ),
           ),
@@ -3159,7 +3072,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         _shell.setMobileTab(i);
                         _shell.clearSpot();
                         _panelScroll.jumpTo(0);
-                        if (i == 3) _refreshSavedSunny();
+                        if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
                       },
                       behavior: HitTestBehavior.opaque,
                       child: Column(
@@ -3589,6 +3502,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildTourTab() {
+    final saved = context.watch<SavedSpotsState>();
     final totalDist = _tourSpots.fold<int>(
         0, (sum, s) => sum + ((s['_dist'] as num?)?.toInt() ?? 0));
     final totalMin  = (totalDist / 80).round();
@@ -3689,7 +3603,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final lat  = spot['lat'] as double;
             final lon  = spot['lon'] as double;
             final key  = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-            final addr = _spotAddresses[key] ?? 'Spot ${idx + 1}';
+            final addr = saved.addresses[key] ?? 'Spot ${idx + 1}';
             final dist = (spot['_dist'] as num?)?.toInt() ?? 0;
             final sunH = spot['sun_hours_left'] as int? ?? 0;
             final until = spot['sun_until'] as int?;
@@ -3941,6 +3855,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   // ---- Find sunny spots / places ----
   Widget _buildFindSunnySpotsSection() {
+    final saved = context.watch<SavedSpotsState>();
     // Mode toggle
     Widget modeToggle = Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       _modeBtn('Spots', Icons.wb_sunny_outlined, !_placesMode, () { setState(() { _placesMode = false; _sunnyPois = []; _poisNoResults = false; }); _clearPoiMarkers(); }),
@@ -4015,8 +3930,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             final distLbl  = gps != null ? _formatDistance(_distanceMeters(gps, spotPos)) : null;
             final addrKey  = '${spotPos.latitude.toStringAsFixed(6)},${spotPos.longitude.toStringAsFixed(6)}';
             final poiName  = (spot['_poi_name'] as String? ?? '');
-            final address  = poiName.isNotEmpty ? poiName : (_spotAddresses[addrKey] ?? 'Sunny spot ${idx + 1}');
-            final isSaved  = _savedSpots.any((s) => s['lat'] == spotPos.latitude && s['lon'] == spotPos.longitude);
+            final address  = poiName.isNotEmpty ? poiName : (saved.addresses[addrKey] ?? 'Sunny spot ${idx + 1}');
+            final isSaved  = saved.isSaved(spotPos.latitude, spotPos.longitude);
             final category = spot['_category'] as String? ?? 'spot';
             final (catIcon, catLabel, catColor) = switch (category) {
               'park'   => (Icons.park,          'Park',   const Color(0xFF4CAF50)),
@@ -4107,7 +4022,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           final sunUntil      = poi['sun_until'] as int?;
           final openingHours  = poi['opening_hours'] as String? ?? '';
           final outdoorSeating = poi['outdoor_seating'] as String? ?? '';
-          final isSaved  = _savedSpots.any((s) => s['lat'] == lat && s['lon'] == lon);
+          final isSaved  = saved.isSaved(lat, lon);
           final catLabel = _poiLabel(amenity);
           final catIcon  = _poiIcon(amenity);
           final inShadow = sunUntil == null;
@@ -4452,9 +4367,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         _searchController.clear();
                         _shell.setMobileTab(i);
                         _shell.clearSpot();
-                        setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
+                        _search.clearResults(setPointerEvents: _setMapPointerEvents);
+                        setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; });
                         _mobileContentScroll.jumpTo(0);
-                        if (i == 3) _refreshSavedSunny();
+                        if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
                       },
                       behavior: HitTestBehavior.opaque,
                       child: Column(
@@ -4490,6 +4406,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildSearchMarkerDetail() {
+    final saved = context.watch<SavedSpotsState>();
     final pos  = _searchMarkerPos!;
     final name = _searchMarkerName ?? 'Selected location';
     final info = _searchMarkerInfo;
@@ -4498,7 +4415,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final sunHours  = info?['sun_hours_left'] as int? ?? 0;
     final gps       = _gpsPosition;
     final distLabel = gps != null ? _formatDistance(_distanceMeters(gps, pos)) : null;
-    final isSaved   = _savedSpots.any((s) => s['lat'] == pos.latitude && s['lon'] == pos.longitude);
+    final isSaved   = saved.isSaved(pos.latitude, pos.longitude);
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
@@ -4513,7 +4430,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFF1A1A1A)),
               maxLines: 1, overflow: TextOverflow.ellipsis)),
           GestureDetector(
-            onTap: () { _searchController.clear(); setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; }); },
+            onTap: () { _searchController.clear(); _search.clearResults(); setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; }); },
             child: Padding(
               padding: const EdgeInsets.all(8),
               child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
@@ -4555,14 +4472,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             label: isSaved ? 'Saved' : 'Save',
             color: isSaved ? Colors.orange.shade800 : Colors.orange.shade600,
             onTap: () {
-              setState(() {
-                if (isSaved) {
-                  _savedSpots.removeWhere((s) => s['lat'] == pos.latitude && s['lon'] == pos.longitude);
-                } else {
-                  _savedSpots.add({'lat': pos.latitude, 'lon': pos.longitude, 'address': name});
-                }
-              });
-              _persistSaved();
+              if (isSaved) {
+                _saved.removeWhere((s) => s['lat'] == pos.latitude && s['lon'] == pos.longitude);
+              } else {
+                _saved.add({'lat': pos.latitude, 'lon': pos.longitude, 'address': name});
+              }
             },
           ),
           const SizedBox(width: 8),
@@ -4579,6 +4493,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Widget _buildMobileTabContent() {
     final shell = context.watch<AppShellState>();
+    final saved = context.watch<SavedSpotsState>();
     if (_showSearchMarkerDetail && _searchMarkerPos != null) return _buildSearchMarkerDetail();
     if (shell.selectedSpot != null) return _buildSpotDetail();
     switch (shell.mobileTab) {
@@ -4598,7 +4513,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       case 2: // Tour
         return _buildTourTab();
       case 3: // Saved
-        if (_savedSpots.isEmpty) {
+        if (saved.spots.isEmpty) {
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 32),
             child: Center(
@@ -4648,7 +4563,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
               ]),
             ),
-            ..._savedSpots.asMap().entries.map((e) {
+            ...saved.spots.asMap().entries.map((e) {
               final idx   = e.key;
               final s     = e.value;
               final lat   = s['lat'] as double;
@@ -4657,7 +4572,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               final sunH  = s['sun_hours_left'] as int? ?? 0;
               final until = s['sun_until'] as int?;
               final key   = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
-              final sunny = _savedSunny[key];
+              final sunny = saved.sunnyStatus[key];
               final gps   = _gpsPosition;
               final distLabel = gps != null
                   ? _formatDistance(_distanceMeters(gps, LatLng(lat, lon)))
@@ -4735,12 +4650,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                             ),
                           ),
                           GestureDetector(
-                            onTap: () {
-                              setState(() {
-                                _savedSpots.removeAt(idx);
-                                _persistSaved();
-                              });
-                            },
+                            onTap: () => _saved.removeAt(idx),
                             child: Padding(
                               padding: const EdgeInsets.only(left: 4),
                               child: Icon(Icons.close, size: 16,
