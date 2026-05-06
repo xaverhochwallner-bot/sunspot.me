@@ -2,13 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
-import 'package:geolocator/geolocator.dart';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
+import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
+import 'services/api_client.dart';
+import 'utils/time_utils.dart';
+import 'utils/weather_utils.dart';
 
 void main() {
   runApp(const MyApp());
@@ -46,6 +48,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return '${uri.scheme}://${uri.host}:5000';
   }
   static const String mapStyle     = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+
+  late final ApiClient _api = ApiClient(flaskBaseUrl);
 
   final GlobalKey _mapKey = GlobalKey();
   MapLibreMapController? _mapController;
@@ -198,61 +202,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     duration: const Duration(seconds: 3),
   )..repeat();
 
-  // -------------------------------------------------------------------------
-  // Helpers
-  // -------------------------------------------------------------------------
-
-  // Used by TweenAnimationBuilder — accepts fractional hours during animation
-  String _formatDisplayHour(double h) {
-    final totalMinutes = (h * 60).round() % (24 * 60);
-    final hour   = totalMinutes ~/ 60;
-    final minute = totalMinutes % 60;
-    final period = hour < 12 ? 'AM' : 'PM';
-    final displayHour = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour);
-    return '$displayHour:${minute.toString().padLeft(2, '0')} $period';
-  }
-
-  String get _timePeriod {
-    final h = _hour.toInt();
-    if (h >= 5  && h < 12) return 'Morning';
-    if (h >= 12 && h < 17) return 'Afternoon';
-    if (h >= 17 && h < 21) return 'Evening';
-    return 'Night';
-  }
-
-  IconData get _timePeriodIcon {
-    switch (_timePeriod) {
-      case 'Morning':   return Icons.wb_sunny_outlined;
-      case 'Afternoon': return Icons.wb_sunny;
-      case 'Evening':   return Icons.wb_twilight;
-      default:          return Icons.nightlight_round;
-    }
-  }
-
-  // Vienna local time — handles CET (UTC+1) / CEST (UTC+2) without a package.
-  DateTime _viennaNow() {
-    final utc = DateTime.now().toUtc();
-    final isDst = _isViennaDst(utc);
-    return utc.add(Duration(hours: isDst ? 2 : 1));
-  }
-
-  bool _isViennaDst(DateTime utc) {
-    if (utc.month > 3 && utc.month < 10) return true;
-    if (utc.month < 3 || utc.month > 10) return false;
-    final lastSun = _lastSundayOf(utc.year, utc.month);
-    return utc.month == 3 ? utc.day >= lastSun : utc.day < lastSun;
-  }
-
-  int _lastSundayOf(int year, int month) {
-    var d = DateTime.utc(year, month + 1, 0); // last day of month
-    while (d.weekday != DateTime.sunday) d = d.subtract(const Duration(days: 1));
-    return d.day;
-  }
-
   @override
   void initState() {
     super.initState();
-    final now = _viennaNow();
+    final now = viennaNow();
     _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
     _selectedDate = DateTime(now.year, now.month, now.day);
     _searchFocus.addListener(() { if (mounted) setState(() {}); });
@@ -533,19 +486,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> _fetchPointInfo(LatLng point) async {
     try {
-      final d       = _selectedDate;
-      final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
-      final uri     = Uri.parse(
-        '$flaskBaseUrl/point_info'
-        '?lat=${point.latitude}&lon=${point.longitude}'
-        '&date=$dateStr&hour=${_hour.toInt()}&minute=${((_hour * 60).toInt() % 60)}',
+      final d    = _selectedDate;
+      final data = await _api.fetchPointInfo(
+        point.latitude, point.longitude,
+        formatDate(d), _hour.toInt(), ((_hour * 60).toInt() % 60),
       );
-      final resp = await http.get(uri);
-      if (mounted && resp.statusCode == 200) {
-        setState(() {
-          _pointInfo        = jsonDecode(resp.body) as Map<String, dynamic>;
-          _pointInfoLoading = false;
-        });
+      if (mounted) {
+        setState(() { _pointInfo = data; _pointInfoLoading = false; });
         _refreshPointSheet?.call();
       }
     } catch (_) {
@@ -631,35 +578,41 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final min    = ((_hour * 60).toInt() % 60);
       final date   = _selectedDate;
 
-      final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-      final vpParams =
-          '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
-          '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-          '&zoom=${zoom.round()}';
-      final centerParams =
-          '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}';
+      final dateStr = formatDate(date);
+      final clat = _currentCenter.latitude;
+      final clon = _currentCenter.longitude;
+      final minLat = bounds.southwest.latitude;
+      final minLon = bounds.southwest.longitude;
+      final maxLat = bounds.northeast.latitude;
+      final maxLon = bounds.northeast.longitude;
+      final zoomInt = zoom.round();
 
       // Run grid spots + parks + squares in parallel
-      final spotsUri  = Uri.parse('$flaskBaseUrl/find_sunny_spots$centerParams'
-          '&hour=$h&minute=$min&month=${date.month}&day=${date.day}'
-          '&zoom=${zoom.round()}$vpParams&n=8');
-      final parksUri  = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
-          '&hour=$h&minute=$min&date=$dateStr&types=park');
-      final squaresUri = Uri.parse('$flaskBaseUrl/sunny_pois$centerParams$vpParams'
-          '&hour=$h&minute=$min&date=$dateStr&types=square');
-
       final results = await Future.wait([
-        http.get(spotsUri).timeout(const Duration(seconds: 30)),
-        http.get(parksUri).timeout(const Duration(seconds: 30)),
-        http.get(squaresUri).timeout(const Duration(seconds: 30)),
+        _api.findSunnySpots(
+          lat: clat, lon: clon, minLat: minLat, minLon: minLon,
+          maxLat: maxLat, maxLon: maxLon,
+          hour: h, minute: min, month: date.month, day: date.day,
+          zoom: zoomInt, n: 8,
+        ),
+        _api.findSunnyPois(
+          lat: clat, lon: clon, minLat: minLat, minLon: minLon,
+          maxLat: maxLat, maxLon: maxLon,
+          hour: h, minute: min, date: dateStr, types: 'park', zoom: zoomInt,
+        ),
+        _api.findSunnyPois(
+          lat: clat, lon: clon, minLat: minLat, minLon: minLon,
+          maxLat: maxLat, maxLon: maxLon,
+          hour: h, minute: min, date: dateStr, types: 'square', zoom: zoomInt,
+        ),
       ]);
       if (!mounted || gen != _spotsSearchGen) return;
 
-      List<Map<String, dynamic>> parsePois(http.Response resp, String category) {
+      List<Map<String, dynamic>> parsePois(Map<String, dynamic>? data, String category) {
+        if (data == null) return [];
         try {
-          final d = jsonDecode(resp.body) as Map<String, dynamic>;
-          if (d['reason'] == 'zoom_in') return [];
-          return (d['spots'] as List<dynamic>? ?? []).cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
+          if (data['reason'] == 'zoom_in') return [];
+          return (data['spots'] as List<dynamic>? ?? []).cast<Map<String, dynamic>>().map((p) => <String, dynamic>{
             'lat': (p['lat'] as num).toDouble(),
             'lon': (p['lon'] as num).toDouble(),
             'sun_hours_left': p['sun_hours'] as int? ?? (p['sun_hours_left'] as int? ?? 0),
@@ -671,8 +624,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         } catch (_) { return []; }
       }
 
-      final gridData   = jsonDecode(results[0].body) as Map<String, dynamic>;
-      final gridReason = gridData['reason'] as String? ?? '';
+      final gridData   = results[0];
+      final gridReason = gridData?['reason'] as String? ?? '';
 
       if (gridReason == 'night') {
         setState(() { _sunnySpots = []; _spotsZoomHint = false; });
@@ -680,7 +633,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         return;
       }
 
-      final gridSpots = (gridData['spots'] as List<dynamic>? ?? []).map((s) => <String, dynamic>{
+      final gridSpots = ((gridData?['spots'] as List<dynamic>?) ?? []).map((s) => <String, dynamic>{
         'lat':            (s['lat']  as num).toDouble(),
         'lon':            (s['lon']  as num).toDouble(),
         'sun_hours_left': (s['sun_hours_left'] as num?)?.toInt() ?? 0,
@@ -796,23 +749,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     try {
       final bounds  = await ctrl.getVisibleRegion();
       final d       = _selectedDate;
-      final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+      final dateStr = formatDate(d);
       final h       = _hour.toInt();
       final min     = ((_hour * 60).toInt() % 60);
-      final types   = 'terrace';
       final zoom    = ctrl.cameraPosition?.zoom ?? 15.0;
-      final uri = Uri.parse(
-        '$flaskBaseUrl/sunny_pois'
-        '?lat=${_currentCenter.latitude}&lon=${_currentCenter.longitude}'
-        '&minLat=${bounds.southwest.latitude}&minLon=${bounds.southwest.longitude}'
-        '&maxLat=${bounds.northeast.latitude}&maxLon=${bounds.northeast.longitude}'
-        '&hour=$h&minute=$min&date=$dateStr&types=$types'
-        '&zoom=${zoom.round()}',
+      final data = await _api.findSunnyPois(
+        lat: _currentCenter.latitude, lon: _currentCenter.longitude,
+        minLat: bounds.southwest.latitude, minLon: bounds.southwest.longitude,
+        maxLat: bounds.northeast.latitude, maxLon: bounds.northeast.longitude,
+        hour: h, minute: min, date: dateStr, types: 'terrace', zoom: zoom.round(),
       );
-      final resp = await http.get(uri).timeout(const Duration(seconds: 20));
       if (!mounted || gen != _poisSearchGen) return;
-      if (resp.statusCode == 200) {
-        final data   = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (data != null) {
         final reason = data['reason'] as String? ?? '';
         if (reason == 'night') {
           _showError('No sun at this hour — move the time slider');
@@ -823,8 +771,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         setState(() { _sunnyPois = pois; _poisNoResults = pois.isEmpty; });
         await _showPoiMarkers(pois);
         await _refreshPoiPositions();
-      } else {
-        if (mounted) _showError('Server error ${resp.statusCode}');
       }
     } on TimeoutException {
       if (mounted) _showError('Search timed out — try zooming in closer');
@@ -965,19 +911,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final d   = _selectedDate;
     final h   = _hour.toInt();
     final min = ((_hour * 60).toInt() % 60);
-    final dateStr = '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+    final dateStr = formatDate(d);
     for (final s in _savedSpots) {
       final lat = s['lat'] as double;
       final lon = s['lon'] as double;
       final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
       if (mounted) setState(() => _savedSunny[key] = null);
-      try {
-        final uri = Uri.parse('$flaskBaseUrl/is_sunny'
-            '?lat=$lat&lon=$lon&date=$dateStr&hour=$h&minute=$min');
-        final res = await http.get(uri);
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
-        if (mounted) setState(() => _savedSunny[key] = data['sunny'] as bool?);
-      } catch (_) {}
+      final sunny = await _api.isSunny(lat, lon, dateStr, h, min);
+      if (mounted) setState(() => _savedSunny[key] = sunny);
     }
   }
 
@@ -986,37 +927,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
 
   Future<void> _fetchWeather(double lat, double lon) async {
-    try {
-      final uri = Uri.parse(
-        'https://api.open-meteo.com/v1/forecast'
-        '?latitude=$lat&longitude=$lon'
-        '&current=temperature_2m,weather_code,uv_index,cloud_cover'
-        '&timezone=auto',
-      );
-      final res = await http.get(uri);
-      if (res.statusCode == 200 && mounted) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
-        setState(() => _weatherData = data['current'] as Map<String, dynamic>?);
-      }
-    } catch (_) {}
-  }
-
-  String _weatherEmoji(int code) {
-    if (code == 0)           return '☀️';
-    if (code <= 3)           return '⛅';
-    if (code <= 48)          return '🌫️';
-    if (code <= 67)          return '🌧️';
-    if (code <= 77)          return '❄️';
-    if (code <= 82)          return '🌦️';
-    return                          '⛈️';
-  }
-
-  Color _uvColor(num uv) {
-    if (uv <= 2)  return Colors.green;
-    if (uv <= 5)  return Colors.yellow.shade700;
-    if (uv <= 7)  return Colors.orange;
-    if (uv <= 10) return Colors.red;
-    return                Colors.purple;
+    final data = await _api.fetchWeather(lat, lon);
+    if (mounted) setState(() => _weatherData = data);
   }
 
   Widget _buildWeatherWidget() {
@@ -1026,7 +938,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final code    = (data['weather_code']   as num?)?.toInt() ?? 0;
     final uv      = (data['uv_index']       as num?) ?? 0;
     final uvInt   = uv.round();
-    final emoji   = _weatherEmoji(code);
+    final emoji   = weatherEmoji(code);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1051,7 +963,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           Container(
             width: 8, height: 8,
             decoration: BoxDecoration(
-              color: _uvColor(uv),
+              color: uvColor(uv),
               shape: BoxShape.circle,
             ),
           ),
@@ -1106,28 +1018,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<String> _reverseGeocode(double lat, double lon) async {
     final key = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
     if (_spotAddresses.containsKey(key)) return _spotAddresses[key]!;
-    try {
-      final uri = Uri.parse(
-        'https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lon&format=json',
-      );
-      final res = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
-      if (res.statusCode != 200) return '';
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
-      final addr = data['address'] as Map<String, dynamic>?;
-      String label = '';
-      if (addr != null) {
-        final road = (addr['road'] ?? addr['pedestrian'] ?? addr['path'] ?? '') as String;
-        final num  = (addr['house_number'] ?? '') as String;
-        label = num.isNotEmpty ? '$road $num' : road;
-      }
-      if (label.isEmpty) {
-        label = ((data['display_name'] as String?) ?? '').split(',').first.trim();
-      }
-      if (mounted) setState(() => _spotAddresses[key] = label);
-      return label;
-    } catch (_) {
-      return '';
-    }
+    final label = await _api.reverseGeocode(lat, lon);
+    if (mounted && label.isNotEmpty) setState(() => _spotAddresses[key] = label);
+    return label;
   }
 
   // -------------------------------------------------------------------------
@@ -1926,21 +1819,16 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _lastFetchZoom = rawZoom.toInt();
 
       // Fetch sun angles + sunrise/sunset from lightweight meta endpoint.
-      final metaUri = Uri.parse(
-        '$flaskBaseUrl/shadow/meta'
-        '?lat=${_currentCenter.latitude}'
-        '&lon=${_currentCenter.longitude}'
-        '&hour=${_hour.toInt()}'
-        '&minute=${((_hour * 60).toInt() % 60)}'
-        '&month=${_selectedDate.month}'
-        '&day=${_selectedDate.day}',
-      );
       // Retry with backoff while server is cold-starting (typically 5–60 s after restart).
-      late http.Response metaResp;
+      Map<String, dynamic>? meta;
       const maxRetries = 12;
       for (int attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-          metaResp = await http.get(metaUri).timeout(const Duration(seconds: 5));
+          meta = await _api.fetchShadowMeta(
+            _currentCenter.latitude, _currentCenter.longitude,
+            _hour.toInt(), ((_hour * 60).toInt() % 60),
+            _selectedDate.month, _selectedDate.day,
+          );
           break;
         } catch (_) {
           if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
@@ -1956,12 +1844,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         }
       }
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
+      if (meta == null) throw Exception('shadow/meta returned null after retries');
 
-      final meta   = jsonDecode(metaResp.body) as Map<String, dynamic>;
-      final elev   = (meta['elevation'] as num?)?.toDouble() ?? 0.0;
-      final azim   = (meta['azimuth']   as num?)?.toDouble() ?? 0.0;
-      final srHour = (meta['sunrise']   as num?)?.toDouble();
-      final ssHour = (meta['sunset']    as num?)?.toDouble();
+      final metaData = meta!;
+      final elev   = (metaData['elevation'] as num?)?.toDouble() ?? 0.0;
+      final azim   = (metaData['azimuth']   as num?)?.toDouble() ?? 0.0;
+      final srHour = (metaData['sunrise']   as num?)?.toDouble();
+      final ssHour = (metaData['sunset']    as num?)?.toDouble();
 
       // Wire up (or refresh) the vector tile source for this time step.
       final tileUrl = _buildShadowTileUrl(
@@ -2371,23 +2260,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         '$flaskBaseUrl/shadow/tile/$zoom/$x/$y.pbf'
         '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
 
-    Future<bool> fetchTile(int h, int x, int y) async {
-      try {
-        final res = await http.get(Uri.parse(tileUrl(h, x, y)))
-            .timeout(const Duration(seconds: 20));
-        return res.statusCode == 200;
-      } catch (_) {
-        return false;
-      }
-    }
-
     // First pass: all tiles in parallel; track which fail.
     final okFlags = List<bool>.filled(totalTiles, false);
     await Future.wait([
       for (var i = 0; i < specs.length; i++)
         () async {
           final (h, x, y) = specs[i];
-          final ok = await fetchTile(h, x, y);
+          final ok = await _api.fetchTile(tileUrl(h, x, y));
           if (_preloadGen != gen) return;
           okFlags[i] = ok;
           if (mounted && _preloading24h) {
@@ -2405,7 +2284,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     var failed = [for (var i = 0; i < specs.length; i++) if (!okFlags[i]) specs[i]];
     for (var pass = 0; pass < 2 && failed.isNotEmpty; pass++) {
       if (_preloadGen != gen) return;
-      final results = await Future.wait(failed.map((s) => fetchTile(s.$1, s.$2, s.$3)));
+      final results = await Future.wait(failed.map((s) => _api.fetchTile(tileUrl(s.$1, s.$2, s.$3))));
       if (_preloadGen != gen || !mounted || !_preloading24h) return;
       failed = [for (var i = 0; i < failed.length; i++) if (!results[i]) failed[i]];
     }
@@ -2421,12 +2300,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final tileY = _latToTileY(_currentCenter.latitude, zoom);
     for (var dx = -1; dx <= 1; dx++) {
       for (var dy = -1; dy <= 1; dy++) {
-        http.get(Uri.parse(
+        _api.warmTile(
           '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
           '?hour=$hour&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
-        ))
-            .timeout(const Duration(seconds: 30))
-            .catchError((_) => http.Response('', 0));
+        );
       }
     }
   }
@@ -2520,7 +2397,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() {
         _liveMode = true;
         _animating = false;  // stop animation when going live
-        final now = _viennaNow();
+        final now = viennaNow();
         _selectedDate = DateTime(now.year, now.month, now.day);
         _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
       });
@@ -2528,7 +2405,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _liveTimer = Timer.periodic(const Duration(minutes: 1), (_) {
         if (!mounted || !_liveMode) return;
         setState(() {
-          final now = _viennaNow();
+          final now = viennaNow();
           _selectedDate = DateTime(now.year, now.month, now.day);
           _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
         });
@@ -2578,19 +2455,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _runSearch(String query) async {
     setState(() => _searchLoading = true);
     try {
-      final uri = Uri.parse(
-        'https://nominatim.openstreetmap.org/search'
-        '?q=${Uri.encodeComponent(query)}&format=json&limit=5&addressdetails=1'
-        '&viewbox=16.18,48.33,16.58,48.12&bounded=1',
-      );
-      final resp = await http.get(uri, headers: {'User-Agent': 'Sunspot.me/1.0'});
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body) as List;
-        setState(() => _searchResults = data.cast<Map<String, dynamic>>());
-        if (_searchResults.isNotEmpty) _setMapPointerEvents(false);
-      }
+      final results = await _api.searchPlaces(query);
+      setState(() => _searchResults = results);
+      if (_searchResults.isNotEmpty) _setMapPointerEvents(false);
     } catch (_) {
-      // silently ignore network errors during search
     } finally {
       setState(() => _searchLoading = false);
     }
@@ -2700,13 +2568,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Future<void> _fetchSearchMarkerInfo(double lat, double lon) async {
-    try {
-      final uri = Uri.parse('$flaskBaseUrl/point_info?lat=$lat&lon=$lon&hour=${_hour.toInt()}&date=${_selectedDate.toIso8601String().substring(0, 10)}');
-      final resp = await http.get(uri);
-      if (resp.statusCode == 200 && mounted) {
-        setState(() => _searchMarkerInfo = jsonDecode(resp.body) as Map<String, dynamic>);
-      }
-    } catch (_) {}
+    final data = await _api.fetchPointInfo(
+      lat, lon, formatDate(_selectedDate), _hour.toInt(), ((_hour * 60).toInt() % 60),
+    );
+    if (mounted && data != null) setState(() => _searchMarkerInfo = data);
   }
 
   @override
@@ -3418,9 +3283,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       crossAxisAlignment: CrossAxisAlignment.baseline,
       textBaseline: TextBaseline.alphabetic,
       children: [
-        Icon(_timePeriodIcon, color: Colors.orange.shade300, size: 22),
+        Icon(timePeriodIcon(timePeriod(_hour)), color: Colors.orange.shade300, size: 22),
         const SizedBox(width: 6),
-        Text(_timePeriod,
+        Text(timePeriod(_hour),
             style: TextStyle(
                 fontSize: 22, fontWeight: FontWeight.w300,
                 color: Colors.grey.shade400, letterSpacing: -0.5)),
@@ -3443,7 +3308,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           duration: const Duration(milliseconds: 350),
           builder: (context, value, _) {
             return Text(
-              _formatDisplayHour(value),
+              formatDisplayHour(value),
               style: TextStyle(
                 fontSize: 22, fontWeight: FontWeight.w300,
                 color: _draggingSlider ? Colors.orange : Colors.black87,
@@ -3633,18 +3498,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     try {
       final date = _selectedDate;
-      final uri  = Uri.parse(
-        '$flaskBaseUrl/find_sunny_spots'
-        '?lat=${_currentCenter.latitude}'
-        '&lon=${_currentCenter.longitude}'
-        '&hour=${_hour.toInt()}'
-        '&minute=${((_hour * 60).toInt() % 60)}'
-        '&month=${date.month}&day=${date.day}'
-        '&n=12',
+      final data = await _api.findSunnySpotsUnbounded(
+        lat: _currentCenter.latitude, lon: _currentCenter.longitude,
+        hour: _hour.toInt(), minute: ((_hour * 60).toInt() % 60),
+        month: date.month, day: date.day, n: 12,
       );
-      final res  = await http.get(uri).timeout(const Duration(seconds: 30));
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
-      final raw  = (data['spots'] as List? ?? []).cast<Map<String, dynamic>>()
+      final raw  = ((data?['spots'] as List?) ?? []).cast<Map<String, dynamic>>()
           .map((s) => <String, dynamic>{
                 'lat':            (s['lat']  as num).toDouble(),
                 'lon':            (s['lon']  as num).toDouble(),
