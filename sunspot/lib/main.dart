@@ -2759,8 +2759,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
         ),
 
-        // Zoom-in hint badge — shown at z13 and below
-        if (_currentZoom <= 13.0)
+        // Zoom-in hint badge — shown at all macro zoom levels (below z15 where per-building detail starts)
+        if (_currentZoom < 15.0)
           Positioned(
             bottom: 24, left: 0, right: 0,
             child: IgnorePointer(
