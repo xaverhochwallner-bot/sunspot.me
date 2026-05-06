@@ -19,6 +19,7 @@ dependencies:
   solar_calculator: ^1.0.3
   geolocator: ^13.0.1
   pointer_interceptor: ^0.10.1
+  provider: ^6.1.2
 
 dev_dependencies:
   flutter_test:

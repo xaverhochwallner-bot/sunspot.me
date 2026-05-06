@@ -8,9 +8,12 @@ import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
+import 'package:provider/provider.dart';
 import 'services/api_client.dart';
+import 'state/app_shell_state.dart';
+import 'state/weather_state.dart';
 import 'utils/time_utils.dart';
-import 'utils/weather_utils.dart';
+import 'widgets/weather_widget.dart';
 
 void main() {
   runApp(const MyApp());
@@ -21,10 +24,16 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      title: 'Sunshadow Map',
-      home: SunMapScreen(),
-      debugShowCheckedModeBanner: false,
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => AppShellState()),
+        ChangeNotifierProvider(create: (_) => WeatherState()),
+      ],
+      child: const MaterialApp(
+        title: 'Sunshadow Map',
+        home: SunMapScreen(),
+        debugShowCheckedModeBanner: false,
+      ),
     );
   }
 }
@@ -51,6 +60,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   late final ApiClient _api = ApiClient(flaskBaseUrl);
 
+  AppShellState get _shell  => context.read<AppShellState>();
+  WeatherState  get _weather => context.read<WeatherState>();
+
   final GlobalKey _mapKey = GlobalKey();
   MapLibreMapController? _mapController;
   LatLng _currentCenter = const LatLng(48.2082, 16.3738);
@@ -68,8 +80,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   bool     _animating      = false;
   bool     _preloading24h  = false;
   bool     _draggingSlider = false;
-  bool     _splashVisible  = true;
-  String?  _errorMessage;
 
   double              _loadingProgress = 0.0;
   String              _loadingStage    = '';
@@ -87,10 +97,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int                 _dimmedGhostNonce  = -1; // second ghost kept at 0-opacity during animation idle-timeout fallback
   int                 _preloadGen        = 0;  // incremented each preload run; stale .then() callbacks check this
 
-  // Panel
-  bool _panelOpen = true;
-  bool _panelExpanded = false;
-  bool _panelHidden = false;
+  // Panel (state lives in AppShellState)
 
   // Live mode
   bool   _liveMode  = false;
@@ -149,8 +156,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   bool                       _spotsZoomHint     = false;
 
-  // Weather overlay
-  Map<String, dynamic>? _weatherData;
+  // Weather overlay (state lives in WeatherState)
 
 
 
@@ -171,17 +177,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Saved spots sunny status  key = 'lat,lon', null=loading, true=sunny, false=shadow
   Map<String, bool?> _savedSunny = {};
 
-  // Inline spot detail (replaces modal)
-  Map<String, dynamic>? _selectedSpot;
-  int _selectedSpotIdx = 0;
+  // Spot detail navigation (spot+idx live in AppShellState)
   LatLng? _detailReturnCenter;
   double? _detailReturnZoom;
 
   // Panel scroll
   final ScrollController _panelScroll = ScrollController();
 
-  // Mobile bottom UI
-  int _mobileTab = 0;
+  // Mobile bottom UI (mobileTab lives in AppShellState)
   int _spotsSearchGen = 0; // incremented on tab-switch to cancel in-flight searches
   int _poisSearchGen  = 0;
   final ScrollController _mobileContentScroll = ScrollController();
@@ -388,10 +391,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _pendingTourLat = tLat;
       _pendingTourLon = tLon;
       // Dismiss splash before animating to the shared location
-      if (mounted) setState(() => _splashVisible = false);
+      if (mounted) _shell.hideSplash();
       await _mapController?.animateCamera(
           CameraUpdate.newLatLngZoom(_currentCenter, 15.0));
-      if (_isMobile) setState(() => _mobileTab = 2);
+      if (_isMobile) _shell.setMobileTab(2);
       await Future.delayed(const Duration(milliseconds: 800));
       fetchShadows();
       _buildTour();
@@ -473,7 +476,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
     // Point inspection only active on Saved tab
-    if (_mobileTab != 3) return;
+    if (_shell.mobileTab != 3) return;
     setState(() {
       _clickedPoint      = coordinates;
       _pointInfo         = null;
@@ -660,7 +663,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (allSpots.isNotEmpty) {
         await Future.delayed(const Duration(milliseconds: 150));
         if (_isMobile) {
-          setState(() => _mobileTab = 1);
+          _shell.setMobileTab(1);
         } else if (_panelScroll.hasClients) {
           _panelScroll.animateTo(
             _panelScroll.position.maxScrollExtent,
@@ -926,51 +929,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Weather (Open-Meteo, no API key)
   // -------------------------------------------------------------------------
 
-  Future<void> _fetchWeather(double lat, double lon) async {
-    final data = await _api.fetchWeather(lat, lon);
-    if (mounted) setState(() => _weatherData = data);
-  }
-
-  Widget _buildWeatherWidget() {
-    final data = _weatherData;
-    if (data == null) return const SizedBox.shrink();
-    final temp    = (data['temperature_2m'] as num?)?.round() ?? 0;
-    final code    = (data['weather_code']   as num?)?.toInt() ?? 0;
-    final uv      = (data['uv_index']       as num?) ?? 0;
-    final uvInt   = uv.round();
-    final emoji   = weatherEmoji(code);
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.12),
-            blurRadius: 8, offset: const Offset(0, 2))],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(emoji, style: const TextStyle(fontSize: 16)),
-          const SizedBox(width: 5),
-          Text('$temp°',
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-          const SizedBox(width: 8),
-          Text('UV $uvInt',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500,
-                  color: Colors.grey.shade700)),
-          const SizedBox(width: 3),
-          Container(
-            width: 8, height: 8,
-            decoration: BoxDecoration(
-              color: uvColor(uv),
-              shape: BoxShape.circle,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Future<void> _fetchWeather(double lat, double lon) =>
+      _weather.fetch(_api, lat, lon);
 
   Future<void> _setShadowLayersVisible(bool visible) async {
     final ctrl = _mapController;
@@ -1032,7 +992,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _detailReturnZoom   = _lastSearchZoom ?? _mapController?.cameraPosition?.zoom ?? 14.0;
     final lat = spot['lat'] as double;
     final lon = spot['lon'] as double;
-    if (_panelExpanded || _panelHidden) setState(() { _panelExpanded = false; _panelHidden = false; });
+    _shell.collapsePanel();
     _suppressResultClear = true;
     _mapController?.animateCamera(CameraUpdate.newLatLngZoom(LatLng(lat, lon), 15.5));
     final key          = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
@@ -1055,15 +1015,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 : (Icons.wb_sunny, 'Spot');
     final circColor = sunUntil != null ? const Color(0xFFFFD700) : Colors.grey.shade400;
 
-    setState(() {
-      _selectedSpot    = spot;
-      _selectedSpotIdx = idx;
-    });
+    _shell.selectSpot(spot, idx);
     _panelScroll.jumpTo(0);
   }
 
   void _closeSpotDetail() {
-    setState(() => _selectedSpot = null);
+    _shell.clearSpot();
     if (_sunnySpots.isNotEmpty || _sunnyPois.isNotEmpty) {
       _suppressResultClear = true;
       final rc = _detailReturnCenter;
@@ -1075,8 +1032,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildSpotDetail() {
-    final spot   = _selectedSpot!;
-    final idx    = _selectedSpotIdx;
+    final spot   = _shell.selectedSpot!;
+    final idx    = _shell.selectedSpotIdx;
     final lat    = spot['lat'] as double;
     final lon    = spot['lon'] as double;
     final key    = '${lat.toStringAsFixed(6)},${lon.toStringAsFixed(6)}';
@@ -1560,7 +1517,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
 
     // Reveal the map, then start fetching shadows for the correct center.
-    if (mounted) setState(() => _splashVisible = false);
+    if (mounted) _shell.hideSplash();
     fetchShadows();
   }
 
@@ -1765,12 +1722,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
-  void _showError(String msg) {
-    setState(() => _errorMessage = msg);
-    Future.delayed(const Duration(seconds: 10), () {
-      if (mounted) setState(() => _errorMessage = null);
-    });
-  }
+  void _showError(String msg) => _shell.showError(msg);
 
   // -------------------------------------------------------------------------
   // Shadow fetch
@@ -2582,6 +2534,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     const panelRightPad = 0;
     final keyboardOpen = isMobile && MediaQuery.of(context).viewInsets.bottom > 0;
 
+    final shell    = context.watch<AppShellState>();
+    final errorMsg = shell.errorMessage;
+    final panelExpanded = shell.panelExpanded;
+    final panelHidden   = shell.panelHidden;
+    final mobileTab     = shell.mobileTab;
+
     // Map area — used as Expanded child on mobile, full Scaffold body on desktop
     final mapArea = Stack(
       children: [
@@ -2651,7 +2609,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           ),
 
         // Tap-to-inspect hint badge (Saved tab only)
-        if (_isMobile && _mobileTab == 3)
+        if (_isMobile && mobileTab == 3)
           Positioned(
             bottom: 24, left: 0, right: 0,
             child: IgnorePointer(
@@ -2808,7 +2766,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                             ),
                           Padding(
                             padding: const EdgeInsets.only(right: 6),
-                            child: _buildWeatherWidget(),
+                            child: const WeatherWidget(),
                           ),
                         ],
                       ),
@@ -2932,13 +2890,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ],
 
         // Error banner
-        if (_errorMessage != null)
+        if (errorMsg != null)
           Positioned(
             bottom: 80, left: 16, right: 16,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(color: Colors.red.shade700, borderRadius: BorderRadius.circular(8)),
-              child: Text(_errorMessage!, style: const TextStyle(color: Colors.white, fontSize: 13)),
+              child: Text(errorMsg!, style: const TextStyle(color: Colors.white, fontSize: 13)),
             ),
           ),
 
@@ -2954,7 +2912,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   const collapsedH = 256.0;
                   final safeBottom = MediaQuery.of(ctx).padding.bottom;
                   final hiddenH    = 24.0 + 1.0 + 56.0 + safeBottom;
-                  final bottomH    = keyboardOpen ? 57.0 : (_panelHidden ? hiddenH : (_panelExpanded ? totalH : collapsedH));
+                  final bottomH    = keyboardOpen ? 57.0 : (panelHidden ? hiddenH : (panelExpanded ? totalH : collapsedH));
                   final mapH       = totalH - bottomH;
                   return Column(children: [
                     AnimatedContainer(
@@ -3112,11 +3070,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildSplash() {
+    final splashVisible = context.watch<AppShellState>().splashVisible;
     return AnimatedOpacity(
-      opacity: _splashVisible ? 1.0 : 0.0,
+      opacity: splashVisible ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 600),
       child: IgnorePointer(
-        ignoring: !_splashVisible,
+        ignoring: !splashVisible,
         child: Container(
           color: const Color(0xFFFFFBF5),
           child: Center(
@@ -3146,6 +3105,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildDesktopSidebar() {
+    final shell = context.watch<AppShellState>();
     const tabs = [
       (Icons.access_time,       'Time'),
       (Icons.wb_sunny_outlined, 'Spots'),
@@ -3182,7 +3142,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 final i     = entry.key;
                 final icon  = entry.value.$1;
                 final label = entry.value.$2;
-                final sel   = _mobileTab == i;
+                final sel   = shell.mobileTab == i;
                 return Expanded(
                   child: MouseRegion(
                     cursor: SystemMouseCursors.click,
@@ -3196,7 +3156,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                           _lastSearchZoom   = null;
                         }
                         _spotsSearchGen++; _poisSearchGen++;
-                        setState(() { _mobileTab = i; _selectedSpot = null; });
+                        _shell.setMobileTab(i);
+                        _shell.clearSpot();
                         _panelScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -4406,6 +4367,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // =========================================================================
 
   Widget _buildMobileBottom({bool keyboardOpen = false}) {
+    final shell = context.watch<AppShellState>();
     const tabs = [
       (Icons.access_time,       'Time'),
       (Icons.wb_sunny_outlined, 'Spots'),
@@ -4432,17 +4394,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             if (!keyboardOpen) ...[
               // Expand/collapse/hide handle
               GestureDetector(
-                onTap: () => setState(() {
-                  if (_panelHidden) {
-                    _panelHidden = false;
-                    _panelExpanded = false;
-                  } else if (_panelExpanded) {
-                    _panelExpanded = false;
-                    _panelHidden = true;
-                  } else {
-                    _panelExpanded = true;
-                  }
-                }),
+                onTap: () => _shell.togglePanel(),
                 behavior: HitTestBehavior.opaque,
                 child: SizedBox(
                   height: 24,
@@ -4458,7 +4410,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 ),
               ),
               // Content area — hidden when panel is slid away
-              if (!_panelHidden)
+              if (!shell.panelHidden)
                 Expanded(
                   child: ShaderMask(
                     shaderCallback: (bounds) => LinearGradient(
@@ -4485,7 +4437,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                   final i     = entry.key;
                   final icon  = entry.value.$1;
                   final label = entry.value.$2;
-                  final sel   = _mobileTab == i;
+                  final sel   = shell.mobileTab == i;
                   return Expanded(
                     child: GestureDetector(
                       onTap: () {
@@ -4498,7 +4450,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                         }
                         _spotsSearchGen++; _poisSearchGen++;
                         _searchController.clear();
-                        setState(() { _mobileTab = i; _panelExpanded = false; _panelHidden = false; _selectedSpot = null; _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
+                        _shell.setMobileTab(i);
+                        _shell.clearSpot();
+                        setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; _searchResults = []; });
                         _mobileContentScroll.jumpTo(0);
                         if (i == 3) _refreshSavedSunny();
                       },
@@ -4624,9 +4578,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   Widget _buildMobileTabContent() {
+    final shell = context.watch<AppShellState>();
     if (_showSearchMarkerDetail && _searchMarkerPos != null) return _buildSearchMarkerDetail();
-    if (_selectedSpot != null) return _buildSpotDetail();
-    switch (_mobileTab) {
+    if (shell.selectedSpot != null) return _buildSpotDetail();
+    switch (shell.mobileTab) {
       case 0: // Time
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
