@@ -240,6 +240,15 @@ _CFG_GAP_FILL = {
     14: 0.000003,  # ~0.3 m net
 }
 
+# Macro morphological close — elevation-adaptive to merge isolated noon shadows.
+# Pure close (buffer+d then buffer-d): bridges street-width gaps, no net shadow expansion.
+# Max values apply at elevation ≥ 60°; scales linearly to 0 at elevation ≤ 15°.
+_CFG_MACRO_GAP_FILL = {
+    12: 0.00025,  # ~28 m max — district-scale streets
+    13: 0.00015,  # ~17 m max — neighbourhood streets
+    14: 0.00006,  # ~7 m max  — bridges to micro z14
+}
+
 # Geometry simplification tolerance (deg) per zoom — z ≥ 14 (micro pipeline).
 # Detail increases with zoom; z14 is coarser to bridge to z13 macro.
 _CFG_SIMPLIFY = {
@@ -911,6 +920,18 @@ def _gap_fill(zoom):
     return _cfg_zoom(_CFG_GAP_FILL, zoom)
 
 
+def _macro_gap_fill(zoom, elevation_deg):
+    """Elevation-adaptive morphological close for macro pipeline.
+
+    Returns 0 when sun is low (shadows already long and merging naturally).
+    Scales up to _CFG_MACRO_GAP_FILL[zoom] as sun rises toward 60°.
+    """
+    if elevation_deg <= 15.0:
+        return 0.0
+    t = min(1.0, (elevation_deg - 15.0) / 45.0)
+    return _cfg_zoom(_CFG_MACRO_GAP_FILL, zoom) * t
+
+
 def _shadow_erosion_steps(zoom):
     return _cfg_zoom(_CFG_EROSION, zoom)
 
@@ -963,6 +984,9 @@ def _macro_compute(elevation, azimuth, q_bounds, zoom):
     merged = unary_union(block_polys + shadow_parts)
     if not merged.is_valid:
         merged = merged.buffer(0)
+    gfill = _macro_gap_fill(zoom, elevation)
+    if gfill > 0:
+        merged = merged.buffer(gfill).buffer(-gfill)
     merged = merged.simplify(MACRO_SIMPLIFY, preserve_topology=True)
 
     sunlit          = compute_bbox.difference(merged)
