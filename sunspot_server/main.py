@@ -109,7 +109,7 @@ if _SENTRY_AVAILABLE and _SENTRY_DSN:
         traces_sample_rate=0.05,
         environment=os.getenv('FLASK_ENV', 'production'),
     )
-    _log.info("Sentry enabled (env=%s)", os.getenv('FLASK_ENV', 'production'))
+    print(f"[sentry] enabled (env={os.getenv('FLASK_ENV', 'production')})", flush=True)
 
 # Path to the local OSM PBF file — place it next to main.py
 PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
