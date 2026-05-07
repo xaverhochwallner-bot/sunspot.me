@@ -14,6 +14,8 @@ import 'state/saved_spots_state.dart';
 import 'state/search_state.dart';
 import 'state/weather_state.dart';
 import 'utils/time_utils.dart';
+import 'widgets/desktop_sidebar.dart';
+import 'widgets/mobile_bottom_sheet.dart';
 import 'widgets/weather_widget.dart';
 
 void main() {
@@ -2838,13 +2840,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                       duration: const Duration(milliseconds: 280),
                       curve: Curves.easeInOut,
                       height: bottomH,
-                      child: _buildMobileBottom(keyboardOpen: keyboardOpen),
+                      child: MobileBottomSheet(
+                        contentScroll: _mobileContentScroll,
+                        keyboardOpen:  keyboardOpen,
+                        onTabTap:      _onMobileTabTap,
+                        child:         _buildMobileTabContent(),
+                      ),
                     ),
                   ]);
                 })
               : Row(children: [
                   Expanded(child: mapArea),
-                  SizedBox(width: 280, child: _buildDesktopSidebar()),
+                  SizedBox(width: 280, child: DesktopSidebar(
+                    panelScroll: _panelScroll,
+                    onTabTap:    _onDesktopTabTap,
+                    child:       _buildMobileTabContent(),
+                  )),
                 ]),
           _buildSplash(),
         ],
@@ -3017,94 +3028,51 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildDesktopSidebar() {
-    final shell = context.watch<AppShellState>();
-    const tabs = [
-      (Icons.access_time,       'Time'),
-      (Icons.wb_sunny_outlined, 'Spots'),
-      (Icons.route,             'Tour'),
-      (Icons.favorite_outline,  'Saved'),
-    ];
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 12,
-            offset: const Offset(-4, 0),
-          ),
-        ],
-      ),
-      child: Column(
-        children: [
-          // Content area
-          Expanded(
-            child: SingleChildScrollView(
-              controller: _panelScroll,
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-              child: _buildMobileTabContent(),
-            ),
-          ),
-          // Tab bar
-          Divider(height: 1, color: Colors.grey.shade200),
-          SizedBox(
-            height: 56,
-            child: Row(
-              children: tabs.asMap().entries.map((entry) {
-                final i     = entry.key;
-                final icon  = entry.value.$1;
-                final label = entry.value.$2;
-                final sel   = shell.mobileTab == i;
-                return Expanded(
-                  child: MouseRegion(
-                    cursor: SystemMouseCursors.click,
-                    child: GestureDetector(
-                      onTap: () {
-                        if (i != 1) {
-                          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
-                          _clearSunnySpots();
-                          _clearPoiMarkers();
-                          _lastSearchCenter = null;
-                          _lastSearchZoom   = null;
-                        }
-                        _spotsSearchGen++; _poisSearchGen++;
-                        _shell.setMobileTab(i);
-                        _shell.clearSpot();
-                        _panelScroll.jumpTo(0);
-                        if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
-                      },
-                      behavior: HitTestBehavior.opaque,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: sel ? Colors.orange.withValues(alpha: 0.12) : Colors.transparent,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Icon(icon, size: 22,
-                                color: sel ? Colors.orange : Colors.grey.shade400),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(label,
-                              style: TextStyle(
-                                fontSize: 10, fontWeight: FontWeight.w600,
-                                color: sel ? Colors.orange : Colors.grey.shade400,
-                              )),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-          ),
-        ],
-      ),
-    );
+  // -------------------------------------------------------------------------
+  // Tab-bar callbacks (shared by mobile and desktop shells)
+  // -------------------------------------------------------------------------
+
+  void _onMobileTabTap(int i) {
+    if (i != 1) {
+      setState(() {
+        _sunnySpots = []; _sunnyPois = [];
+        _sunnySpotScreenPos = []; _poiScreenPos = [];
+      });
+      _clearSunnySpots();
+      _clearPoiMarkers();
+      _lastSearchCenter = null;
+      _lastSearchZoom   = null;
+    }
+    _spotsSearchGen++; _poisSearchGen++;
+    _searchController.clear();
+    _shell.setMobileTab(i);
+    _shell.clearSpot();
+    _search.clearResults(setPointerEvents: _setMapPointerEvents);
+    setState(() {
+      _showSearchMarkerDetail = false;
+      _searchMarkerPos        = null;
+      _searchMarkerScreenPos  = null;
+    });
+    _mobileContentScroll.jumpTo(0);
+    if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
+  }
+
+  void _onDesktopTabTap(int i) {
+    if (i != 1) {
+      setState(() {
+        _sunnySpots = []; _sunnyPois = [];
+        _sunnySpotScreenPos = []; _poiScreenPos = [];
+      });
+      _clearSunnySpots();
+      _clearPoiMarkers();
+      _lastSearchCenter = null;
+      _lastSearchZoom   = null;
+    }
+    _spotsSearchGen++; _poisSearchGen++;
+    _shell.setMobileTab(i);
+    _shell.clearSpot();
+    _panelScroll.jumpTo(0);
+    if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
   }
 
   Widget _buildPanel() {
@@ -4275,134 +4243,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       Text('Everything is in shadow right now.',
           style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
     ]);
-  }
-
-  // =========================================================================
-  // Mobile bottom UI — separated from map (no overlap = no panning conflict)
-  // =========================================================================
-
-  Widget _buildMobileBottom({bool keyboardOpen = false}) {
-    final shell = context.watch<AppShellState>();
-    const tabs = [
-      (Icons.access_time,       'Time'),
-      (Icons.wb_sunny_outlined, 'Spots'),
-      (Icons.route,             'Tour'),
-      (Icons.favorite_outline,  'Saved'),
-    ];
-    return SafeArea(
-      top: false,
-      child: Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.18),
-              blurRadius: 16,
-              offset: const Offset(0, -4),
-            ),
-          ],
-        ),
-        child: Column(
-          children: [
-            if (!keyboardOpen) ...[
-              // Expand/collapse/hide handle
-              GestureDetector(
-                onTap: () => _shell.togglePanel(),
-                behavior: HitTestBehavior.opaque,
-                child: SizedBox(
-                  height: 24,
-                  child: Center(
-                    child: Container(
-                      width: 36, height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade300,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              // Content area — hidden when panel is slid away
-              if (!shell.panelHidden)
-                Expanded(
-                  child: ShaderMask(
-                    shaderCallback: (bounds) => LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.white, Colors.white, Colors.white.withValues(alpha: 0.0)],
-                      stops: const [0.0, 0.75, 1.0],
-                    ).createShader(bounds),
-                    blendMode: BlendMode.dstIn,
-                    child: SingleChildScrollView(
-                      controller: _mobileContentScroll,
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-                      child: _buildMobileTabContent(),
-                    ),
-                  ),
-                ),
-            ],
-            // Tab bar
-            Divider(height: 1, color: Colors.grey.shade200),
-            SizedBox(
-              height: 56,
-              child: Row(
-                children: tabs.asMap().entries.map((entry) {
-                  final i     = entry.key;
-                  final icon  = entry.value.$1;
-                  final label = entry.value.$2;
-                  final sel   = shell.mobileTab == i;
-                  return Expanded(
-                    child: GestureDetector(
-                      onTap: () {
-                        if (i != 1) {
-                          setState(() { _sunnySpots = []; _sunnyPois = []; _sunnySpotScreenPos = []; _poiScreenPos = []; });
-                          _clearSunnySpots();
-                          _clearPoiMarkers();
-                          _lastSearchCenter = null;
-                          _lastSearchZoom   = null;
-                        }
-                        _spotsSearchGen++; _poisSearchGen++;
-                        _searchController.clear();
-                        _shell.setMobileTab(i);
-                        _shell.clearSpot();
-                        _search.clearResults(setPointerEvents: _setMapPointerEvents);
-                        setState(() { _showSearchMarkerDetail = false; _searchMarkerPos = null; _searchMarkerScreenPos = null; });
-                        _mobileContentScroll.jumpTo(0);
-                        if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
-                      },
-                      behavior: HitTestBehavior.opaque,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: sel ? Colors.orange.withValues(alpha: 0.12) : Colors.transparent,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Icon(icon, size: 22,
-                                color: sel ? Colors.orange : Colors.grey.shade400),
-                          ),
-                          const SizedBox(height: 1),
-                          Text(label,
-                              style: TextStyle(
-                                fontSize: 10, fontWeight: FontWeight.w600,
-                                color: sel ? Colors.orange : Colors.grey.shade400,
-                              )),
-                        ],
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 
   Widget _buildSearchMarkerDetail() {
