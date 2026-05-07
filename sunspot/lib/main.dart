@@ -80,8 +80,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   double   _hour          = 12.0; // overridden in initState with correct Vienna time
   DateTime _selectedDate  = DateTime.now();
-  double   _elevation     = 0.0;
-  double   _azimuth       = 0.0;
   bool     _loading       = false;
   bool     _mapReady      = false;
   bool     _animating      = false;
@@ -116,7 +114,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   double? _sunsetHour;
 
   // Point info popup
-  LatLng?                _clickedPoint;
   bool                   _pointInfoLoading = false;
   Map<String, dynamic>?  _pointInfo;
   bool                   _ignoreNextMapClick = false;
@@ -174,8 +171,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   List<Map<String, dynamic>> _tourSpots       = [];
   bool                       _tourBuilding    = false;
   bool                       _tourLayerReady  = false;
-  double?                    _pendingTourLat;
-  double?                    _pendingTourLon;
 
   // Saved spots sunny status lives in SavedSpotsState
 
@@ -190,7 +185,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int _spotsSearchGen = 0; // incremented on tab-switch to cancel in-flight searches
   int _poisSearchGen  = 0;
   final ScrollController _mobileContentScroll = ScrollController();
-  double _screenHeight = 800.0;
 
   bool get _isMobile => _screenWidth < 650;
 
@@ -210,11 +204,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _hour = (now.hour + now.minute / 60.0).clamp(0.0, 23.0);
     _selectedDate = DateTime(now.year, now.month, now.day);
     _searchFocus.addListener(() { if (mounted) setState(() {}); });
-  }
-
-  String _azimuthDirection(double az) {
-    const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    return dirs[((az + 22.5) / 45).floor() % 8];
   }
 
   String get _formattedDate {
@@ -308,15 +297,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {}
   }
 
-  bool _tilesLoaded() {
-    try {
-      return js.context.callMethod('eval',
-          ['(window.__sunspot_tilesLoaded||function(){return true;})()']) as bool? ?? true;
-    } catch (_) {
-      return true;
-    }
-  }
-
   void _resetTileProgress() {
     try {
       js.context.callMethod('eval',
@@ -351,13 +331,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {}
   }
 
-  void _setMapCanvasInteractive(bool interactive) {
-    final pe = interactive ? '' : 'none';
-    html.document.querySelectorAll('.maplibregl-canvas-container').forEach((e) {
-      e.style.pointerEvents = pe;
-    });
-  }
-
   Future<void> _onStyleLoaded() async {
     _mapReady = true;
     _shadowLayersReady    = false;
@@ -387,8 +360,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       final dur = int.tryParse(params['tour_duration'] ?? '') ?? _tourDuration;
       _currentCenter  = LatLng(tLat, tLon);
       _tourDuration   = dur;
-      _pendingTourLat = tLat;
-      _pendingTourLon = tLon;
+
       // Dismiss splash before animating to the shared location
       if (mounted) _shell.hideSplash();
       await _mapController?.animateCamera(
@@ -477,7 +449,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // Point inspection only active on Saved tab
     if (_shell.mobileTab != 3) return;
     setState(() {
-      _clickedPoint      = coordinates;
       _pointInfo         = null;
       _pointInfoLoading  = true;
     });
@@ -886,34 +857,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _fetchWeather(double lat, double lon) =>
       _weather.fetch(_api, lat, lon);
 
-  Future<void> _setShadowLayersVisible(bool visible) async {
-    final ctrl = _mapController;
-    if (ctrl == null) return;
-    if (!visible) {
-      if (_shadowLayersReady) {
-        // Hide in-place: zero opacity keeps source+layers alive so re-show is instant
-        final n = _shadowSourceNonce;
-        try {
-          ctrl.setLayerProperties('shadow-macro-l0-fill-$n', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-macro-l1-fill-$n', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-macro-l2-fill-$n', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-macro-l0-line-$n', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-macro-l1-line-$n', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-macro-l2-line-$n', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l0-fill-$n', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l1-fill-$n', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l2-fill-$n', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l0-line-$n', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l1-line-$n', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0));
-          ctrl.setLayerProperties('shadow-micro-l2-line-$n', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0));
-        } catch (_) {}
-      }
-    } else {
-      // Re-enable: fetchShadows restores correct opacity from cache or re-fetches
-      fetchShadows();
-    }
-  }
-
   // -------------------------------------------------------------------------
   // Reverse geocoding (Nominatim)
   // -------------------------------------------------------------------------
@@ -1111,63 +1054,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  Widget _buildSunTimeline(int sunHoursLeft, int? sunUntil) {
-    const dayStart = 6;
-    const dayEnd   = 21;
-    final now      = _hour.toInt();
-    final untilH   = sunUntil ?? now;
-    final startH   = (untilH - sunHoursLeft).clamp(dayStart, dayEnd);
-
-    return LayoutBuilder(builder: (_, constraints) {
-      final total = (dayEnd - dayStart).toDouble();
-      final w     = constraints.maxWidth;
-
-      double frac(int h) => ((h - dayStart) / total).clamp(0.0, 1.0);
-
-      final sunLeft   = w * frac(startH);
-      final sunWidth  = (w * frac(untilH) - sunLeft).clamp(0.0, w - sunLeft);
-      final nowX      = w * frac(now);
-
-      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        SizedBox(
-          height: 18,
-          child: Stack(children: [
-            // Background track
-            Positioned.fill(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ),
-            ),
-            // Sunny window
-            Positioned(
-              left: sunLeft, width: sunWidth, top: 0, bottom: 0,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade300,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ),
-            ),
-            // Now marker
-            Positioned(
-              left: (nowX - 1).clamp(0.0, w - 2), width: 2, top: 0, bottom: 0,
-              child: Container(color: Colors.orange.shade800),
-            ),
-          ]),
-        ),
-        const SizedBox(height: 3),
-        // Hour labels
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          for (final h in [6, 9, 12, 15, 18, 21])
-            Text('$h', style: TextStyle(fontSize: 9, color: Colors.grey.shade400)),
-        ]),
-      ]);
-    });
-  }
-
   void _showPointSheet(LatLng coords) {
     final lat = coords.latitude;
     final lon = coords.longitude;
@@ -1348,7 +1234,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     ).whenComplete(() {
       _refreshPointSheet = null;
       _hidePin();
-      setState(() { _clickedPoint = null; _pointInfo = null; });
+      setState(() { _pointInfo = null; });
     });
   }
 
@@ -1386,34 +1272,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // Geolocation
   // -------------------------------------------------------------------------
 
-  Future<LatLng?> _getGpsPosition() async {
-    try {
-      final permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        final req = await Geolocator.requestPermission();
-        if (req == LocationPermission.denied ||
-            req == LocationPermission.deniedForever) {
-          _showError('GPS: permission denied');
-          return null;
-        }
-      }
-      // Try fast network/IP location first (works on desktop Chrome);
-      // fall back to last known position if available.
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.lowest,
-        ),
-      ).timeout(const Duration(seconds: 10));
-      return LatLng(pos.latitude, pos.longitude);
-    } on TimeoutException {
-      _showError('GPS: location timed out — try again');
-      return null;
-    } catch (e) {
-      _showError('GPS: ${e.toString().split('\n').first}');
-      return null;
-    }
-  }
-
   Future<void> _initGpsOnStart() async {
     // Silently attempt GPS with a 5 s timeout; fall back to Vienna with no toast.
     LatLng? newPos;
@@ -1433,9 +1291,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (!mounted) return;
 
     if (newPos != null) {
+      final pos = newPos;
       setState(() {
-        _gpsPosition   = newPos!;
-        _currentCenter = newPos!;
+        _gpsPosition   = pos;
+        _currentCenter = pos;
       });
       _fetchWeather(newPos.latitude, newPos.longitude);
       // Move camera instantly while splash still covers the map, so there is no
@@ -1728,9 +1587,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
       if (meta == null) throw Exception('shadow/meta returned null after retries');
 
-      final metaData = meta!;
+      final metaData = meta;
       final elev   = (metaData['elevation'] as num?)?.toDouble() ?? 0.0;
-      final azim   = (metaData['azimuth']   as num?)?.toDouble() ?? 0.0;
       final srHour = (metaData['sunrise']   as num?)?.toDouble();
       final ssHour = (metaData['sunset']    as num?)?.toDouble();
 
@@ -1745,8 +1603,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       if (mounted) {
         setState(() {
-          _elevation   = elev;
-          _azimuth     = azim;
           _sunriseHour = srHour;
           _sunsetHour  = ssHour;
           if (srHour != null && ssHour != null) {
@@ -1819,27 +1675,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String _buildShadowTileUrl(int hour, int minute, int month, int day) =>
       '$flaskBaseUrl/shadow/tile/{z}/{x}/{y}.pbf'
       '?hour=$hour&minute=$minute&month=$month&day=$day';
-
-  // Zero out shadow layer opacities without removing them (preserves source).
-  Future<void> _hideShadowLayers() async {
-    if (!_shadowLayersReady || _mapController == null) return;
-    final mc = _mapController!;
-    final n = _shadowSourceNonce;
-    try {
-      mc.setLayerProperties('shadow-macro-l0-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-macro-l1-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-macro-l2-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-macro-l0-line-$n', LineLayerProperties(lineOpacity: 0.0));
-      mc.setLayerProperties('shadow-macro-l1-line-$n', LineLayerProperties(lineOpacity: 0.0));
-      mc.setLayerProperties('shadow-macro-l2-line-$n', LineLayerProperties(lineOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l0-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l1-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l2-fill-$n', FillLayerProperties(fillOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l0-line-$n', LineLayerProperties(lineOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l1-line-$n', LineLayerProperties(lineOpacity: 0.0));
-      mc.setLayerProperties('shadow-micro-l2-line-$n', LineLayerProperties(lineOpacity: 0.0));
-    } catch (_) {}
-  }
 
   // Create or refresh two vector tile sources + 12 shadow layers for smooth z14→z15 cross-fade.
   //
@@ -2443,7 +2278,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   @override
   Widget build(BuildContext context) {
     _screenWidth  = MediaQuery.of(context).size.width;
-    _screenHeight = MediaQuery.of(context).size.height;
     final isMobile = _isMobile;
     const panelRightPad = 0;
     final keyboardOpen = isMobile && MediaQuery.of(context).viewInsets.bottom > 0;
@@ -2811,7 +2645,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: BoxDecoration(color: Colors.red.shade700, borderRadius: BorderRadius.circular(8)),
-              child: Text(errorMsg!, style: const TextStyle(color: Colors.white, fontSize: 13)),
+              child: Text(errorMsg, style: const TextStyle(color: Colors.white, fontSize: 13)),
             ),
           ),
 
@@ -3075,50 +2909,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (i == 3) _saved.refreshSunnyStatus(_api, _selectedDate, _hour);
   }
 
-  Widget _buildPanel() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.95),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 12,
-            offset: const Offset(-4, 0),
-          ),
-        ],
-      ),
-      child: SafeArea(
-        child: SingleChildScrollView(
-          controller: _panelScroll,
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildTimeHeader(),
-              _buildTimeSlider(),
-              const SizedBox(height: 16),
-              _buildDateSection(),
-              const Divider(height: 28),
-              _buildFindSunnySpotsSection(),
-              const Divider(height: 28),
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Row(
-                  children: [
-                    Icon(Icons.touch_app_outlined, size: 15, color: Colors.grey.shade400),
-                    const SizedBox(width: 6),
-                    Text('Tap the map to inspect a point',
-                        style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   // ---- Time header ----
   Widget _buildTimeHeader() {
     return Row(
@@ -3310,8 +3100,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
   // Sunny Tour
   // -------------------------------------------------------------------------
-
-  static const double _walkMsPerMeter = 60.0 / 80.0; // ~80 m/min walking speed
 
   List<Map<String, dynamic>> _orderByNearestNeighbor(
       List<Map<String, dynamic>> spots, LatLng start) {
@@ -3637,21 +3425,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  Widget _legendDot(Color color, String label) {
-    return Row(mainAxisSize: MainAxisSize.min, children: [
-      Container(
-        width: 8, height: 8,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.black.withValues(alpha: 0.15), width: 0.5),
-        ),
-      ),
-      const SizedBox(width: 5),
-      Text(label, style: const TextStyle(fontSize: 10, color: Colors.black87)),
-    ]);
-  }
-
   Widget _tourStat(IconData icon, String label) {
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(icon, size: 13, color: Colors.grey.shade500),
@@ -3659,113 +3432,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       Text(label, style: TextStyle(fontSize: 12,
           fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
     ]);
-  }
-
-  // ---- Point info popup ----
-  Widget _buildPointInfoCard() {
-    final info = _pointInfo;
-    final inShadow = info == null ? true : (info['in_shadow'] as bool? ?? true);
-    final sunCount = info == null ? 0 : (info['sun_hours_count'] as int? ?? 0);
-    final periods  = info == null ? <dynamic>[] : (info['sun_periods'] as List<dynamic>? ?? []);
-
-    String fmt(int h) => '${h.toString().padLeft(2, '0')}:00';
-
-    final statusColor = inShadow ? const Color(0xFF2d4862) : const Color(0xFFFF8C00);
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-          // Header row — same style as other section headers
-          Row(
-            children: [
-              Icon(
-                inShadow ? Icons.nights_stay_outlined : Icons.wb_sunny,
-                color: statusColor, size: 16,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                _pointInfoLoading
-                    ? 'Checking…'
-                    : inShadow ? 'In Shadow' : 'In Sun',
-                style: TextStyle(
-                  fontSize: 11, fontWeight: FontWeight.w700,
-                  color: statusColor, letterSpacing: 0.5,
-                ),
-              ),
-              const Spacer(),
-              MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  onTap: () {
-                    _ignoreNextMapClick = true;
-                    _hidePin();
-                    setState(() {
-                      _clickedPoint = null;
-                      _pointInfo    = null;
-                    });
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Icon(Icons.close, size: 22, color: Colors.grey.shade500),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          if (_pointInfoLoading)
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(vertical: 4),
-                child: SizedBox(width: 18, height: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange)),
-              ),
-            )
-          else ...[
-            Row(
-              children: [
-                const Icon(Icons.wb_sunny_outlined, size: 14, color: Colors.orange),
-                const SizedBox(width: 6),
-                Text(
-                  sunCount == 0
-                      ? 'No direct sun today'
-                      : '$sunCount hour${sunCount == 1 ? '' : 's'} of direct sun today',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                ),
-              ],
-            ),
-            if (periods.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 6, runSpacing: 4,
-                children: periods.map((p) {
-                  final from = p['from'] as int;
-                  final to   = p['to']   as int;
-                  return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.shade200),
-                    ),
-                    child: Text(
-                      '${fmt(from)} – ${fmt(to)}',
-                      style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ],
-            const SizedBox(height: 6),
-            Text(
-              '${_clickedPoint!.latitude.toStringAsFixed(5)}°, '
-              '${_clickedPoint!.longitude.toStringAsFixed(5)}°',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
-            ),
-          ],
-        ],
-      );
   }
 
   // ---- Haversine distance helper ----
@@ -3793,21 +3459,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (amenity.contains('bar') || amenity.contains('pub') || amenity.contains('beer')) return Icons.sports_bar;
     if (amenity.contains('restaurant') || amenity.contains('fast_food')) return Icons.restaurant;
     return Icons.place;
-  }
-
-  // Human-readable type name used as display name fallback when OSM name is absent
-  String _poiTypeLabel(String amenity) {
-    if (amenity.contains('cafe'))        return '☕ Café';
-    if (amenity.contains('beer_garden')) return '🌿 Beer Garden';
-    if (amenity.contains('playground'))  return '🛝 Playground';
-    if (amenity.contains('park'))        return '🌳 Park';
-    if (amenity.contains('garden'))      return '🌳 Garden';
-    if (amenity.contains('square') || amenity.contains('pedestrian')) return '⛲ Square';
-    if (amenity.contains('square') || amenity.contains('pedestrian')) return '🏛️ Square';
-    if (amenity.contains('bar') || amenity.contains('pub')) return '🍺 Bar';
-    if (amenity.contains('restaurant'))  return '🍽️ Restaurant';
-    if (amenity.contains('fast_food'))   return '🍔 Food';
-    return '☀️ Spot';
   }
 
   String _poiLabel(String amenity) {
@@ -4157,82 +3808,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     );
   }
 
-  // ---- Sun position ----
-  Widget _buildSunPosition() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text('SUN POSITION',
-            style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w700,
-                color: Colors.grey, letterSpacing: 1.2)),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(child: _sunCard(
-            label: 'ELEVATION',
-            icon: Icons.trending_up,
-            value: '${_elevation.toStringAsFixed(1)}°',
-          )),
-          const SizedBox(width: 8),
-          Expanded(child: _buildSunRadar()),
-        ]),
-      ],
-    );
-  }
-
-  Widget _sunCard({required String label, required IconData icon, required String value}) {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Icon(icon, size: 12, color: Colors.grey),
-            const SizedBox(width: 4),
-            Text(label,
-                style: const TextStyle(
-                    fontSize: 10, color: Colors.grey,
-                    fontWeight: FontWeight.w600, letterSpacing: 0.8)),
-          ]),
-          const SizedBox(height: 4),
-          Text(value,
-              style: const TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.bold)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSunRadar() {
-    return Container(
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.grey.shade100,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          Icon(Icons.explore_outlined, size: 12, color: Colors.grey),
-          const SizedBox(width: 4),
-          const Text('DIRECTION', style: TextStyle(
-              fontSize: 10, color: Colors.grey,
-              fontWeight: FontWeight.w600, letterSpacing: 0.8)),
-        ]),
-        const SizedBox(height: 6),
-        SizedBox(
-          height: 44, width: double.infinity,
-          child: CustomPaint(
-            painter: _SunRadarPainter(azimuth: _azimuth, elevation: _elevation),
-          ),
-        ),
-      ]),
-    );
-  }
-
   Widget _buildNoResultsMessage() {
     return Column(children: [
       Icon(Icons.wb_cloudy_outlined, size: 32, color: Colors.grey.shade300),
@@ -4518,71 +4093,4 @@ class _VignettePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {}
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-// Sun direction radar — replaces the "Azimuth 184° NNW" text card.
-// Shows a compass circle with the sun icon positioned by azimuth+elevation.
-class _SunRadarPainter extends CustomPainter {
-  final double azimuth;   // 0=N, 90=E, 180=S, 270=W
-  final double elevation; // 0=horizon, 90=zenith
-
-  const _SunRadarPainter({required this.azimuth, required this.elevation});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final cx = size.width / 2;
-    final cy = size.height / 2;
-    final r  = min(cx, cy) - 3;
-
-    // Compass circle
-    canvas.drawCircle(Offset(cx, cy), r,
-        Paint()..color = const Color(0xFFDDDDDD)..style = PaintingStyle.stroke..strokeWidth = 1.0);
-
-    // Cardinal tick marks
-    final tickPaint = Paint()..color = const Color(0xFFBBBBBB)..strokeWidth = 1.0;
-    for (int i = 0; i < 8; i++) {
-      final a = i * pi / 4;
-      final inner = r - 4;
-      canvas.drawLine(
-        Offset(cx + inner * sin(a), cy - inner * cos(a)),
-        Offset(cx + r * sin(a),     cy - r * cos(a)),
-        tickPaint,
-      );
-    }
-
-    // N label
-    final nPainter = TextPainter(
-      text: const TextSpan(text: 'N', style: TextStyle(fontSize: 8, color: Color(0xFF999999), fontWeight: FontWeight.w600)),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    nPainter.paint(canvas, Offset(cx - nPainter.width / 2, cy - r - nPainter.height - 1));
-
-    if (elevation <= 0) {
-      // Night — draw moon icon position
-      final moonPaint = Paint()..color = const Color(0xFF9E9E9E);
-      canvas.drawCircle(Offset(cx, cy), 4, moonPaint);
-      return;
-    }
-
-    // Sun position: high elevation → near center, horizon → near edge
-    final t      = (elevation.clamp(0.0, 90.0) / 90.0);
-    final dist   = r * (1.0 - t * 0.75);
-    final azRad  = azimuth * pi / 180.0;
-    final sx     = cx + dist * sin(azRad);
-    final sy     = cy - dist * cos(azRad);
-
-    // Glow
-    canvas.drawCircle(Offset(sx, sy), 8,
-        Paint()..color = Colors.orange.withValues(alpha: 0.18));
-    // Sun dot
-    canvas.drawCircle(Offset(sx, sy), 5,
-        Paint()..color = Colors.orange.shade400);
-    // Bright centre
-    canvas.drawCircle(Offset(sx, sy), 2,
-        Paint()..color = Colors.white);
-  }
-
-  @override
-  bool shouldRepaint(_SunRadarPainter old) =>
-      old.azimuth != azimuth || old.elevation != elevation;
 }
