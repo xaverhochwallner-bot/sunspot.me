@@ -11,6 +11,7 @@ try:
 except ImportError:
     _OSMIUM_AVAILABLE = False
 import pickle
+import logging
 import pytz
 import math
 import os
@@ -84,7 +85,15 @@ def _is_open_at(oh_str: str, dt) -> bool | None:
     return None if not matched_day else False
 
 app = Flask(__name__)
-CORS(app)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+_log = logging.getLogger(__name__)
+
+_ALLOWED_ORIGINS = [
+    "https://sunspot.pages.dev",
+    re.compile(r"http://localhost(:\d+)?$"),
+    re.compile(r"http://127\.0\.0\.1(:\d+)?$"),
+]
+CORS(app, origins=_ALLOWED_ORIGINS)
 
 # Path to the local OSM PBF file — place it next to main.py
 PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
@@ -1361,7 +1370,6 @@ def shadow_tile(z, x, y):
         def _pbf_resp(data):
             resp = Response(data, status=200, mimetype="application/x-protobuf")
             resp.headers['Cache-Control'] = 'public, max-age=3600'
-            resp.headers['Access-Control-Allow-Origin'] = '*'
             return resp
 
         with _cache_lock:
@@ -1400,9 +1408,8 @@ def shadow_tile(z, x, y):
                 _tile_in_flight.pop(tck, None)
             evt.set()
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        _log.exception("shadow_tile z=%s x=%s y=%s", z, x, y)
         return Response(b'', status=500)
 
 # ---------------------------------------------------------------------------
@@ -1627,10 +1634,16 @@ MIN_POI_SEPARATION = 0.0009  # ~100 m in degrees
 @app.route("/sunny_pois")
 def sunny_pois():
     try:
-        center_lat = float(request.args['lat'])
-        center_lon = float(request.args['lon'])
+        center_lat = request.args.get('lat', type=float)
+        center_lon = request.args.get('lon', type=float)
+        if center_lat is None or center_lon is None:
+            return jsonify({'error': 'lat and lon are required'}), 400
+        if not (-90.0 <= center_lat <= 90.0) or not (-180.0 <= center_lon <= 180.0):
+            return jsonify({'error': 'lat/lon out of range'}), 400
         hour       = int(request.args.get('hour', 12))
         minute     = int(request.args.get('minute', 0))
+        if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return jsonify({'error': 'hour must be 0-23, minute 0-59'}), 400
         date_str   = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
         _ALLOWED_POI_TYPES = {'cafe', 'bar', 'restaurant', 'park', 'playground', 'square', 'terrace'}
         raw_types  = request.args.get('types', 'cafe,bar,restaurant').split(',')
@@ -1644,8 +1657,11 @@ def sunny_pois():
         if zoom < 13:
             return jsonify({'spots': [], 'reason': 'zoom_in'})
 
-        tz        = pytz.timezone('Europe/Vienna')
-        date      = datetime.strptime(date_str, '%Y-%m-%d').date()
+        tz = pytz.timezone('Europe/Vienna')
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': 'Invalid date. Use YYYY-MM-DD'}), 400
         _today    = datetime.now(tz).date()
         if not (_today - timedelta(days=365) <= date <= _today + timedelta(days=365)):
             return jsonify({'error': 'date out of range'}), 400
@@ -1810,31 +1826,52 @@ def sunny_pois():
 @app.route("/is_sunny")
 def is_sunny():
     try:
-        lat      = float(request.args['lat'])
-        lon      = float(request.args['lon'])
+        lat = request.args.get('lat', type=float)
+        lon = request.args.get('lon', type=float)
+        if lat is None or lon is None:
+            return jsonify({'error': 'lat and lon are required'}), 400
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return jsonify({'error': 'lat/lon out of range'}), 400
         date_str = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
         hour     = int(request.args.get('hour', datetime.now().hour))
         minute   = int(request.args.get('minute', datetime.now().minute))
+        if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return jsonify({'error': 'hour must be 0-23, minute 0-59'}), 400
         tz       = pytz.timezone('Europe/Vienna')
-        date     = datetime.strptime(date_str, '%Y-%m-%d').date()
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': 'Invalid date. Use YYYY-MM-DD'}), 400
         t        = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
         elevation, azimuth = get_sun_angles(lat, lon, t)
         in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
         return jsonify({'sunny': bool(elevation > 0 and not in_shadow)})
     except Exception as e:
-        return jsonify({'error': str(e)}), 400
+        _log.exception("is_sunny error")
+        return jsonify({'error': 'internal server error'}), 500
 
 
 @app.route("/point_info")
 def point_info():
     try:
-        lat      = float(request.args['lat'])
-        lon      = float(request.args['lon'])
-        date_str = request.args['date']   # YYYY-MM-DD
+        lat = request.args.get('lat', type=float)
+        lon = request.args.get('lon', type=float)
+        if lat is None or lon is None:
+            return jsonify({'error': 'lat and lon are required'}), 400
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return jsonify({'error': 'lat/lon out of range'}), 400
+        date_str = request.args.get('date')
+        if not date_str:
+            return jsonify({'error': 'date is required (YYYY-MM-DD)'}), 400
         hour     = int(request.args.get('hour', 12))
         minute   = int(request.args.get('minute', 0))
+        if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+            return jsonify({'error': 'hour must be 0-23, minute 0-59'}), 400
 
-        date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        try:
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'error': 'Invalid date. Use YYYY-MM-DD'}), 400
         tz   = pytz.timezone('Europe/Vienna')
 
         # Check shadow at requested hour+minute
@@ -2127,9 +2164,9 @@ def find_sunny_spots():
 
         return jsonify({"spots": spots})
 
-    except Exception as e:
-        import traceback; traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        _log.exception("sunny_pois error")
+        return jsonify({"error": "internal server error"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -2150,6 +2187,14 @@ def heatmap():
         zoom    = min(int(request.args.get('zoom', 12)), 12)
     except (KeyError, ValueError) as e:
         return jsonify({'error': str(e)}), 400
+    if not (-90.0 <= min_lat <= 90.0) or not (-90.0 <= max_lat <= 90.0):
+        return jsonify({'error': 'lat out of range [-90, 90]'}), 400
+    if not (-180.0 <= min_lon <= 180.0) or not (-180.0 <= max_lon <= 180.0):
+        return jsonify({'error': 'lon out of range [-180, 180]'}), 400
+    if not (1 <= month <= 12) or not (1 <= day <= 31):
+        return jsonify({'error': 'month must be 1-12, day 1-31'}), 400
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        return jsonify({'error': 'hour must be 0-23, minute 0-59'}), 400
 
     center_lat = (min_lat + max_lat) / 2
     center_lon = (min_lon + max_lon) / 2
