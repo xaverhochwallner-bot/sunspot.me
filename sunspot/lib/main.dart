@@ -8,6 +8,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:pointer_interceptor/pointer_interceptor.dart';
 import 'package:provider/provider.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 import 'services/api_client.dart';
 import 'state/app_shell_state.dart';
 import 'state/saved_spots_state.dart';
@@ -18,8 +19,16 @@ import 'widgets/desktop_sidebar.dart';
 import 'widgets/mobile_bottom_sheet.dart';
 import 'widgets/weather_widget.dart';
 
-void main() {
-  runApp(const MyApp());
+void main() async {
+  const sentryDsn = String.fromEnvironment('SENTRY_DSN', defaultValue: '');
+  await SentryFlutter.init(
+    (options) {
+      options.dsn = sentryDsn;
+      options.tracesSampleRate = 0.1;
+      options.environment = const String.fromEnvironment('FLUTTER_ENV', defaultValue: 'production');
+    },
+    appRunner: () => runApp(const MyApp()),
+  );
 }
 
 class MyApp extends StatelessWidget {

@@ -27,6 +27,12 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import pysolar.solar as ps
 import mercantile
+try:
+    import sentry_sdk
+    from sentry_sdk.integrations.flask import FlaskIntegration
+    _SENTRY_AVAILABLE = True
+except ImportError:
+    _SENTRY_AVAILABLE = False
 import mapbox_vector_tile
 
 # ---------------------------------------------------------------------------
@@ -94,6 +100,16 @@ _ALLOWED_ORIGINS = [
     re.compile(r"http://127\.0\.0\.1(:\d+)?$"),
 ]
 CORS(app, origins=_ALLOWED_ORIGINS)
+
+_SENTRY_DSN = os.getenv('SENTRY_DSN', '')
+if _SENTRY_AVAILABLE and _SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=_SENTRY_DSN,
+        integrations=[FlaskIntegration()],
+        traces_sample_rate=0.05,
+        environment=os.getenv('FLASK_ENV', 'production'),
+    )
+    _log.info("Sentry enabled (env=%s)", os.getenv('FLASK_ENV', 'production'))
 
 # Path to the local OSM PBF file — place it next to main.py
 PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
@@ -1410,6 +1426,8 @@ def shadow_tile(z, x, y):
 
     except Exception:
         _log.exception("shadow_tile z=%s x=%s y=%s", z, x, y)
+        if _SENTRY_AVAILABLE and _SENTRY_DSN:
+            sentry_sdk.capture_exception()
         return Response(b'', status=500)
 
 # ---------------------------------------------------------------------------
@@ -2166,6 +2184,8 @@ def find_sunny_spots():
 
     except Exception:
         _log.exception("sunny_pois error")
+        if _SENTRY_AVAILABLE and _SENTRY_DSN:
+            sentry_sdk.capture_exception()
         return jsonify({"error": "internal server error"}), 500
 
 
