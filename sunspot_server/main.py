@@ -106,7 +106,7 @@ if _SENTRY_AVAILABLE and _SENTRY_DSN:
     sentry_sdk.init(
         dsn=_SENTRY_DSN,
         integrations=[FlaskIntegration()],
-        traces_sample_rate=0.05,
+        traces_sample_rate=1.0,
         environment=os.getenv('FLASK_ENV', 'production'),
     )
     print(f"[sentry] enabled (env={os.getenv('FLASK_ENV', 'production')})", flush=True)
@@ -428,7 +428,8 @@ class BuildingHandler(_OsmiumBase):
             if not poly.is_valid:
                 poly = poly.buffer(0)
             return poly if (poly.is_valid and not poly.is_empty) else None
-        except Exception:
+        except Exception as e:
+            _log.debug("_make_area_poly failed: %s", e)
             return None
 
     def way(self, w):
@@ -479,8 +480,8 @@ class BuildingHandler(_OsmiumBase):
             else:
                 self.main_polys.append(poly)
                 self.main_heights.append(_parse_height(w.tags))
-        except Exception:
-            pass
+        except Exception as e:
+            _log.debug("BuildingHandler.way skipped (id=%s): %s", getattr(w, 'id', '?'), e)
 
 
 class AmenityHandler(_OsmiumBase):
@@ -1722,8 +1723,8 @@ def sunny_pois():
                 try:
                     candidates += [p for p in _fetch_pois_overpass(center_lat, center_lon, list(city_types))
                                    if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log.warning("Overpass fallback failed: %s", e)
         elif city_types:
             cache_key = (round(center_lat, 3), round(center_lon, 3), tuple(sorted(city_types)))
             with _poi_cache_lock:
@@ -1774,8 +1775,8 @@ def sunny_pois():
             for geom in cached_geoms:
                 try:
                     return not geom.contains(pt)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log.debug("cached geom.contains failed: %s", e)
             # Slow path: compute directly
             return elevation > 0 and not _point_in_shadow(plon, plat, elevation, azimuth)
 
@@ -2243,6 +2244,15 @@ def heatmap():
     ]
     return jsonify({'type': 'FeatureCollection', 'features': features})
 
+
+# ---------------------------------------------------------------------------
+# Sentry verification endpoint — remove after confirming events arrive
+# ---------------------------------------------------------------------------
+@app.route("/sentry-test")
+def sentry_test():
+    if not _SENTRY_DSN:
+        return jsonify({'error': 'Sentry not configured'}), 503
+    raise RuntimeError("Sentry test — delete this route after verification")
 
 # ---------------------------------------------------------------------------
 # Start
