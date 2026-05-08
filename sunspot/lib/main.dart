@@ -480,6 +480,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {
       if (mounted) {
         setState(() => _pointInfoLoading = false);
+        _showError('Could not load spot info');
         _refreshPointSheet?.call();
       }
     }
@@ -629,12 +630,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Merge all, sort by sun hours desc, cap at 8
       final merged = [...gridSpots, ...parks, ...squares];
       final zoomIn = merged.isEmpty && gridReason == 'zoom_in';
-      setState(() => _spotsZoomHint = zoomIn);
       merged.sort((a, b) => ((b['sun_hours_left'] as int?) ?? 0)
           .compareTo((a['sun_hours_left'] as int?) ?? 0));
       final allSpots = merged.take(8).toList();
-
-      setState(() { _sunnySpots = allSpots; _spotsNoResults = allSpots.isEmpty && !zoomIn; });
+      setState(() {
+        _spotsZoomHint = zoomIn;
+        _sunnySpots = allSpots;
+        _spotsNoResults = allSpots.isEmpty && !zoomIn;
+      });
       _geocodeSpots(allSpots);
       await _showSunnySpotMarkers(allSpots);
       await _refreshSunnySpotPositions();

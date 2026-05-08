@@ -125,19 +125,17 @@ class ApiClient {
   // ---------------------------------------------------------------------------
 
   Future<Map<String, dynamic>?> fetchWeather(double lat, double lon) async {
-    try {
-      final uri = Uri.parse(
-        'https://api.open-meteo.com/v1/forecast'
-        '?latitude=$lat&longitude=$lon'
-        '&current=temperature_2m,weather_code,uv_index,cloud_cover'
-        '&timezone=auto',
-      );
-      final res = await http.get(uri);
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body) as Map<String, dynamic>;
-        return data['current'] as Map<String, dynamic>?;
-      }
-    } catch (_) {}
+    final uri = Uri.parse(
+      'https://api.open-meteo.com/v1/forecast'
+      '?latitude=$lat&longitude=$lon'
+      '&current=temperature_2m,weather_code,uv_index,cloud_cover'
+      '&timezone=auto',
+    );
+    final res = await http.get(uri).timeout(const Duration(seconds: 10));
+    if (res.statusCode == 200) {
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      return data['current'] as Map<String, dynamic>?;
+    }
     return null;
   }
 

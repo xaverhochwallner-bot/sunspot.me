@@ -8,9 +8,32 @@ class WeatherWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final data = context.watch<WeatherState>().data;
-    if (data == null) return const SizedBox.shrink();
+    final weather = context.watch<WeatherState>();
 
+    if (weather.data == null) {
+      if (!weather.hasError) return const SizedBox.shrink();
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [BoxShadow(
+              color: Colors.black.withValues(alpha: 0.12),
+              blurRadius: 8, offset: const Offset(0, 2))],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.cloud_off, size: 14, color: Colors.grey.shade500),
+            const SizedBox(width: 5),
+            Text('Weather unavailable',
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+          ],
+        ),
+      );
+    }
+
+    final data  = weather.data!;
     final temp  = (data['temperature_2m'] as num?)?.round() ?? 0;
     final code  = (data['weather_code']   as num?)?.toInt() ?? 0;
     final uv    = (data['uv_index']       as num?) ?? 0;
