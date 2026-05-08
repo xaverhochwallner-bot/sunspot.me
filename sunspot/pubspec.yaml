@@ -23,6 +23,7 @@ dependencies:
   sentry_flutter: ^8.0.0
 
 dev_dependencies:
+  sentry_dart_plugin: ^3.3.0
   flutter_test:
     sdk: flutter
   flutter_lints: ^5.0.0
@@ -33,3 +34,8 @@ flutter:
     - assets/
 
     
+sentry:
+  upload_debug_symbols: true
+  upload_source_maps: true
+  project: flutter
+  org: sun-spotme
