@@ -13,6 +13,7 @@ def post_fork(server, worker):
     try:
         import sentry_sdk
         from sentry_sdk.integrations.flask import FlaskIntegration
+        sentry_sdk.get_client().close()  # kill broken transport from master
         sentry_sdk.init(
             dsn=dsn,
             integrations=[FlaskIntegration()],

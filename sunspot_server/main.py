@@ -2252,7 +2252,12 @@ def heatmap():
 def sentry_test():
     if not _SENTRY_DSN:
         return jsonify({'error': 'Sentry not configured'}), 503
-    raise RuntimeError("Sentry test — delete this route after verification")
+    try:
+        raise RuntimeError("Sentry test — explicit capture")
+    except Exception as e:
+        sentry_sdk.capture_exception(e)
+        flushed = sentry_sdk.flush(timeout=5)
+        return jsonify({'captured': True, 'flushed': bool(flushed)}), 200
 
 # ---------------------------------------------------------------------------
 # Start
