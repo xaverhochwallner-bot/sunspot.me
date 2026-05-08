@@ -108,8 +108,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String?             _currentTileUrl;
   int                 _shadowSourceNonce = 0;  // bumped per time-change rebuild; used for both macro + micro source IDs
   int                 _prevNonce         = -1; // nonce of ghost layers kept dimmed while new tiles load; cleaned up after idle
-  int                 _dimmedGhostNonce  = -1; // second ghost kept at 0-opacity during animation idle-timeout fallback
   int                 _preloadGen        = 0;  // incremented each preload run; stale .then() callbacks check this
+
+  // Double-buffer animation state
+  bool             _animLayersCreated = false;
+  int              _animActiveBuf    = 0; // 0 = buffer-A is displayed, 1 = buffer-B is displayed
+  int              _animHourA        = -1;
+  int              _animHourB        = -1;
+  Map<int, double> _animElevations   = {}; // hour → sun elevation, preloaded before animation
 
   // Panel (state lives in AppShellState)
 
@@ -346,7 +352,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _currentTileUrl       = null;
     _shadowSourceNonce    = 0;
     _prevNonce            = -1;
-    _dimmedGhostNonce     = -1;
     _preloading24h        = false;
     _animating            = false;
     _preloadGen++;
@@ -1747,59 +1752,35 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
 
     // Time changed (new URL) — keep existing layers as ghost while new tiles load.
-    // Animation: ghost stays at full opacity (tiles load from preload cache in ~50ms, _run24hStep cleans up).
-    // Manual swap: ghost is dimmed so it doesn't mislead while new tiles may take seconds to arrive.
+    // Ghost is dimmed so it doesn't mislead while new tiles may take seconds to arrive.
     if (_shadowLayersReady) {
       final mc = ctrl;
-      // If a previous ghost is still pending cleanup from a timed-out animation step:
-      // during animation, dim it to invisible and park in _dimmedGhostNonce so _run24hStep()
-      // can clean it up after the next idle event. Outside animation, remove it immediately.
       if (_prevNonce >= 0) {
         final old = _prevNonce;
         _prevNonce = -1;
-        if (_animating) {
-          _dimmedGhostNonce = old;
-          try {
-            ctrl.setLayerProperties('shadow-macro-l0-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-macro-l1-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-macro-l2-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-macro-l0-line-$old', LineLayerProperties(lineOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-macro-l1-line-$old', LineLayerProperties(lineOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-macro-l2-line-$old', LineLayerProperties(lineOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l0-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l1-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l2-fill-$old', FillLayerProperties(fillOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l0-line-$old', LineLayerProperties(lineOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l1-line-$old', LineLayerProperties(lineOpacity: 0.0));
-            ctrl.setLayerProperties('shadow-micro-l2-line-$old', LineLayerProperties(lineOpacity: 0.0));
-          } catch (_) {}
-        } else {
-          for (final id in _shadowGhostLayerIds(old)) {
-            try { await ctrl.removeLayer(id); } catch (_) {}
-          }
-          try { await ctrl.removeSource('shadow-macro-$old'); } catch (_) {}
-          try { await ctrl.removeSource('shadow-micro-$old'); } catch (_) {}
+        for (final id in _shadowGhostLayerIds(old)) {
+          try { await ctrl.removeLayer(id); } catch (_) {}
         }
+        try { await ctrl.removeSource('shadow-macro-$old'); } catch (_) {}
+        try { await ctrl.removeSource('shadow-micro-$old'); } catch (_) {}
       }
       _prevNonce = _shadowSourceNonce;
       final g = _prevNonce;
-      if (!_animating) {
-        // Dim ghost layers for manual tile swap — they should not dominate while new tiles load.
-        try {
-          mc.setLayerProperties('shadow-macro-l0-fill-$g', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.15));
-          mc.setLayerProperties('shadow-macro-l1-fill-$g', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.10));
-          mc.setLayerProperties('shadow-macro-l2-fill-$g', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.08));
-          mc.setLayerProperties('shadow-macro-l0-line-$g', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.09));
-          mc.setLayerProperties('shadow-macro-l1-line-$g', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.06));
-          mc.setLayerProperties('shadow-macro-l2-line-$g', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.05));
-          mc.setLayerProperties('shadow-micro-l0-fill-$g', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.12));
-          mc.setLayerProperties('shadow-micro-l1-fill-$g', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.08));
-          mc.setLayerProperties('shadow-micro-l2-fill-$g', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.06));
-          mc.setLayerProperties('shadow-micro-l0-line-$g', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.07));
-          mc.setLayerProperties('shadow-micro-l1-line-$g', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.05));
-          mc.setLayerProperties('shadow-micro-l2-line-$g', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.04));
-        } catch (_) {}
-      }
+      // Dim ghost layers — they should not dominate while new tiles load.
+      try {
+        mc.setLayerProperties('shadow-macro-l0-fill-$g', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.15));
+        mc.setLayerProperties('shadow-macro-l1-fill-$g', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.10));
+        mc.setLayerProperties('shadow-macro-l2-fill-$g', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.08));
+        mc.setLayerProperties('shadow-macro-l0-line-$g', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.09));
+        mc.setLayerProperties('shadow-macro-l1-line-$g', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.06));
+        mc.setLayerProperties('shadow-macro-l2-line-$g', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.05));
+        mc.setLayerProperties('shadow-micro-l0-fill-$g', FillLayerProperties(fillColor: '#455A64', fillOpacity: 0.12));
+        mc.setLayerProperties('shadow-micro-l1-fill-$g', FillLayerProperties(fillColor: '#37474F', fillOpacity: 0.08));
+        mc.setLayerProperties('shadow-micro-l2-fill-$g', FillLayerProperties(fillColor: '#263238', fillOpacity: 0.06));
+        mc.setLayerProperties('shadow-micro-l0-line-$g', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.07));
+        mc.setLayerProperties('shadow-micro-l1-line-$g', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.05));
+        mc.setLayerProperties('shadow-micro-l2-line-$g', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.04));
+      } catch (_) {}
       // Ghost layers stay on the map — do NOT removeLayer/removeSource here.
       _shadowLayersReady = false;
     }
@@ -1823,69 +1804,55 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     final n = _shadowSourceNonce;
 
-    // Macro layers: start at 0 opacity so we can fade them in after tiles arrive (non-animation path).
-    // During animation tiles come from warm cache immediately, so we use full opacity to avoid blank frames.
-    final initMacroL0 = _animating ? macroOp(opL0) : 0.0;
-    final initMacroL1 = _animating ? macroOp(opL1) : 0.0;
-    final initMacroL2 = _animating ? macroOp(opL2) : 0.0;
-    final initMacroLineL0 = _animating ? macroLineOp(opL0) : 0.0;
-    final initMacroLineL1 = _animating ? macroLineOp(opL1) : 0.0;
-    final initMacroLineL2 = _animating ? macroLineOp(opL2) : 0.0;
-    final initMicroL0 = _animating ? microOp(opL0) : 0.0;
-    final initMicroL1 = _animating ? microOp(opL1) : 0.0;
-    final initMicroL2 = _animating ? microOp(opL2) : 0.0;
-    final initMicroLineL0 = _animating ? microLineOp(opL0) : 0.0;
-    final initMicroLineL1 = _animating ? microLineOp(opL1) : 0.0;
-    final initMicroLineL2 = _animating ? microLineOp(opL2) : 0.0;
-
+    // All layers start at 0 opacity; _fadeShadowLayersIn ramps them up after tiles render.
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: initMacroL0),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: initMacroLineL0),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: initMacroL1),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: initMacroLineL1),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: initMacroL2),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: initMacroLineL2),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
 
     // Micro layers: invisible at z14, fade in to per-building detail at z15+.
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: initMicroL0),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: initMicroLineL0),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: initMicroL1),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: initMicroLineL1),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: initMicroL2),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: initMicroLineL2),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: 0.0),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     _shadowLayersReady = true;
@@ -1962,78 +1929,58 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
   }
 
-  // Warm the server tile cache for every daylight hour — 3×3 tile grid, all hours in parallel.
-  // 144 simultaneous requests let the server compute all sun angles at once.
-  // Gen counter (_preloadGen) lets stale callbacks self-abort when a new run starts.
-  // Only HTTP 200 counts as success; failed tiles are retried up to 2 extra times.
+  // Warm the server tile cache for every daylight hour — 9 batch requests (3×3 grid).
+  // Each prewarm_tile call computes all ~15 daylight hours for one tile in one request,
+  // replacing the old 150-request fan-out that exceeded the 120/min rate limit.
+  // Also preloads sun elevations for every hour so the animation loop needs no per-frame HTTP calls.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
-    final gen    = _preloadGen; // snapshot — if _preloadGen advances, we've been cancelled
+    final gen    = _preloadGen;
     final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
     final startH = (_sunriseHour ?? 6.0).toInt();
     final endH   = (_sunsetHour  ?? 21.0).toInt();
-    final total  = endH - startH + 1;
     final tileX  = _lonToTileX(_currentCenter.longitude, zoom);
     final tileY  = _latToTileY(_currentCenter.latitude, zoom);
 
-    final specs = <(int, int, int)>[
-      for (int h = startH; h <= endH; h++)
-        for (var dx = -1; dx <= 1; dx++)
-          for (var dy = -1; dy <= 1; dy++)
-            (h, tileX + dx, tileY + dy),
+    final gridTiles = [
+      for (var dx = -1; dx <= 1; dx++)
+        for (var dy = -1; dy <= 1; dy++)
+          (tileX + dx, tileY + dy),
     ];
-    final totalTiles = specs.length;
-    int progressCount = 0;
 
-    String tileUrl(int h, int x, int y) =>
-        '$flaskBaseUrl/shadow/tile/$zoom/$x/$y.pbf'
-        '?hour=$h&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}';
-
-    // First pass: all tiles in parallel; track which fail.
-    final okFlags = List<bool>.filled(totalTiles, false);
+    int doneCount = 0;
+    // Tile prewarm (9 requests) + elevation fetch (one per hour) run in parallel.
+    final elevMap = <int, double>{};
     await Future.wait([
-      for (var i = 0; i < specs.length; i++)
+      // Tile prewarm requests
+      for (final (x, y) in gridTiles)
         () async {
-          final (h, x, y) = specs[i];
-          final ok = await _api.fetchTile(tileUrl(h, x, y));
+          await _api.prewarmTile(zoom, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
           if (_preloadGen != gen) return;
-          okFlags[i] = ok;
+          doneCount++;
           if (mounted && _preloading24h) {
-            progressCount++;
             setState(() {
-              _loadingProgress = progressCount / totalTiles;
-              _loadingStage    = 'Warming ${(progressCount / 9).ceil()}/$total hours';
+              _loadingProgress = doneCount / gridTiles.length;
+              _loadingStage    = 'Warming $doneCount/${gridTiles.length} tiles';
             });
           }
         }(),
+      // Elevation prefetch for every daylight hour
+      for (int h = startH; h <= endH; h++)
+        () async {
+          try {
+            final meta = await _api.fetchShadowMeta(
+              _currentCenter.latitude, _currentCenter.longitude,
+              h, 0, _selectedDate.month, _selectedDate.day,
+            );
+            elevMap[h] = (meta['elevation'] as num?)?.toDouble() ?? 0.0;
+          } catch (_) {
+            elevMap[h] = 0.0;
+          }
+        }(),
     ]);
-    if (_preloadGen != gen || !mounted || !_preloading24h) return;
-
-    // Retry failed tiles — up to 2 extra passes, silent (no progress bar update).
-    var failed = [for (var i = 0; i < specs.length; i++) if (!okFlags[i]) specs[i]];
-    for (var pass = 0; pass < 2 && failed.isNotEmpty; pass++) {
-      if (_preloadGen != gen) return;
-      final results = await Future.wait(failed.map((s) => _api.fetchTile(tileUrl(s.$1, s.$2, s.$3))));
-      if (_preloadGen != gen || !mounted || !_preloading24h) return;
-      failed = [for (var i = 0; i < failed.length; i++) if (!results[i]) failed[i]];
-    }
-  }
-
-  // Fire-and-forget: warm the server cache for a single hour's 3×3 tile grid.
-  // Called during the animation hold period so the next step's tiles are hot
-  // before MapLibre requests them. No await — runs concurrently with the hold delay.
-  void _warmHourTiles(int hour) {
-    if (!_mapReady || _mapController == null) return;
-    final zoom  = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
-    final tileX = _lonToTileX(_currentCenter.longitude, zoom);
-    final tileY = _latToTileY(_currentCenter.latitude, zoom);
-    for (var dx = -1; dx <= 1; dx++) {
-      for (var dy = -1; dy <= 1; dy++) {
-        _api.warmTile(
-          '$flaskBaseUrl/shadow/tile/$zoom/${tileX + dx}/${tileY + dy}.pbf'
-          '?hour=$hour&minute=0&month=${_selectedDate.month}&day=${_selectedDate.day}',
-        );
-      }
+    if (_preloadGen == gen && mounted) {
+      _animElevations = elevMap;
     }
   }
 
@@ -2043,58 +1990,282 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return ((1.0 - (log(tan(latRad) + 1.0 / cos(latRad)) / pi)) / 2.0 * (1 << z)).floor();
   }
 
+  // -------------------------------------------------------------------------
+  // Double-buffer animation helpers
+  // -------------------------------------------------------------------------
+
+  // All 12 layer IDs for one animation buffer (suffix = 'a' or 'b').
+  List<String> _animLayerIds(String s) => [
+    'shadow-anim-macro-l0-fill-$s', 'shadow-anim-macro-l0-line-$s',
+    'shadow-anim-macro-l1-fill-$s', 'shadow-anim-macro-l1-line-$s',
+    'shadow-anim-macro-l2-fill-$s', 'shadow-anim-macro-l2-line-$s',
+    'shadow-anim-micro-l0-fill-$s', 'shadow-anim-micro-l0-line-$s',
+    'shadow-anim-micro-l1-fill-$s', 'shadow-anim-micro-l1-line-$s',
+    'shadow-anim-micro-l2-fill-$s', 'shadow-anim-micro-l2-line-$s',
+  ];
+
+  // Opacity expressions — identical to _ensureShadowTileSource (kept in sync with CLAUDE.md locked params).
+  List<dynamic> _animMacroOp(double op)     => ['interpolate', ['exponential', 1.4], ['zoom'], 10, 0.0, 12, op * 0.50, 14, op * 0.78, 15, 0.0];
+  List<dynamic> _animMacroLineOp(double op) => _animMacroOp(op * 0.6);
+  List<dynamic> _animMicroOp(double op)     => ['interpolate', ['exponential', 1.4], ['zoom'], 10, 0.0, 14, 0.0, 15, op * 0.78, 16, op];
+  List<dynamic> _animMicroLineOp(double op) => _animMicroOp(op * 0.6);
+
+  (double, double, double) _animOpacities(double elev) {
+    final t   = elev <= 0 ? 1.0 : (elev.clamp(0.0, 60.0) / 60.0);
+    final oL0 = elev <= 0 ? 0.82 : 0.40 + t * 0.10;
+    final oL1 = elev <= 0 ? 0.0  : 0.28 + t * 0.15;
+    final oL2 = elev <= 0 ? 0.0  : 0.30 + t * 0.18;
+    return (oL0, oL1, oL2);
+  }
+
+  // Add 12 layers for one animation buffer. Parallel addLayer via Future.wait.
+  Future<void> _addAnimLayers(String s, String macroSrc, String microSrc, double elev, {required bool visible}) async {
+    final mc = _mapController;
+    if (mc == null) return;
+    final (oL0, oL1, oL2) = _animOpacities(elev);
+    final mL0 = visible ? _animMacroOp(oL0)     : 0.0;
+    final mL1 = visible ? _animMacroOp(oL1)     : 0.0;
+    final mL2 = visible ? _animMacroOp(oL2)     : 0.0;
+    final mlL0= visible ? _animMacroLineOp(oL0) : 0.0;
+    final mlL1= visible ? _animMacroLineOp(oL1) : 0.0;
+    final mlL2= visible ? _animMacroLineOp(oL2) : 0.0;
+    final uL0 = visible ? _animMicroOp(oL0)     : 0.0;
+    final uL1 = visible ? _animMicroOp(oL1)     : 0.0;
+    final uL2 = visible ? _animMicroOp(oL2)     : 0.0;
+    final ulL0= visible ? _animMicroLineOp(oL0) : 0.0;
+    final ulL1= visible ? _animMicroLineOp(oL1) : 0.0;
+    final ulL2= visible ? _animMicroLineOp(oL2) : 0.0;
+    // Layer order matters for z-sorting; add macro first (lower z), micro on top.
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l0-fill-$s',
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: mL0),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l0-line-$s',
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: mlL0),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l1-fill-$s',
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: mL1),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l1-line-$s',
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: mlL1),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l2-fill-$s',
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: mL2),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
+    await mc.addLayer(macroSrc, 'shadow-anim-macro-l2-line-$s',
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: mlL2),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l0-fill-$s',
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: uL0),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l0-line-$s',
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: ulL0),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l1-fill-$s',
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: uL1),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l1-line-$s',
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: ulL1),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l2-fill-$s',
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: uL2),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
+    await mc.addLayer(microSrc, 'shadow-anim-micro-l2-line-$s',
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: ulL2),
+      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
+  }
+
+  // Create 4 sources + 24 layers (2 buffers) once at animation start.
+  // A starts visible (active), B starts hidden (loading next hour).
+  // Also hides live-view shadow layers to prevent double-rendering.
+  Future<void> _setupAnimationLayers(int startH) async {
+    final mc = _mapController;
+    if (mc == null) return;
+
+    final endH   = (_sunsetHour ?? 20.0).toInt();
+    final secondH = (startH + 1).clamp(startH, endH);
+    _animHourA = startH;
+    _animHourB = secondH;
+    _animActiveBuf = 0;
+
+    final elev0 = _animElevations[startH]  ?? 0.0;
+    final elev1 = _animElevations[secondH] ?? 0.0;
+
+    // Unique cache-buster per animation run so MapLibre doesn't reuse stale tile responses.
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    final urlA = '${_buildShadowTileUrl(startH,  0, _selectedDate.month, _selectedDate.day)}&_anim=a$ts';
+    final urlB = '${_buildShadowTileUrl(secondH, 0, _selectedDate.month, _selectedDate.day)}&_anim=b$ts';
+
+    _startIdleWait();
+    await mc.addSource('shadow-anim-macro-a', VectorSourceProperties(tiles: [urlA], minzoom: 0, maxzoom: 14));
+    await mc.addSource('shadow-anim-micro-a', VectorSourceProperties(tiles: [urlA], minzoom: 0, maxzoom: 17));
+    await mc.addSource('shadow-anim-macro-b', VectorSourceProperties(tiles: [urlB], minzoom: 0, maxzoom: 14));
+    await mc.addSource('shadow-anim-micro-b', VectorSourceProperties(tiles: [urlB], minzoom: 0, maxzoom: 17));
+
+    await _addAnimLayers('a', 'shadow-anim-macro-a', 'shadow-anim-micro-a', elev0, visible: true);
+    await _addAnimLayers('b', 'shadow-anim-macro-b', 'shadow-anim-micro-b', elev1, visible: false);
+
+    // Suppress live-view shadow layers to prevent opacity stacking with animation buffers.
+    if (_shadowLayersReady) {
+      final liveN = _shadowSourceNonce;
+      for (final id in _shadowGhostLayerIds(liveN)) {
+        try {
+          if (id.contains('-fill-')) {
+            mc.setLayerProperties(id, FillLayerProperties(fillOpacity: 0.0));
+          } else {
+            mc.setLayerProperties(id, LineLayerProperties(lineOpacity: 0.0));
+          }
+        } catch (_) {}
+      }
+    }
+
+    _animLayersCreated = true;
+  }
+
+  // Swap active ↔ hidden buffer by updating opacities in one parallel batch.
+  // The visible buffer gets target opacity for the current hour; the other goes to 0.
+  Future<void> _swapAnimBuffers() async {
+    final mc = _mapController;
+    if (mc == null) return;
+
+    final showS  = _animActiveBuf == 0 ? 'b' : 'a';
+    final hideS  = _animActiveBuf == 0 ? 'a' : 'b';
+    final showH  = _animActiveBuf == 0 ? _animHourB : _animHourA;
+    final elev   = _animElevations[showH] ?? 0.0;
+    final (oL0, oL1, oL2) = _animOpacities(elev);
+
+    try {
+      await Future.wait([
+        // Show the newly-loaded buffer at correct opacity
+        mc.setLayerProperties('shadow-anim-macro-l0-fill-$showS', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: _animMacroOp(oL0))),
+        mc.setLayerProperties('shadow-anim-macro-l1-fill-$showS', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: _animMacroOp(oL1))),
+        mc.setLayerProperties('shadow-anim-macro-l2-fill-$showS', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: _animMacroOp(oL2))),
+        mc.setLayerProperties('shadow-anim-macro-l0-line-$showS', LineLayerProperties(lineColor: '#455A64', lineOpacity: _animMacroLineOp(oL0))),
+        mc.setLayerProperties('shadow-anim-macro-l1-line-$showS', LineLayerProperties(lineColor: '#37474F', lineOpacity: _animMacroLineOp(oL1))),
+        mc.setLayerProperties('shadow-anim-macro-l2-line-$showS', LineLayerProperties(lineColor: '#263238', lineOpacity: _animMacroLineOp(oL2))),
+        mc.setLayerProperties('shadow-anim-micro-l0-fill-$showS', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: _animMicroOp(oL0))),
+        mc.setLayerProperties('shadow-anim-micro-l1-fill-$showS', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: _animMicroOp(oL1))),
+        mc.setLayerProperties('shadow-anim-micro-l2-fill-$showS', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: _animMicroOp(oL2))),
+        mc.setLayerProperties('shadow-anim-micro-l0-line-$showS', LineLayerProperties(lineColor: '#455A64', lineOpacity: _animMicroLineOp(oL0))),
+        mc.setLayerProperties('shadow-anim-micro-l1-line-$showS', LineLayerProperties(lineColor: '#37474F', lineOpacity: _animMicroLineOp(oL1))),
+        mc.setLayerProperties('shadow-anim-micro-l2-line-$showS', LineLayerProperties(lineColor: '#263238', lineOpacity: _animMicroLineOp(oL2))),
+        // Hide the old buffer
+        mc.setLayerProperties('shadow-anim-macro-l0-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-macro-l1-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-macro-l2-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-macro-l0-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-macro-l1-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-macro-l2-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l0-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l1-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l2-fill-$hideS', FillLayerProperties(fillOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l0-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l1-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+        mc.setLayerProperties('shadow-anim-micro-l2-line-$hideS', LineLayerProperties(lineOpacity: 0.0)),
+      ]);
+    } catch (_) {}
+
+    _animActiveBuf = _animActiveBuf == 0 ? 1 : 0;
+  }
+
+  // Reload the currently-hidden buffer with a new hour's tiles.
+  // Runs fire-and-forget during the active buffer's hold period.
+  // Remove+readd sources so MapLibre fetches fresh tiles from warm server cache.
+  Future<void> _reloadHiddenBuffer(int nextH) async {
+    final mc = _mapController;
+    if (mc == null || !_animLayersCreated) return;
+
+    final s      = _animActiveBuf == 0 ? 'b' : 'a'; // hidden suffix
+    final elev   = _animElevations[nextH] ?? 0.0;
+    final ts     = DateTime.now().millisecondsSinceEpoch;
+    final newUrl = '${_buildShadowTileUrl(nextH, 0, _selectedDate.month, _selectedDate.day)}&_anim=${s}_$ts';
+    final macroS = 'shadow-anim-macro-$s';
+    final microS = 'shadow-anim-micro-$s';
+
+    // Remove layers then sources (order matters — layers reference sources)
+    await Future.wait([for (final id in _animLayerIds(s)) mc.removeLayer(id).catchError((_) {})]);
+    if (!_animLayersCreated) return; // teardown may have run while we awaited
+    await Future.wait([
+      mc.removeSource(macroS).catchError((_) {}),
+      mc.removeSource(microS).catchError((_) {}),
+    ]);
+    if (!_animLayersCreated) return;
+    // Re-add sources with new hour's tile URL; MapLibre immediately begins tile fetch.
+    await mc.addSource(macroS, VectorSourceProperties(tiles: [newUrl], minzoom: 0, maxzoom: 14));
+    await mc.addSource(microS, VectorSourceProperties(tiles: [newUrl], minzoom: 0, maxzoom: 17));
+    if (!_animLayersCreated) return;
+    // Re-add layers at opacity 0 (hidden — will be shown by _swapAnimBuffers).
+    await _addAnimLayers(s, macroS, microS, elev, visible: false);
+
+    if (_animLayersCreated) {
+      if (s == 'a') _animHourA = nextH;
+      else          _animHourB = nextH;
+    }
+  }
+
+  // Remove all animation sources + layers, restore live-view shadow rendering.
+  Future<void> _teardownAnimationLayers() async {
+    if (!_animLayersCreated) return;
+    _animLayersCreated = false;
+    final mc = _mapController;
+    if (mc == null) return;
+    for (final s in ['a', 'b']) {
+      await Future.wait([for (final id in _animLayerIds(s)) mc.removeLayer(id).catchError((_) {})]);
+      await Future.wait([
+        mc.removeSource('shadow-anim-macro-$s').catchError((_) {}),
+        mc.removeSource('shadow-anim-micro-$s').catchError((_) {}),
+      ]);
+    }
+    // Force live-view shadow layers to rebuild from scratch (they were zeroed at animation start).
+    _shadowLayersReady = false;
+    fetchShadows();
+  }
+
+  // Double-buffer animation loop.
+  // Each frame: hold 500ms while hidden buffer loads next hour from warm cache,
+  // then swap buffers with a single parallel opacity update (no source/layer recreation).
   Future<void> _run24hStep() async {
+    final startH = _hour.toInt();
+    final endH   = (_sunsetHour ?? 20.0).toInt();
+
+    await _setupAnimationLayers(startH);
+    if (!mounted || !_animating) { await _teardownAnimationLayers(); return; }
+
+    // Wait for initial frame (buffer A, startH) to render from warm cache.
+    for (var i = 0; i < 100 && _animating && !_isIdle(); i++) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+    _stopIdleWait();
+
     while (_animating) {
-      await fetchShadows();
+      final currentH = _hour.toInt();
+      final nextH    = currentH + 1;
+
+      // Arm idle + start loading hidden buffer concurrently with the hold.
+      _startIdleWait();
+      if (nextH <= endH) unawaited(_reloadHiddenBuffer(nextH));
+
+      // Hold current frame for 500ms; hidden buffer tiles load from cache during this time.
+      await Future.delayed(const Duration(milliseconds: 500));
       if (!_animating) break;
 
-      // Wait for MapLibre idle — fires only after all tiles are fully painted to canvas.
-      // Hard ceiling: 5 s (100 × 50 ms). Track whether idle actually fired or we timed out.
-      for (var i = 0; i < 100 && _animating && !_isIdle(); i++) {
+      // Wait for idle — hidden buffer tiles should already be loaded (cache hit ~ 50ms).
+      // Hard ceiling: 3s (60 × 50ms).
+      for (var i = 0; i < 60 && _animating && !_isIdle(); i++) {
         await Future.delayed(const Duration(milliseconds: 50));
       }
-      if (!_animating) break;
-      final idleFired = _isIdle();
       _stopIdleWait();
-
-      // 80 ms GPU buffer — compositing pipeline has a few ms lag after idle event.
-      if (idleFired) await Future.delayed(const Duration(milliseconds: 80));
       if (!_animating) break;
 
-      // Only remove ghosts when tiles are confirmed fully rendered.
-      // Cleans up both _prevNonce (current ghost) and _dimmedGhostNonce (any 0-opacity
-      // ghost parked by _ensureShadowTileSource during a previous timed-out step).
-      if (idleFired && (_prevNonce >= 0 || _dimmedGhostNonce >= 0)) {
-        final mc = _mapController;
-        if (mc != null) {
-          for (final nonce in [_prevNonce, _dimmedGhostNonce]) {
-            if (nonce < 0) continue;
-            for (final id in _shadowGhostLayerIds(nonce)) {
-              try { await mc.removeLayer(id); } catch (_) {}
-            }
-            try { await mc.removeSource('shadow-macro-$nonce'); } catch (_) {}
-            try { await mc.removeSource('shadow-micro-$nonce'); } catch (_) {}
-          }
-        }
-        _prevNonce = -1;
-        _dimmedGhostNonce = -1;
-      }
-
-      final end = _sunsetHour ?? 20.0;
-      if (_hour >= end) {
+      if (nextH > endH) {
         setState(() => _animating = false);
         break;
       }
 
-      // During the hold, pre-warm the next hour's 3×3 tiles on the server.
-      // Runs concurrently with the delay so tiles are hot before MapLibre requests them.
-      _warmHourTiles((_hour + 1.0).toInt());
-
-      // Fixed hold — each shadow is shown for 500 ms after it finishes rendering.
-      await Future.delayed(const Duration(milliseconds: 500));
-      if (!_animating) break;
-      setState(() => _hour = _hour + 1.0);
+      setState(() => _hour += 1.0);
+      await _swapAnimBuffers();
     }
+
+    await _teardownAnimationLayers();
   }
 
   // -------------------------------------------------------------------------

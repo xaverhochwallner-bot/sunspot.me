@@ -1363,8 +1363,85 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
 # /shadow/tile/<z>/<x>/<y>.pbf?hour=14&minute=30&month=4&day=30
 # ---------------------------------------------------------------------------
 
+@app.route("/shadow/prewarm_tile/<int:z>/<int:x>/<int:y>")
+@limiter.limit("6 per minute")
+def shadow_prewarm_tile(z, x, y):
+    """Batch-compute and cache all daylight hours for one tile.
+    Replaces 15 individual tile requests with one; client calls this 9× for the 3×3 grid."""
+    if not (0 <= z <= 22):
+        return jsonify({"error": "invalid z"}), 400
+    max_tile = 2 ** z
+    if not (0 <= x < max_tile and 0 <= y < max_tile):
+        return jsonify({"error": "invalid x/y"}), 400
+    try:
+        start_hour = request.args.get("startHour", default=6,  type=int)
+        end_hour   = request.args.get("endHour",   default=20, type=int)
+        month      = request.args.get("month",     default=None, type=int)
+        day        = request.args.get("day",       default=None, type=int)
+
+        tz  = pytz.timezone(_TZ_NAME)
+        now = datetime.now(tz)
+        if month is None: month = now.month
+        if day   is None: day   = now.day
+
+        start_hour = max(0, min(23, start_hour))
+        end_hour   = max(start_hour, min(23, end_hour))
+        hours      = list(range(start_hour, end_hour + 1))
+
+        cached_count = 0
+
+        def _compute_hour(h):
+            nonlocal cached_count
+            _n2z = 2.0 ** z
+            _tcx = (x + 0.5) / _n2z * 360.0 - 180.0
+            _tcy = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 0.5) / _n2z))))
+            _ts  = datetime(2000, month, day, h, 0, 0, tzinfo=pytz.timezone(_TZ_NAME))
+            _telev, _tazim = get_sun_angles(_tcy, _tcx, _ts)
+            if _telev <= 0:
+                tck = (z, x, y, 'night', month)
+            else:
+                tck = (z, x, y, round(_telev / 3.0) * 3, round(_tazim / 6.0) * 6, month)
+
+            with _cache_lock:
+                if tck in _tile_cache:
+                    return  # already cached
+
+            with _tile_in_flight_lock:
+                if tck in _tile_in_flight:
+                    evt = _tile_in_flight[tck]
+                    is_computing = False
+                else:
+                    evt = threading.Event()
+                    _tile_in_flight[tck] = evt
+                    is_computing = True
+
+            if not is_computing:
+                evt.wait(timeout=60)
+                return
+
+            try:
+                pbf = _compute_shadow_tile_pbf(z, x, y, h, month, day)
+                if pbf is not None:
+                    with _cache_lock:
+                        _tile_cache[tck] = pbf
+                        _trim_tile_cache()
+                    cached_count += 1
+            finally:
+                with _tile_in_flight_lock:
+                    _tile_in_flight.pop(tck, None)
+                evt.set()
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(_compute_hour, hours))
+
+        return jsonify({"cached": cached_count})
+    except Exception:
+        _log.exception("shadow_prewarm_tile z=%s x=%s y=%s", z, x, y)
+        return jsonify({"error": "internal error"}), 500
+
+
 @app.route("/shadow/tile/<int:z>/<int:x>/<int:y>.pbf")
-@limiter.limit("120 per minute")
+@limiter.limit("300 per minute")
 def shadow_tile(z, x, y):
     if not (0 <= z <= 22):
         return Response(b'', status=400)

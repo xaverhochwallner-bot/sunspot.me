@@ -113,6 +113,21 @@ class ApiClient {
     }
   }
 
+  /// Batch-warm all daylight hours for one tile on the server side.
+  /// Returns true on success. Much faster than 15 individual fetchTile calls.
+  Future<bool> prewarmTile(int z, int x, int y, int startHour, int endHour, int month, int day) async {
+    try {
+      final uri = Uri.parse(
+        '$baseUrl/shadow/prewarm_tile/$z/$x/$y'
+        '?startHour=$startHour&endHour=$endHour&month=$month&day=$day',
+      );
+      final res = await http.get(uri).timeout(const Duration(seconds: 60));
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Fire-and-forget tile cache warm.
   void warmTile(String url) {
     http.get(Uri.parse(url))
