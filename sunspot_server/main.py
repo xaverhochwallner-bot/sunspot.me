@@ -1,5 +1,7 @@
 from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from shapely.geometry import Polygon, box as shapely_box, mapping
 from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
@@ -100,6 +102,13 @@ _ALLOWED_ORIGINS = [
     re.compile(r"http://127\.0\.0\.1(:\d+)?$"),
 ]
 CORS(app, origins=_ALLOWED_ORIGINS)
+
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    storage_uri="memory://",
+    default_limits=["500 per day", "100 per hour"],
+)
 
 _TZ_NAME    = os.getenv('TIMEZONE', 'Europe/Vienna')
 
@@ -1239,10 +1248,13 @@ def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
 # ---------------------------------------------------------------------------
 
 @app.route("/shadow/meta")
+@limiter.limit("60 per minute")
 def shadow_meta():
     try:
         lat    = request.args.get("lat",    default=48.2082, type=float)
         lon    = request.args.get("lon",    default=16.3738, type=float)
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return jsonify({"error": "lat/lon out of range"}), 400
         hour   = request.args.get("hour",   default=None, type=int)
         minute = request.args.get("minute", default=0,    type=int)
         month  = request.args.get("month",  default=None, type=int)
@@ -1352,6 +1364,7 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
 # ---------------------------------------------------------------------------
 
 @app.route("/shadow/tile/<int:z>/<int:x>/<int:y>.pbf")
+@limiter.limit("120 per minute")
 def shadow_tile(z, x, y):
     if not (0 <= z <= 22):
         return Response(b'', status=400)
@@ -1655,6 +1668,7 @@ _poi_cache_lock = threading.Lock()
 MIN_POI_SEPARATION = 0.0009  # ~100 m in degrees
 
 @app.route("/sunny_pois")
+@limiter.limit("20 per minute")
 def sunny_pois():
     try:
         center_lat = request.args.get('lat', type=float)
@@ -1676,6 +1690,14 @@ def sunny_pois():
         vp_min_lon = request.args.get('minLon', type=float)
         vp_max_lat = request.args.get('maxLat', type=float)
         vp_max_lon = request.args.get('maxLon', type=float)
+
+        if None not in (vp_min_lat, vp_min_lon, vp_max_lat, vp_max_lon):
+            if not (-90.0 <= vp_min_lat <= vp_max_lat <= 90.0):
+                return jsonify({'error': 'viewport lat out of range or inverted'}), 400
+            if not (-180.0 <= vp_min_lon <= vp_max_lon <= 180.0):
+                return jsonify({'error': 'viewport lon out of range or inverted'}), 400
+        if not (10.0 <= zoom <= 22.0):
+            return jsonify({'error': 'zoom must be 10–22'}), 400
 
         if zoom < 13:
             return jsonify({'spots': [], 'reason': 'zoom_in'})
@@ -1847,6 +1869,7 @@ def sunny_pois():
 
 
 @app.route("/is_sunny")
+@limiter.limit("60 per minute")
 def is_sunny():
     try:
         lat = request.args.get('lat', type=float)
@@ -1875,6 +1898,7 @@ def is_sunny():
 
 
 @app.route("/point_info")
+@limiter.limit("15 per minute")
 def point_info():
     try:
         lat = request.args.get('lat', type=float)
@@ -1940,8 +1964,11 @@ def point_info():
 # ---------------------------------------------------------------------------
 
 @app.route("/clear_cache")
+@limiter.limit("5 per hour")
 def clear_cache():
     max_zoom = request.args.get("max_zoom", default=13, type=int)
+    if not (0 <= max_zoom <= 22):
+        return jsonify({"error": "max_zoom must be 0–22"}), 400
     keys = [k for k in list(_shadow_cache.keys()) if k[3] <= max_zoom]
     for k in keys:
         _shadow_cache.pop(k, None)
@@ -1949,6 +1976,7 @@ def clear_cache():
 
 
 @app.route("/find_sunny_spots")
+@limiter.limit("10 per minute")
 def find_sunny_spots():
     try:
         from shapely.geometry import Point as SPoint
@@ -1965,6 +1993,16 @@ def find_sunny_spots():
         max_lat = request.args.get("maxLat", default=None,    type=float)
         max_lon = request.args.get("maxLon", default=None,    type=float)
         n       = min(request.args.get("n", default=5, type=int), 15)
+
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return jsonify({"error": "lat/lon out of range"}), 400
+        if not (10.0 <= zoom <= 22.0):
+            return jsonify({"error": "zoom must be 10–22"}), 400
+        if None not in (min_lat, min_lon, max_lat, max_lon):
+            if not (-90.0 <= min_lat <= max_lat <= 90.0):
+                return jsonify({"error": "viewport lat out of range or inverted"}), 400
+            if not (-180.0 <= min_lon <= max_lon <= 180.0):
+                return jsonify({"error": "viewport lon out of range or inverted"}), 400
 
         tz  = pytz.timezone(_TZ_NAME)
         now = datetime.now(tz)
@@ -2201,6 +2239,7 @@ def find_sunny_spots():
 # ---------------------------------------------------------------------------
 
 @app.route("/heatmap")
+@limiter.limit("30 per minute")
 def heatmap():
     try:
         min_lat = float(request.args['minLat'])
