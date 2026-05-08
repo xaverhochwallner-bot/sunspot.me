@@ -29,3 +29,5 @@ provision_arm.py
 # Server-generated cache files (regenerated at startup)
 sunspot_server/buildings_cache.pkl
 sunspot_server/city_pois_cache.json
+sentry-wizard.exe
+sunspot/sentry-wizard.exe
