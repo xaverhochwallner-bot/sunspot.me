@@ -101,6 +101,8 @@ _ALLOWED_ORIGINS = [
 ]
 CORS(app, origins=_ALLOWED_ORIGINS)
 
+_TZ_NAME    = os.getenv('TIMEZONE', 'Europe/Vienna')
+
 _SENTRY_DSN = os.getenv('SENTRY_DSN', '')
 if _SENTRY_AVAILABLE and _SENTRY_DSN:
     sentry_sdk.init(
@@ -740,7 +742,7 @@ def project_shadow(polygon, height, elevation_deg, azimuth_deg):
         return result if result.is_valid else result.buffer(0)
 
     except Exception as e:
-        print(f"Shadow projection error: {e}")
+        _log.error("Shadow projection error: %s", e)
         return None
 
 
@@ -1050,9 +1052,9 @@ def _build_shadow_features(viewport_bbox, sunlit, buf_e1, buf_e2, prec):
                   "properties": {"layer": "shadow-l0"}}]
     if buf_e1 is not None:
         try:    shadow_l1 = orient(viewport_bbox.difference(buf_e1), sign=1.0)
-        except Exception: shadow_l1 = shadow_l0
+        except Exception as e: _log.debug("shadow_l1 diff failed, using l0: %s", e); shadow_l1 = shadow_l0
         try:    shadow_l2 = orient(viewport_bbox.difference(buf_e2), sign=1.0)
-        except Exception: shadow_l2 = shadow_l1
+        except Exception as e: _log.debug("shadow_l2 diff failed, using l1: %s", e); shadow_l2 = shadow_l1
         features += [
             {"type": "Feature", "geometry": round_coords(mapping(shadow_l1), prec),
              "properties": {"layer": "shadow-l1"}},
@@ -1177,7 +1179,7 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
     # hour-based key used only for prewarm dedup — actual geometry stored under angle key
     hour_ck = _cache_key(hour, month, day, lat, lon, zoom)
     try:
-        tz  = pytz.timezone("Europe/Vienna")
+        tz  = pytz.timezone(_TZ_NAME)
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
         elevation, azimuth = get_sun_angles(lat, lon, now)
         if elevation <= 0:
@@ -1195,9 +1197,9 @@ def _compute_shadow_cached(hour, month, day, lat, lon, zoom, vp_w, vp_h):
         )
         t0 = time.time()
         _compute_shadow_data(zoom, elevation, azimuth, q_bounds, ck, hour, month, day, lat, lon)
-        print(f"[prewarm] z={zoom} h={hour} cached in {time.time()-t0:.2f}s")
+        _log.info("[prewarm] z=%s h=%s cached in %.2fs", zoom, hour, time.time()-t0)
     except Exception as e:
-        print(f"[prewarm] error z={zoom}: {e}")
+        _log.error("[prewarm] error z=%s: %s", zoom, e)
     finally:
         with _prewarm_lock:
             _prewarm_in_flight.discard(hour_ck)
@@ -1246,7 +1248,7 @@ def shadow_meta():
         month  = request.args.get("month",  default=None, type=int)
         day    = request.args.get("day",    default=None, type=int)
 
-        tz  = pytz.timezone("Europe/Vienna")
+        tz  = pytz.timezone(_TZ_NAME)
         now = datetime.now(tz)
         if month is not None and day is not None:
             now = now.replace(month=month, day=day)
@@ -1293,7 +1295,7 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
         tile_bbox        = shapely_box(tile_west, tile_south, tile_east, tile_north)
         tile_bounds_tuple = (tile_west, tile_south, tile_east, tile_north)
 
-        tz  = pytz.timezone("Europe/Vienna")
+        tz  = pytz.timezone(_TZ_NAME)
         now = datetime(2000, month, day, hour, 0, 0, tzinfo=tz)
         elevation, azimuth = get_sun_angles(tile_cy, tile_cx, now)
 
@@ -1330,7 +1332,8 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
                 return tile_bbox
             try:
                 return orient(tile_bbox.difference(eroded), sign=1.0)
-            except Exception:
+            except Exception as e:
+                _log.debug("tile bbox.difference failed, returning full tile: %s", e)
                 return tile_bbox
 
         return _enc(
@@ -1339,7 +1342,7 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
             _shadow_in_tile(buf_e2),
         )
     except Exception as e:
-        print(f"[tile] error {z}/{x}/{y} h={hour}: {e}")
+        _log.error("tile error %s/%s/%s h=%s: %s", z, x, y, hour, e)
         return None
 
 
@@ -1361,7 +1364,7 @@ def shadow_tile(z, x, y):
         month  = request.args.get("month",  default=None, type=int)
         day    = request.args.get("day",    default=None, type=int)
 
-        tz  = pytz.timezone("Europe/Vienna")
+        tz  = pytz.timezone(_TZ_NAME)
         now = datetime.now(tz)
         if month is not None and day is not None:
             now = now.replace(month=month, day=day)
@@ -1377,7 +1380,7 @@ def shadow_tile(z, x, y):
         _n2z = 2.0 ** z
         _tcx = (x + 0.5) / _n2z * 360.0 - 180.0
         _tcy = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * (y + 0.5) / _n2z))))
-        _ts  = datetime(2000, mo, d, h, 0, 0, tzinfo=pytz.timezone("Europe/Vienna"))
+        _ts  = datetime(2000, mo, d, h, 0, 0, tzinfo=pytz.timezone(_TZ_NAME))
         _telev, _tazim = get_sun_angles(_tcy, _tcx, _ts)
         if _telev <= 0:
             tck = (z, x, y, 'night', mo)
@@ -1484,7 +1487,8 @@ def _overpass_fetch(query, timeout=25):
                   headers={'User-Agent': 'Sunspot.me/1.0'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
-        except Exception:
+        except Exception as e:
+            _log.warning("Overpass endpoint %s failed (attempt %d): %s", endpoints[attempt % len(endpoints)], attempt, e)
             if attempt < len(endpoints) - 1:
                 _time.sleep(3)  # brief pause before trying next endpoint
             continue
@@ -1676,7 +1680,7 @@ def sunny_pois():
         if zoom < 13:
             return jsonify({'spots': [], 'reason': 'zoom_in'})
 
-        tz = pytz.timezone('Europe/Vienna')
+        tz = pytz.timezone(_TZ_NAME)
         try:
             date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
@@ -1737,9 +1741,9 @@ def sunny_pois():
                 _city_result = _fetch_pois_overpass(center_lat, center_lon, list(city_types))
                 with _poi_cache_lock:
                     if cache_key not in _poi_cache:
-                        _poi_cache[cache_key] = _city_result
-                        if len(_poi_cache) > _MAX_POI_CACHE:
+                        if len(_poi_cache) >= _MAX_POI_CACHE:
                             _poi_cache.popitem(last=False)
+                        _poi_cache[cache_key] = _city_result
             candidates += [p for p in _city_result
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
@@ -1755,9 +1759,9 @@ def sunny_pois():
                 _ovp_result = _fetch_pois_overpass(center_lat, center_lon, list(overpass_types))
                 with _poi_cache_lock:
                     if cache_key not in _poi_cache:
-                        _poi_cache[cache_key] = _ovp_result
-                        if len(_poi_cache) > _MAX_POI_CACHE:
+                        if len(_poi_cache) >= _MAX_POI_CACHE:
                             _poi_cache.popitem(last=False)
+                        _poi_cache[cache_key] = _ovp_result
             candidates += [p for p in _ovp_result
                            if s_min_lat <= p['lat'] <= s_max_lat and s_min_lon <= p['lon'] <= s_max_lon]
 
@@ -1856,7 +1860,7 @@ def is_sunny():
         minute   = int(request.args.get('minute', datetime.now().minute))
         if not (0 <= hour <= 23) or not (0 <= minute <= 59):
             return jsonify({'error': 'hour must be 0-23, minute 0-59'}), 400
-        tz       = pytz.timezone('Europe/Vienna')
+        tz       = pytz.timezone(_TZ_NAME)
         try:
             date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
@@ -1891,7 +1895,7 @@ def point_info():
             date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
             return jsonify({'error': 'Invalid date. Use YYYY-MM-DD'}), 400
-        tz   = pytz.timezone('Europe/Vienna')
+        tz   = pytz.timezone(_TZ_NAME)
 
         # Check shadow at requested hour+minute
         now = tz.localize(datetime(date.year, date.month, date.day, hour, minute, 0))
@@ -1962,7 +1966,7 @@ def find_sunny_spots():
         max_lon = request.args.get("maxLon", default=None,    type=float)
         n       = min(request.args.get("n", default=5, type=int), 15)
 
-        tz  = pytz.timezone("Europe/Vienna")
+        tz  = pytz.timezone(_TZ_NAME)
         now = datetime.now(tz)
         if month is not None and day is not None:
             now = now.replace(month=month, day=day)
@@ -2055,7 +2059,8 @@ def find_sunny_spots():
 
         try:
             sunlit_vp = sunlit_filtered.intersection(actual_vp)
-        except Exception:
+        except Exception as e:
+            _log.debug("sunlit viewport intersection failed, using full: %s", e)
             sunlit_vp = sunlit_filtered
 
         # Extract distinct sunlit patches
@@ -2148,7 +2153,8 @@ def find_sunny_spots():
                 if ck_h in _shadow_cache:
                     try:
                         in_sun = _shadow_cache[ck_h].contains(SPoint(spot_lon, spot_lat))
-                    except Exception:
+                    except Exception as e:
+                        _log.debug("shadow cache contains check failed h=%s: %s", ck_h, e)
                         in_sun = False
                     if in_sun:
                         sun_hours.append(h)
@@ -2219,7 +2225,7 @@ def heatmap():
 
     center_lat = (min_lat + max_lat) / 2
     center_lon = (min_lon + max_lon) / 2
-    tz  = pytz.timezone("Europe/Vienna")
+    tz  = pytz.timezone(_TZ_NAME)
 
     t = tz.localize(datetime(2000, month, day, hour, minute, 0))
     elevation, azimuth = get_sun_angles(center_lat, center_lon, t)
@@ -2349,7 +2355,7 @@ atexit.register(lambda: _prewarm_executor.shutdown(wait=False))
 
 def _startup_prewarm():
     time.sleep(1)   # brief grace; buildings are already loaded from pickle by now
-    tz  = pytz.timezone("Europe/Vienna")
+    tz  = pytz.timezone(_TZ_NAME)
     now = datetime.now(tz)
     if now.hour < 6 or now.hour > 20:
         print("[startup] Nighttime — skipping pre-warm.")
@@ -2380,7 +2386,7 @@ def _startup_prewarm():
                 for h, mo, d, la, lo, z, w, v in tasks]
         for f in futs:
             try:    f.result()
-            except Exception as e: print(f"[startup] shadow prewarm error: {e}")
+            except Exception as e: _log.error("[startup] shadow prewarm error: %s", e)
     print("[startup] Shadow pre-warm complete.")
 
     ct13 = mercantile.tile(lon, lat, 13)
@@ -2398,7 +2404,7 @@ def _startup_prewarm():
     with ThreadPoolExecutor(max_workers=4) as ex:
         for f in [ex.submit(_warm_tile, t) for t in priority]:
             try: f.result()
-            except Exception as e: print(f"[startup] phase1 error: {e}")
+            except Exception as e: _log.error("[startup] phase1 error: %s", e)
     print("[startup] Phase 1 complete.")
 
     # Phase 2: broader tile PBF pre-warm for hours ±1.
@@ -2432,7 +2438,7 @@ def _startup_prewarm():
                 if done % 100 == 0:
                     print(f"[startup] Phase 2 progress: {done}/{len(tile_tasks)}")
             except Exception as e:
-                print(f"[startup] phase2 error: {e}")
+                _log.error("[startup] phase2 error: %s", e)
 
     print(f"[startup] Phase 2 complete. {len(_tile_cache)} tiles cached.")
 
