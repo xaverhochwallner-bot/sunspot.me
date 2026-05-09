@@ -1,0 +1,23 @@
+{
+  "active_city": "vienna",
+  "cities": {
+    "vienna": {
+      "name": "Wien",
+      "country": "AT",
+      "timezone": "Europe/Vienna",
+
+      "load_bbox":  [48.05, 16.10, 48.40, 16.65],
+      "city_bbox":  [48.08, 16.10, 48.35, 16.62],
+      "default_center": { "lat": 48.2082, "lon": 16.3738 },
+
+      "osm_pbf": {
+        "filename":     "austria-latest.osm.pbf",
+        "download_url": "https://download.geofabrik.de/europe/austria-latest.osm.pbf"
+      },
+
+      "prewarm": {
+        "z14_bbox": [48.05, 16.10, 48.40, 16.65]
+      }
+    }
+  }
+}

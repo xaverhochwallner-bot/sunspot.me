@@ -36,6 +36,11 @@ except ImportError:
     _SENTRY_AVAILABLE = False
 import mapbox_vector_tile
 
+from cities import ACTIVE as CITY, public_registry as _public_city_registry
+
+_CITY_DEFAULT_LAT = CITY['default_center']['lat']
+_CITY_DEFAULT_LON = CITY['default_center']['lon']
+
 # ---------------------------------------------------------------------------
 # OSM opening_hours parser (covers ~90% of real-world tags)
 # Returns True=open, False=closed, None=unknown/unparseable (treat as open)
@@ -109,7 +114,7 @@ limiter = Limiter(
     default_limits=["500 per day", "100 per hour"],
 )
 
-_TZ_NAME    = os.getenv('TIMEZONE', 'Europe/Vienna')
+_TZ_NAME    = os.getenv('TIMEZONE') or CITY['timezone']
 
 _SENTRY_DSN = os.getenv('SENTRY_DSN', '')
 if _SENTRY_AVAILABLE and _SENTRY_DSN:
@@ -122,7 +127,7 @@ if _SENTRY_AVAILABLE and _SENTRY_DSN:
     print(f"[sentry] enabled (env={os.getenv('FLASK_ENV', 'production')})", flush=True)
 
 # Path to the local OSM PBF file — place it next to main.py
-PBF_PATH = os.path.join(os.path.dirname(__file__), "austria-latest.osm.pbf")
+PBF_PATH = os.path.join(os.path.dirname(__file__), CITY['osm_pbf']['filename'])
 
 # ---------------------------------------------------------------------------
 # Shadow cache — keyed by (hour, month, day, zoom, lat_grid, lon_grid)
@@ -309,9 +314,10 @@ PRE_SIMPLIFY = {
     14: 0.000025,  # ~3 m — kept for pre-warm compat; z14 now uses macro pipeline
 }
 
-# Bounding box filter applied during parsing — keeps only relevant buildings
-# Covers greater Vienna area; expand if you want to support other cities
-LOAD_BBOX = (48.05, 16.10, 48.40, 16.65)  # (min_lat, min_lon, max_lat, max_lon)
+# Bounding box filter applied during parsing — keeps only relevant buildings.
+# Driven by config/cities.json (active city) so multi-city is a config change,
+# not a code change. (min_lat, min_lon, max_lat, max_lon)
+LOAD_BBOX = tuple(CITY['load_bbox'])
 
 
 
@@ -1243,6 +1249,17 @@ def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
 
 
 # ---------------------------------------------------------------------------
+# City registry — exposes available cities + active selection (Flutter clients
+# can use this to switch defaults without a code change).
+# ---------------------------------------------------------------------------
+
+@app.route("/cities")
+@limiter.limit("30 per minute")
+def cities_endpoint():
+    return jsonify(_public_city_registry())
+
+
+# ---------------------------------------------------------------------------
 # Shadow — lightweight metadata endpoint (sun angles only, no geometry)
 # ---------------------------------------------------------------------------
 
@@ -1250,8 +1267,8 @@ def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
 @limiter.limit("60 per minute")
 def shadow_meta():
     try:
-        lat    = request.args.get("lat",    default=48.2082, type=float)
-        lon    = request.args.get("lon",    default=16.3738, type=float)
+        lat    = request.args.get("lat",    default=_CITY_DEFAULT_LAT, type=float)
+        lon    = request.args.get("lon",    default=_CITY_DEFAULT_LON, type=float)
         if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
             return jsonify({"error": "lat/lon out of range"}), 400
         hour   = request.args.get("hour",   default=None, type=int)
@@ -1550,7 +1567,7 @@ def _point_in_shadow(lon, lat, elevation_deg, azimuth_deg, search_radius_deg=0.0
 # ---------------------------------------------------------------------------
 # City-wide POI database (loaded once at startup, covers all of Vienna)
 # ---------------------------------------------------------------------------
-_CITY_BBOX       = (48.08, 16.10, 48.35, 16.62)  # Vienna bounds
+_CITY_BBOX       = tuple(CITY['city_bbox'])  # active city bounds (config-driven)
 _CITY_POI_AMENITY_TO_TYPE = {
     'cafe': 'cafe', 'bar': 'bar', 'pub': 'bar', 'beer_garden': 'bar',
     'restaurant': 'restaurant', 'fast_food': 'restaurant',
@@ -2057,8 +2074,8 @@ def find_sunny_spots():
     try:
         from shapely.geometry import Point as SPoint
 
-        lat     = request.args.get("lat",    default=48.2082, type=float)
-        lon     = request.args.get("lon",    default=16.3738, type=float)
+        lat     = request.args.get("lat",    default=_CITY_DEFAULT_LAT, type=float)
+        lon     = request.args.get("lon",    default=_CITY_DEFAULT_LON, type=float)
         hour    = request.args.get("hour",   default=None,    type=int)
         minute  = request.args.get("minute", default=0,       type=int)
         month   = request.args.get("month",  default=None,    type=int)
@@ -2416,7 +2433,7 @@ def _resolve_lfs_pointer(path):
 
 def _download_pbf(path):
     import urllib.request
-    url = "https://download.geofabrik.de/europe/austria-latest.osm.pbf"
+    url = CITY['osm_pbf']['download_url']
     print(f"Downloading {url} (~760 MB) ...")
     urllib.request.urlretrieve(url, path)
     print("Download complete.")
@@ -2472,7 +2489,7 @@ def _startup_prewarm():
     if now.hour < 6 or now.hour > 20:
         print("[startup] Nighttime — skipping pre-warm.")
         return
-    lat, lon = 48.2082, 16.3738  # Vienna Stephansdom
+    lat, lon = _CITY_DEFAULT_LAT, _CITY_DEFAULT_LON  # active city center
     h_now = now.hour
     hours = [h for h in (h_now - 1, h_now, h_now + 1) if 6 <= h <= 20]
 
@@ -2527,9 +2544,10 @@ def _startup_prewarm():
             tile_list.append((13, ct13.x + dx, ct13.y + dy))
             tile_list.append((15, ct15.x + dx, ct15.y + dy))
 
-    # Full Vienna bbox at z14: west=16.10, south=48.05, east=16.65, north=48.40
+    # Full active-city bbox at z14
+    _pw_min_lat, _pw_min_lon, _pw_max_lat, _pw_max_lon = tuple(CITY['prewarm']['z14_bbox'])
     z14_tiles = sorted(
-        mercantile.tiles(16.10, 48.05, 16.65, 48.40, zooms=14),
+        mercantile.tiles(_pw_min_lon, _pw_min_lat, _pw_max_lon, _pw_max_lat, zooms=14),
         key=lambda t: abs(t.x - ct14.x) + abs(t.y - ct14.y)
     )
     tile_list += [(14, t.x, t.y) for t in z14_tiles]
@@ -2538,7 +2556,7 @@ def _startup_prewarm():
                   for z, x, y in tile_list for h in hours]
 
     print(f"[startup] Phase 2: {len(tile_tasks)} PBF tiles "
-          f"(z13 5×5, {len(z14_tiles)} z14 Vienna, z15 5×5) ...")
+          f"(z13 5×5, {len(z14_tiles)} z14 {CITY['name']}, z15 5×5) ...")
 
     with ThreadPoolExecutor(max_workers=2) as ex:
         futs = [ex.submit(_warm_tile, t) for t in tile_tasks]
