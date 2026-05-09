@@ -1,11 +1,12 @@
 {
-    "name": "sunspot",
-    "short_name": "sunspot",
+    "name": "Sunspot",
+    "short_name": "Sunspot",
     "start_url": ".",
+    "scope": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Find sunny spots in the city — real-time sun and shadow map.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
