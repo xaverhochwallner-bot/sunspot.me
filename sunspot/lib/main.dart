@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
 import 'dart:math';
@@ -116,6 +117,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   int              _animHourA        = -1;
   int              _animHourB        = -1;
   Map<int, double> _animElevations   = {}; // hour → sun elevation, preloaded before animation
+  String?          _animSessionKey;        // stable per animation run — used as browser-cache key for tile URLs
 
   // Panel (state lives in AppShellState)
 
@@ -239,6 +241,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   void _onMapCreated(MapLibreMapController controller) {
     _mapController = controller;
     _injectTileLoadHelper();
+    _injectPrefetchHelper();
   }
 
   // Monkey-patch maplibregl.Map.prototype.addSource so the first shadow-source
@@ -310,6 +313,76 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         })();
       ''']);
     } catch (_) {}
+  }
+
+  // Inject JS helper for browser-cache tile prefetching.
+  // Uses a separate __sp_prefetch_patched guard so it survives map style reloads.
+  void _injectPrefetchHelper() {
+    try {
+      js.context.callMethod('eval', [r'''
+        (function() {
+          if (window.__sp_prefetch_patched) return;
+          window.__sp_prefetch_patched = true;
+          window.__sp_prefetch_total  = 0;
+          window.__sp_prefetch_done   = 0;
+          window.__sp_prefetch_errors = [];
+
+          window.__sunspot_prefetchAll = function(urls) {
+            var concurrency = 8, idx = 0, finished = 0;
+            window.__sp_prefetch_total  = urls.length;
+            window.__sp_prefetch_done   = 0;
+            window.__sp_prefetch_errors = [];
+            console.log('[sp-prefetch] starting', urls.length, 'tile fetches (concurrency=' + concurrency + ')');
+            var t_start = Date.now();
+            return new Promise(function(resolve) {
+              if (!urls.length) { resolve(); return; }
+              function run() {
+                if (idx >= urls.length) return;
+                var url = urls[idx++];
+                var t0 = Date.now();
+                fetch(url).then(function(r) {
+                  var ms = Date.now() - t0;
+                  finished++; window.__sp_prefetch_done++;
+                  if (!r.ok) {
+                    var msg = 'HTTP ' + r.status + ' (' + ms + 'ms) ' + url;
+                    window.__sp_prefetch_errors.push(msg);
+                    console.warn('[sp-prefetch] FAIL', msg);
+                  } else if (ms > 800) {
+                    console.warn('[sp-prefetch] SLOW', ms + 'ms', url);
+                  }
+                  if (finished >= urls.length) {
+                    console.log('[sp-prefetch] done', urls.length, 'tiles in', (Date.now()-t_start) + 'ms,', window.__sp_prefetch_errors.length, 'errors');
+                    resolve();
+                  } else run();
+                }).catch(function(e) {
+                  var ms = Date.now() - t0;
+                  finished++; window.__sp_prefetch_done++;
+                  var msg = 'ERR (' + ms + 'ms) ' + url + ': ' + e.message;
+                  window.__sp_prefetch_errors.push(msg);
+                  console.error('[sp-prefetch] ERROR', e.message, url);
+                  if (finished >= urls.length) {
+                    console.log('[sp-prefetch] done (with errors)', urls.length, 'tiles in', (Date.now()-t_start) + 'ms');
+                    resolve();
+                  } else run();
+                });
+              }
+              for (var j = 0; j < Math.min(concurrency, urls.length); j++) run();
+            });
+          };
+
+          window.__sunspot_prefetchProgress = function() {
+            var t = window.__sp_prefetch_total || 0;
+            return t === 0 ? 1.0 : Math.min(window.__sp_prefetch_done / t, 1.0);
+          };
+
+          window.__sunspot_prefetchErrors = function() {
+            return JSON.stringify(window.__sp_prefetch_errors || []);
+          };
+        })();
+      ''']);
+    } catch (e) {
+      debugPrint('[anim-prefetch] inject error: $e');
+    }
   }
 
   void _resetTileProgress() {
@@ -1694,6 +1767,40 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       '$flaskBaseUrl/shadow/tile/{z}/{x}/{y}.pbf'
       '?hour=$hour&minute=$minute&month=$month&day=$day';
 
+  // Concrete tile URL (no template) for browser-cache prefetch; uses stable session key.
+  String _buildConcreteAnimUrl(int z, int x, int y, int hour, int month, int day, String key) =>
+      '$flaskBaseUrl/shadow/tile/$z/$x/$y.pbf'
+      '?hour=$hour&minute=0&month=$month&day=$day&_anim=sess_$key';
+
+  // MapLibre template URL for animation; uses stable session key so browser-cached tiles are reused.
+  String _buildAnimTemplateUrl(int hour, int month, int day, String key) =>
+      '${_buildShadowTileUrl(hour, 0, month, day)}&_anim=sess_$key';
+
+  // Kick off JS-side browser-cache prefetch (fire-and-forget; poll _prefetchProgress() for status).
+  void _jsPrefetchAll(List<String> urls) {
+    try {
+      final jsonUrls = jsonEncode(urls);
+      js.context.callMethod('eval', ['window.__sunspot_prefetchAll&&window.__sunspot_prefetchAll($jsonUrls)']);
+    } catch (e) {
+      debugPrint('[anim-prefetch] launch error: $e');
+    }
+  }
+
+  double _prefetchProgress() {
+    try {
+      return (js.context.callMethod('eval',
+          ['(window.__sunspot_prefetchProgress||function(){return 1.0;})()']) as num?)?.toDouble() ?? 1.0;
+    } catch (_) { return 1.0; }
+  }
+
+  List<String> _prefetchErrors() {
+    try {
+      final raw = js.context.callMethod('eval',
+          ['(window.__sunspot_prefetchErrors||function(){return "[]";})()']) as String? ?? '[]';
+      return (jsonDecode(raw) as List).cast<String>();
+    } catch (_) { return []; }
+  }
+
   // Create or refresh two vector tile sources + 12 shadow layers for smooth z14→z15 cross-fade.
   //
   // Macro source (maxzoom:14): serves z12-z14 macro tiles; overzooms past z14 while fading out.
@@ -1924,7 +2031,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return;
     }
     final start = _sunriseHour ?? 6.0;
-    _preloadGen++; // new run — stale callbacks from any previous preload self-abort
+    _preloadGen++;
+    _animSessionKey = DateTime.now().millisecondsSinceEpoch.toString(); // stable key for browser cache
     setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
@@ -1987,9 +2095,41 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           }
         }(),
     ]);
-    if (_preloadGen == gen && mounted) {
-      _animElevations = elevMap;
-      debugPrint('[anim] preload done — elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
+    if (_preloadGen != gen || !mounted) return;
+    _animElevations = elevMap;
+    debugPrint('[anim] phase1 done — server warmed ${gridTiles.length} tiles × ${endH - startH + 1} hours, elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
+
+    // --- Phase 2: Pre-fetch all tiles into browser cache ---
+    // Uses a stable session key so MapLibre template URLs match the pre-fetched URLs exactly.
+    final sessionKey = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
+    final prefetchUrls = <String>[
+      for (int h = startH; h <= endH; h++)
+        for (final (z, x, y) in gridTiles)
+          _buildConcreteAnimUrl(z, x, y, h, _selectedDate.month, _selectedDate.day, sessionKey),
+    ];
+    final phase2Start = DateTime.now();
+    debugPrint('[anim] phase2 start — ${prefetchUrls.length} browser-cache prefetch requests (key=$sessionKey)');
+    _jsPrefetchAll(prefetchUrls);
+
+    // Poll JS progress and update the loading pill.
+    while (_preloadGen == gen && mounted && _preloading24h) {
+      await Future.delayed(const Duration(milliseconds: 120));
+      if (_preloadGen != gen) break;
+      final p = _prefetchProgress();
+      if (mounted && _preloading24h) {
+        setState(() {
+          _loadingProgress = p;
+          _loadingStage    = 'Pre-fetching ${(p * prefetchUrls.length).round()}/${prefetchUrls.length} tiles';
+        });
+      }
+      if (p >= 1.0) break;
+    }
+
+    final phase2Ms = DateTime.now().difference(phase2Start).inMilliseconds;
+    final errors = _prefetchErrors();
+    debugPrint('[anim] phase2 done in ${phase2Ms}ms — ${errors.length} errors');
+    if (errors.isNotEmpty) {
+      for (final e in errors) debugPrint('[anim-prefetch] $e');
     }
   }
 
@@ -2099,10 +2239,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final elev0 = _animElevations[startH]  ?? 0.0;
     final elev1 = _animElevations[secondH] ?? 0.0;
 
-    // Unique cache-buster per animation run so MapLibre doesn't reuse stale tile responses.
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    final urlA = '${_buildShadowTileUrl(startH,  0, _selectedDate.month, _selectedDate.day)}&_anim=a$ts';
-    final urlB = '${_buildShadowTileUrl(secondH, 0, _selectedDate.month, _selectedDate.day)}&_anim=b$ts';
+    // Use stable session key so MapLibre tile requests match pre-fetched browser-cache URLs.
+    final key  = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
+    final urlA = _buildAnimTemplateUrl(startH,  _selectedDate.month, _selectedDate.day, key);
+    final urlB = _buildAnimTemplateUrl(secondH, _selectedDate.month, _selectedDate.day, key);
 
     _startIdleWait();
     await mc.addSource('shadow-anim-macro-a', VectorSourceProperties(tiles: [urlA], minzoom: 0, maxzoom: 14));
@@ -2187,8 +2327,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     final s      = _animActiveBuf == 0 ? 'b' : 'a'; // hidden suffix
     final elev   = _animElevations[nextH] ?? 0.0;
-    final ts     = DateTime.now().millisecondsSinceEpoch;
-    final newUrl = '${_buildShadowTileUrl(nextH, 0, _selectedDate.month, _selectedDate.day)}&_anim=${s}_$ts';
+    final key    = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
+    final newUrl = _buildAnimTemplateUrl(nextH, _selectedDate.month, _selectedDate.day, key);
     final macroS = 'shadow-anim-macro-$s';
     final microS = 'shadow-anim-micro-$s';
 
@@ -2233,42 +2373,55 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // Double-buffer animation loop.
-  // Each frame: hold 500ms while hidden buffer loads next hour from warm cache,
+  // Each frame: hold 500ms while hidden buffer loads next hour from browser-cached tiles,
   // then swap buffers with a single parallel opacity update (no source/layer recreation).
   Future<void> _run24hStep() async {
-    final startH = _hour.toInt();
-    final endH   = (_sunsetHour ?? 20.0).toInt();
+    final startH   = _hour.toInt();
+    final endH     = (_sunsetHour ?? 20.0).toInt();
+    final animKey  = _animSessionKey ?? 'unknown';
+    debugPrint('[anim] run start h=$startH→$endH key=$animKey');
 
     await _setupAnimationLayers(startH);
     if (!mounted || !_animating) { await _teardownAnimationLayers(); return; }
 
-    // Wait for initial frame (buffer A, startH) to render from warm cache.
+    // Wait for initial frame (buffer A, startH) to render — browser cache makes this fast.
+    final initWaitStart = DateTime.now();
     for (var i = 0; i < 100 && _animating && !_isIdle(); i++) {
       await Future.delayed(const Duration(milliseconds: 50));
     }
     _stopIdleWait();
+    debugPrint('[anim] initial frame ready in ${DateTime.now().difference(initWaitStart).inMilliseconds}ms');
 
     while (_animating) {
-      final currentH = _hour.toInt();
-      final nextH    = currentH + 1;
+      final currentH   = _hour.toInt();
+      final nextH      = currentH + 1;
+      final frameStart = DateTime.now();
 
       // Arm idle + start loading hidden buffer concurrently with the hold.
       _startIdleWait();
       if (nextH <= endH) unawaited(_reloadHiddenBuffer(nextH));
 
-      // Hold current frame for 500ms; hidden buffer tiles load from cache during this time.
+      // Hold current frame for 500ms; hidden buffer tiles load from browser cache during this time.
       await Future.delayed(const Duration(milliseconds: 500));
       if (!_animating) break;
 
-      // Wait for idle — warm cache hits ~50ms, cold computes can take several seconds.
-      // Hard ceiling: 8s (160 × 50ms) gives cold-cache tiles time to arrive.
+      // Wait for idle — browser-cache hits should be <100ms; cold misses up to 8s.
       var loaded = false;
+      var idleWaitMs = 0;
       for (var i = 0; i < 160 && _animating; i++) {
         await Future.delayed(const Duration(milliseconds: 50));
+        idleWaitMs += 50;
         if (_isIdle()) { loaded = true; break; }
       }
       _stopIdleWait();
       if (!_animating) break;
+
+      final totalFrameMs = DateTime.now().difference(frameStart).inMilliseconds;
+      if (loaded) {
+        debugPrint('[anim] frame h=$currentH→$nextH ready: idle_wait=${idleWaitMs}ms total=${totalFrameMs}ms');
+      } else {
+        debugPrint('[anim] frame h=$currentH→$nextH TIMEOUT after ${idleWaitMs}ms — browser cache miss? key=$animKey');
+      }
 
       if (nextH > endH) {
         setState(() => _animating = false);
@@ -2278,7 +2431,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // If hidden buffer didn't finish loading, hold current frame longer instead of
       // swapping into emptiness. The in-flight load continues in background.
       if (!loaded) {
-        debugPrint('[anim] hidden buffer for h=$nextH not loaded after 8.5s — extending hold 4s');
+        debugPrint('[anim] extending hold 4s for h=$nextH (check browser console for prefetch errors)');
         await Future.delayed(const Duration(seconds: 4));
         if (!_animating) break;
       }
@@ -2287,6 +2440,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _swapAnimBuffers();
     }
 
+    debugPrint('[anim] run end — teardown');
     await _teardownAnimationLayers();
   }
 
