@@ -1380,7 +1380,7 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
 # ---------------------------------------------------------------------------
 
 @app.route("/shadow/prewarm_tile/<int:z>/<int:x>/<int:y>")
-@limiter.limit("6 per minute")
+@limiter.limit("60 per minute")
 def shadow_prewarm_tile(z, x, y):
     """Batch-compute and cache all daylight hours for one tile.
     Replaces 15 individual tile requests with one; client calls this 9× for the 3×3 grid."""
@@ -1433,6 +1433,9 @@ def shadow_prewarm_tile(z, x, y):
 
             if not is_computing:
                 evt.wait(timeout=60)
+                with _cache_lock:
+                    if tck in _tile_cache:
+                        cached_count += 1
                 return
 
             try:
@@ -1447,7 +1450,9 @@ def shadow_prewarm_tile(z, x, y):
                     _tile_in_flight.pop(tck, None)
                 evt.set()
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        # Sequential per request: Shapely + GIL means in-request parallelism just thrashes.
+        # Cross-request parallelism (Flask threaded=True) still scales 9 prewarm calls.
+        with ThreadPoolExecutor(max_workers=1) as pool:
             list(pool.map(_compute_hour, hours))
 
         return jsonify({"cached": cached_count})
