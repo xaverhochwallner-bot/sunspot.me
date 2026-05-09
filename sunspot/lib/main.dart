@@ -1536,6 +1536,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<void> fetchShadows() async {
     if (!_mapReady || _mapController == null) return;
+    debugPrint('[shadow] fetchShadows() called animating=$_animating ready=$_shadowLayersReady hour=${_hour.toStringAsFixed(1)}');
 
     _pillTimer?.cancel();
     // Complete previous completer so any awaiting caller (animation) unblocks
@@ -1730,6 +1731,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _startIdleWait();
       _resetTileProgress();
       final n = _shadowSourceNonce;
+      debugPrint('[shadow] same-URL path nonce=$n elev=${elevation.toStringAsFixed(1)} opL0=${opL0.toStringAsFixed(2)}');
       try {
         await Future.wait([
           ctrl.setLayerProperties('shadow-macro-l0-fill-$n', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: macroOp(opL0))),
@@ -1804,58 +1806,60 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
     final n = _shadowSourceNonce;
 
-    // All layers start at 0 opacity; _fadeShadowLayersIn ramps them up after tiles render.
+    // Paint at proper opacity from creation. MapLibre only renders features once tiles arrive,
+    // so this is safe and removes the dependency on _fadeShadowLayersIn ever firing.
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: macroOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: macroLineOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: macroOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: macroLineOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: macroOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(macroSrc, 'shadow-macro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: macroLineOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
 
     // Micro layers: invisible at z14, fade in to per-building detail at z15+.
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-fill-$n',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: microOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l0-line-$n',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: microLineOp(opL0)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-fill-$n',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: microOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l1-line-$n',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: microLineOp(opL1)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-fill-$n',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0),
+      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: microOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     await ctrl.addLayer(microSrc, 'shadow-micro-l2-line-$n',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: 0.0),
+      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: microLineOp(opL2)),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false,
     );
     _shadowLayersReady = true;
+    debugPrint('[shadow] live layers built nonce=$n elev=${elevation.toStringAsFixed(1)} opL0=${opL0.toStringAsFixed(2)} url=$tileUrl');
   }
 
   List<String> _shadowGhostLayerIds(int nonce) => [
@@ -1981,6 +1985,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     ]);
     if (_preloadGen == gen && mounted) {
       _animElevations = elevMap;
+      debugPrint('[anim] preload done — elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
     }
   }
 
@@ -2101,6 +2106,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     await mc.addSource('shadow-anim-macro-b', VectorSourceProperties(tiles: [urlB], minzoom: 0, maxzoom: 14));
     await mc.addSource('shadow-anim-micro-b', VectorSourceProperties(tiles: [urlB], minzoom: 0, maxzoom: 17));
 
+    debugPrint('[anim] setup startH=$startH (elev=${elev0.toStringAsFixed(1)}) secondH=$secondH (elev=${elev1.toStringAsFixed(1)}) elevMapKeys=${_animElevations.keys.toList()..sort()} urlA=$urlA');
     await _addAnimLayers('a', 'shadow-anim-macro-a', 'shadow-anim-micro-a', elev0, visible: true);
     await _addAnimLayers('b', 'shadow-anim-macro-b', 'shadow-anim-micro-b', elev1, visible: false);
 
@@ -2132,6 +2138,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final showH  = _animActiveBuf == 0 ? _animHourB : _animHourA;
     final elev   = _animElevations[showH] ?? 0.0;
     final (oL0, oL1, oL2) = _animOpacities(elev);
+    debugPrint('[anim] swap show=$showS hide=$hideS h=$showH elev=${elev.toStringAsFixed(1)} oL0=${oL0.toStringAsFixed(2)}');
 
     try {
       await Future.wait([
@@ -2217,6 +2224,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
     // Force live-view shadow layers to rebuild from scratch (they were zeroed at animation start).
     _shadowLayersReady = false;
+    debugPrint('[anim] teardown done — calling fetchShadows() to restore live view');
     fetchShadows();
   }
 
