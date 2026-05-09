@@ -1933,33 +1933,37 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     });
   }
 
-  // Warm the server tile cache for every daylight hour — 9 batch requests (3×3 grid).
-  // Each prewarm_tile call computes all ~15 daylight hours for one tile in one request,
-  // replacing the old 150-request fan-out that exceeded the 120/min rate limit.
+  // Warm the server tile cache for every daylight hour at BOTH zoom levels needed.
+  // Macro source uses z14 tiles (always — its maxzoom is 14, so it overzooms past z14).
+  // Micro source uses z15 tiles (visible from camera z15+, where macro fades out).
+  // 3×3 grid at each zoom = 18 prewarm calls. Server rate limit is 60/min.
   // Also preloads sun elevations for every hour so the animation loop needs no per-frame HTTP calls.
   Future<void> _preload24h() async {
     if (!_mapReady || _mapController == null) return;
     final gen    = _preloadGen;
-    final zoom   = (_mapController!.cameraPosition?.zoom ?? 14).toInt().clamp(10, 17);
     final startH = (_sunriseHour ?? 6.0).toInt();
     final endH   = (_sunsetHour  ?? 21.0).toInt();
-    final tileX  = _lonToTileX(_currentCenter.longitude, zoom);
-    final tileY  = _latToTileY(_currentCenter.latitude, zoom);
+    final z14X   = _lonToTileX(_currentCenter.longitude, 14);
+    final z14Y   = _latToTileY(_currentCenter.latitude,  14);
+    final z15X   = _lonToTileX(_currentCenter.longitude, 15);
+    final z15Y   = _latToTileY(_currentCenter.latitude,  15);
 
-    final gridTiles = [
+    final gridTiles = <(int, int, int)>[
       for (var dx = -1; dx <= 1; dx++)
-        for (var dy = -1; dy <= 1; dy++)
-          (tileX + dx, tileY + dy),
+        for (var dy = -1; dy <= 1; dy++) ...[
+          (14, z14X + dx, z14Y + dy),
+          (15, z15X + dx, z15Y + dy),
+        ],
     ];
 
     int doneCount = 0;
-    // Tile prewarm (9 requests) + elevation fetch (one per hour) run in parallel.
+    // Tile prewarm (18 requests) + elevation fetch (one per hour) run in parallel.
     final elevMap = <int, double>{};
     await Future.wait([
       // Tile prewarm requests
-      for (final (x, y) in gridTiles)
+      for (final (z, x, y) in gridTiles)
         () async {
-          await _api.prewarmTile(zoom, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
+          await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
           if (_preloadGen != gen) return;
           doneCount++;
           if (mounted && _preloading24h) {
@@ -2256,10 +2260,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await Future.delayed(const Duration(milliseconds: 500));
       if (!_animating) break;
 
-      // Wait for idle — hidden buffer tiles should already be loaded (cache hit ~ 50ms).
-      // Hard ceiling: 3s (60 × 50ms).
-      for (var i = 0; i < 60 && _animating && !_isIdle(); i++) {
+      // Wait for idle — warm cache hits ~50ms, cold computes can take several seconds.
+      // Hard ceiling: 8s (160 × 50ms) gives cold-cache tiles time to arrive.
+      var loaded = false;
+      for (var i = 0; i < 160 && _animating; i++) {
         await Future.delayed(const Duration(milliseconds: 50));
+        if (_isIdle()) { loaded = true; break; }
       }
       _stopIdleWait();
       if (!_animating) break;
@@ -2267,6 +2273,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (nextH > endH) {
         setState(() => _animating = false);
         break;
+      }
+
+      // If hidden buffer didn't finish loading, hold current frame longer instead of
+      // swapping into emptiness. The in-flight load continues in background.
+      if (!loaded) {
+        debugPrint('[anim] hidden buffer for h=$nextH not loaded after 8.5s — extending hold 4s');
+        await Future.delayed(const Duration(seconds: 4));
+        if (!_animating) break;
       }
 
       setState(() => _hour += 1.0);
