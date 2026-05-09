@@ -1664,7 +1664,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             try { await mc.removeSource('shadow-micro-$old'); } catch (_) {}
           }
         }
-        if (gen == _fetchGen && mounted && sourceRebuilt) {
+        if (gen == _fetchGen && mounted) {
           await _fadeShadowLayersIn(_shadowSourceNonce, elev);
         }
         await Future.delayed(const Duration(milliseconds: 180));
