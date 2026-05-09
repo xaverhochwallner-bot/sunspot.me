@@ -1,7 +1,6 @@
 from math import radians, tan, sin, cos
 from shapely.geometry import Polygon
 from pysolar.solar import get_altitude, get_azimuth
-from datetime import datetime, timezone
 
 def building_shadow_polygon(footprint, height_m, when_utc, lat, lon):
     """

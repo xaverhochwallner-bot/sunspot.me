@@ -20,7 +20,6 @@ import os
 import json
 import time
 import re
-import gzip as _gzip
 import atexit
 import tempfile
 from collections import OrderedDict
@@ -1969,7 +1968,7 @@ def is_sunny():
         elevation, azimuth = get_sun_angles(lat, lon, t)
         in_shadow = _point_in_shadow(lon, lat, elevation, azimuth)
         return jsonify({'sunny': bool(elevation > 0 and not in_shadow)})
-    except Exception as e:
+    except Exception:
         _log.exception("is_sunny error")
         return jsonify({'error': 'internal server error'}), 500
 
@@ -2210,7 +2209,6 @@ def find_sunny_spots():
 
         # Score each candidate: base = patch area, boosted/penalised by land-use
         def _score(pt, patch_area):
-            from shapely.geometry import Point as SPoint
             score = patch_area
 
             query_box = shapely_box(pt.x - 0.001, pt.y - 0.001, pt.x + 0.001, pt.y + 0.001)
@@ -2257,7 +2255,6 @@ def find_sunny_spots():
 
         # Compute remaining sun hours — cache-first, stop at first uncached hour
         def _sun_remaining(pt):
-            from shapely.geometry import Point as SPoint
             spot_lat, spot_lon = pt.y, pt.x
             current_hour = now.hour
             # Grid candidates are from sunlit patches → current hour always sunny
@@ -2327,7 +2324,6 @@ def heatmap():
         day     = int(request.args['day'])
         hour    = int(request.args['hour'])
         minute  = int(request.args.get('minute', 0))
-        zoom    = min(int(request.args.get('zoom', 12)), 12)
     except (KeyError, ValueError) as e:
         return jsonify({'error': str(e)}), 400
     if not (-90.0 <= min_lat <= 90.0) or not (-90.0 <= max_lat <= 90.0):

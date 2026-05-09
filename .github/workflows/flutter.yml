@@ -1,0 +1,41 @@
+name: Flutter CI
+
+on:
+  push:
+    branches: [dev, master]
+    paths:
+      - 'sunspot/**'
+      - '.github/workflows/flutter.yml'
+  pull_request:
+    branches: [dev, master]
+    paths:
+      - 'sunspot/**'
+      - '.github/workflows/flutter.yml'
+
+jobs:
+  build:
+    name: Analyze, test, build web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sunspot
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
+
+      - name: Test
+        run: flutter test
+
+      - name: Build web (release)
+        run: flutter build web --release --source-maps
