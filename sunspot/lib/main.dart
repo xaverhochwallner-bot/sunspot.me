@@ -2088,7 +2088,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     for (var i = 0; i < gridTiles.length; i += batchSize) {
       if (_preloadGen != gen || !mounted) break;
       final batch = gridTiles.sublist(i, (i + batchSize).clamp(0, gridTiles.length));
-      await Future.wait(batch.map(((z, x, y)) async {
+      await Future.wait(batch.map((tile) async {
+        final (z, x, y) = tile;
         try {
           await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
         } catch (_) {}
