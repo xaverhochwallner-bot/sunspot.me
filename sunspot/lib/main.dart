@@ -2055,32 +2055,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final z15X   = _lonToTileX(_currentCenter.longitude, 15);
     final z15Y   = _latToTileY(_currentCenter.latitude,  15);
 
+    // 5×5 grid (±2 tiles) covers any mobile viewport at z14–z15 with margin.
     final gridTiles = <(int, int, int)>[
-      for (var dx = -1; dx <= 1; dx++)
-        for (var dy = -1; dy <= 1; dy++) ...[
+      for (var dx = -2; dx <= 2; dx++)
+        for (var dy = -2; dy <= 2; dy++) ...[
           (14, z14X + dx, z14Y + dy),
           (15, z15X + dx, z15Y + dy),
         ],
     ];
 
-    int doneCount = 0;
-    // Tile prewarm (18 requests) + elevation fetch (one per hour) run in parallel.
+    // Elevation prefetch runs in parallel with Phase 1.
     final elevMap = <int, double>{};
-    await Future.wait([
-      // Tile prewarm requests
-      for (final (z, x, y) in gridTiles)
-        () async {
-          await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
-          if (_preloadGen != gen) return;
-          doneCount++;
-          if (mounted && _preloading24h) {
-            setState(() {
-              _loadingProgress = doneCount / gridTiles.length;
-              _loadingStage    = 'Warming $doneCount/${gridTiles.length} tiles';
-            });
-          }
-        }(),
-      // Elevation prefetch for every daylight hour
+    final elevFutures = <Future>[
       for (int h = startH; h <= endH; h++)
         () async {
           try {
@@ -2093,7 +2079,32 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
             elevMap[h] = 0.0;
           }
         }(),
-    ]);
+    ];
+
+    // Phase 1: prewarm server-side tile cache in batches of 5 to avoid OOM.
+    // Each call asks the server to precompute all daylight hours for one tile.
+    int doneCount = 0;
+    const batchSize = 5;
+    for (var i = 0; i < gridTiles.length; i += batchSize) {
+      if (_preloadGen != gen || !mounted) break;
+      final batch = gridTiles.sublist(i, (i + batchSize).clamp(0, gridTiles.length));
+      await Future.wait(batch.map(((z, x, y)) async {
+        try {
+          await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
+        } catch (_) {}
+        if (_preloadGen != gen) return;
+        doneCount++;
+        if (mounted && _preloading24h) {
+          setState(() {
+            _loadingProgress = doneCount / gridTiles.length;
+            _loadingStage    = 'Warming $doneCount/${gridTiles.length} tiles';
+          });
+        }
+      }));
+    }
+
+    // Wait for elevations alongside the prewarm batches.
+    await Future.wait(elevFutures);
     if (_preloadGen != gen || !mounted) return;
     _animElevations = elevMap;
     debugPrint('[anim] phase1 done — server warmed ${gridTiles.length} tiles × ${endH - startH + 1} hours, elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
@@ -2361,10 +2372,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
     }
 
-    // Load first hour at 0.05 opacity and wait for its tiles to fully render.
-    _startIdleWait();
+    // Load first hour at 0.05 opacity, arm idle AFTER layers exist (tile requests start then).
     await _loadAnimHour(startH);
     if (!_animating || !mounted) { await _teardownAnimationLayers(); return; }
+    _startIdleWait();
     for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {
       await Future.delayed(const Duration(milliseconds: 50));
     }
@@ -2386,10 +2397,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await Future.delayed(const Duration(milliseconds: 1200));
       if (!_animating) break;
 
-      // Load next hour at 0.05 opacity — triggers MapLibre tile fetch.
-      _startIdleWait();
+      // Load next hour at 0.05 opacity; arm idle AFTER all 12 layers are added.
       await _loadAnimHour(nextH);
       if (!_animating) break;
+      _startIdleWait();
 
       // Wait until next hour's tiles are fully rendered before crossfading.
       for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {
