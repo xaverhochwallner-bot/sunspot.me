@@ -2032,6 +2032,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final start = _sunriseHour ?? 6.0;
     _preloadGen++;
     _animSessionKey = DateTime.now().millisecondsSinceEpoch.toString(); // stable key for browser cache
+    debugPrint('[DIAG-1] toggle24h called — animating=$_animating preloading=$_preloading24h gen=$_preloadGen key=$_animSessionKey');
     setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
@@ -2200,6 +2201,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _loadAnimHour(int h, {double opacity = 0.05}) async {
     final mc = _mapController;
     if (mc == null || !_animLayersCreated) return;
+    debugPrint('[DIAG-3] loadAnimHour h=$h — mc=${mc != null} layersCreated=$_animLayersCreated opacity=$opacity');
     final key = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
     final url = _buildAnimTemplateUrl(h, _selectedDate.month, _selectedDate.day, key);
     try {
@@ -2246,6 +2248,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: opacity),
       sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
     _animLoadedHours.add(h);
+    debugPrint('[DIAG-4] loadAnimHour DONE h=$h — loadedHours=$_animLoadedHours layersCreated=$_animLayersCreated');
   }
 
   // Bring hour h to its correct full-target opacity (zoom-expression based).
@@ -2253,6 +2256,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _revealAnimHour(int h) async {
     final mc = _mapController;
     if (mc == null || !_animLayersCreated) return;
+    debugPrint('[DIAG-6] revealAnimHour h=$h — elev=${_animElevations[h]} layersCreated=$_animLayersCreated animating=$_animating');
     final elev = _animElevations[h] ?? 0.0;
     final (oL0, oL1, oL2) = _animOpacities(elev);
     try {
@@ -2272,6 +2276,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ]);
     } catch (_) {}
     _animCurrentH = h;
+    debugPrint('[DIAG-7] revealAnimHour COMPLETE h=$h — animCurrentH=$_animCurrentH');
   }
 
   // Remove source + layers for hour h, freeing MapLibre tile memory.
@@ -2335,6 +2340,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<void> _teardownAnimationLayers() async {
     if (!_animLayersCreated) return;
     _animLayersCreated = false;
+    debugPrint('[DIAG-8] TEARDOWN called — loadedHours=$_animLoadedHours animating=$_animating mounted=$mounted');
     final mc = _mapController;
     if (mc == null) return;
     for (final h in Set<int>.from(_animLoadedHours)) {
@@ -2357,6 +2363,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final startH = _hour.toInt();
     final endH   = (_sunsetHour ?? 20.0).toInt();
     _animLayersCreated = true;
+    debugPrint('[DIAG-2] run24hStep START — startH=$startH endH=$endH animating=$_animating mounted=$mounted layersCreated=$_animLayersCreated');
     _animLoadedHours   = {};
     debugPrint('[anim] run start h=$startH→$endH key=${_animSessionKey ?? "unknown"}');
 
@@ -2381,6 +2388,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await Future.delayed(const Duration(milliseconds: 50));
     }
     _stopIdleWait();
+    debugPrint('[DIAG-5] idle-wait for startH=$startH done — isIdle=${_isIdle()} animating=$_animating');
     if (!_animating || !mounted) { await _teardownAnimationLayers(); return; }
 
     // Reveal first hour at correct zoom-expression opacity now that tiles are loaded.
