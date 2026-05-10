@@ -2172,18 +2172,18 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final mc = _mapController;
     if (mc == null) return;
     final (oL0, oL1, oL2) = _animOpacities(elev);
-    final mL0 = visible ? _animMacroOp(oL0)     : 0.0;
-    final mL1 = visible ? _animMacroOp(oL1)     : 0.0;
-    final mL2 = visible ? _animMacroOp(oL2)     : 0.0;
-    final mlL0= visible ? _animMacroLineOp(oL0) : 0.0;
-    final mlL1= visible ? _animMacroLineOp(oL1) : 0.0;
-    final mlL2= visible ? _animMacroLineOp(oL2) : 0.0;
-    final uL0 = visible ? _animMicroOp(oL0)     : 0.0;
-    final uL1 = visible ? _animMicroOp(oL1)     : 0.0;
-    final uL2 = visible ? _animMicroOp(oL2)     : 0.0;
-    final ulL0= visible ? _animMicroLineOp(oL0) : 0.0;
-    final ulL1= visible ? _animMicroLineOp(oL1) : 0.0;
-    final ulL2= visible ? _animMicroLineOp(oL2) : 0.0;
+    final mL0 = visible ? _animMacroOp(oL0)     : 0.001;
+    final mL1 = visible ? _animMacroOp(oL1)     : 0.001;
+    final mL2 = visible ? _animMacroOp(oL2)     : 0.001;
+    final mlL0= visible ? _animMacroLineOp(oL0) : 0.001;
+    final mlL1= visible ? _animMacroLineOp(oL1) : 0.001;
+    final mlL2= visible ? _animMacroLineOp(oL2) : 0.001;
+    final uL0 = visible ? _animMicroOp(oL0)     : 0.001;
+    final uL1 = visible ? _animMicroOp(oL1)     : 0.001;
+    final uL2 = visible ? _animMicroOp(oL2)     : 0.001;
+    final ulL0= visible ? _animMicroLineOp(oL0) : 0.001;
+    final ulL1= visible ? _animMicroLineOp(oL1) : 0.001;
+    final ulL2= visible ? _animMicroLineOp(oL2) : 0.001;
     // Layer order matters for z-sorting; add macro first (lower z), micro on top.
     await mc.addLayer(macroSrc, 'shadow-anim-macro-l0-fill-$s',
       FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: mL0),
@@ -2401,8 +2401,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _startIdleWait();
       if (nextH <= endH) unawaited(_reloadHiddenBuffer(nextH));
 
-      // Hold current frame for 500ms; hidden buffer tiles load from browser cache during this time.
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Hold current frame for 1500ms; hidden buffer tiles load from browser cache during this time.
+      await Future.delayed(const Duration(milliseconds: 1500));
       if (!_animating) break;
 
       // Wait for idle — browser-cache hits should be <100ms; cold misses up to 8s.
