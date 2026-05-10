@@ -2373,10 +2373,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
     }
 
-    // Load first hour at 0.05 opacity, arm idle AFTER layers exist (tile requests start then).
+    // Arm idle BEFORE addLayer so we don't miss events that fire during the awaited calls.
+    _startIdleWait();
     await _loadAnimHour(startH);
     if (!_animating || !mounted) { await _teardownAnimationLayers(); return; }
-    _startIdleWait();
     for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {
       await Future.delayed(const Duration(milliseconds: 50));
     }
@@ -2395,13 +2395,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (nextH > endH) { setState(() => _animating = false); break; }
 
       // Display current frame.
-      await Future.delayed(const Duration(milliseconds: 1200));
+      await Future.delayed(const Duration(milliseconds: 2000));
       if (!_animating) break;
 
-      // Load next hour at 0.05 opacity; arm idle AFTER all 12 layers are added.
+      // Arm idle BEFORE addLayer so we don't miss events that fire during the awaited calls.
+      _startIdleWait();
       await _loadAnimHour(nextH);
       if (!_animating) break;
-      _startIdleWait();
 
       // Wait until next hour's tiles are fully rendered before crossfading.
       for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {

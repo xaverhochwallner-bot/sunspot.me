@@ -81,7 +81,7 @@ async function staleWhileRevalidate(req, cacheName, maxEntries) {
       if (maxEntries > 0) trimCache(cacheName, maxEntries);
     }
     return res;
-  }).catch(() => cached);
+  }).catch(() => cached || Response.error());
   return cached || fetchPromise;
 }
 
