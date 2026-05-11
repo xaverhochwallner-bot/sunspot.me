@@ -2044,7 +2044,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _preloadGen++;
     _animSessionKey = DateTime.now().millisecondsSinceEpoch.toString(); // stable key for browser cache
     print('[DIAG-1] toggle24h called — animating=$_animating preloading=$_preloading24h gen=$_preloadGen key=$_animSessionKey');
-    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Loading'; _loadingProgress = 0; });
+    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
       setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
@@ -2094,10 +2094,34 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         }(),
     ];
 
-    // Fetch bundle tiles — server computes all daylight hours per tile and caches geometry.
-    // Bundles encode geometry on-demand; concurrent requests for the same tile are deduplicated
-    // server-side so no duplicate compute. Phase 1 prewarm is skipped: bundle fetch does both
-    // geometry compute and encoding in one round-trip.
+    // Phase 1: prewarm server-side geometry cache for all z14/z15 tiles.
+    // Angle-bucketing deduplicates: adjacent tiles share sun angle → only ~17 actual computes
+    // run across the whole grid (one per unique elevation/azimuth bucket). Fills _shadow_cache
+    // so Phase 2 bundle fetches are O(1) lookups instead of cold 15s-per-hour computes.
+    int doneCount = 0;
+    const batchSize = 5;
+    for (var i = 0; i < gridTiles.length; i += batchSize) {
+      if (_preloadGen != gen || !mounted) break;
+      final batch = gridTiles.sublist(i, (i + batchSize).clamp(0, gridTiles.length));
+      await Future.wait(batch.map((tile) async {
+        final (z, x, y) = tile;
+        try {
+          await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
+        } catch (_) {}
+        if (_preloadGen != gen) return;
+        doneCount++;
+        if (mounted && _preloading24h) {
+          setState(() {
+            _loadingProgress = doneCount / gridTiles.length;
+            _loadingStage    = 'Warming $doneCount/${gridTiles.length} tiles';
+          });
+        }
+      }));
+    }
+    if (_preloadGen != gen || !mounted) return;
+    debugPrint('[anim] phase1 done — ${gridTiles.length} tiles warmed, elevMap pending');
+
+    // Phase 2: fetch bundle tiles into browser cache (fast — geometry already in _shadow_cache).
     final sessionKey = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
     final prefetchUrls = <String>[
       for (final (z, x, y) in gridTiles)
@@ -2194,8 +2218,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final key = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
     final url = _buildBundleTemplateUrl(_selectedDate.month, _selectedDate.day, startH, endH, key);
     try {
-      await mc.addSource('shadow-anim-bundle-macro', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 14));
-      await mc.addSource('shadow-anim-bundle-micro', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 17));
+      // minzoom=14 prevents MapLibre requesting z≤13 tiles — those have 400+ super-blocks
+      // and take 50-70s per hour to compute (17h × 70s = 20min/tile = server lockup).
+      await mc.addSource('shadow-anim-bundle-macro', VectorSourceProperties(tiles: [url], minzoom: 14, maxzoom: 14));
+      await mc.addSource('shadow-anim-bundle-micro', VectorSourceProperties(tiles: [url], minzoom: 14, maxzoom: 15));
     } catch (_) {}
     if (!_animLayersCreated) return;
     const op = 0.05;
