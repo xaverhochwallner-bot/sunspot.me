@@ -2044,7 +2044,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _preloadGen++;
     _animSessionKey = DateTime.now().millisecondsSinceEpoch.toString(); // stable key for browser cache
     print('[DIAG-1] toggle24h called — animating=$_animating preloading=$_preloading24h gen=$_preloadGen key=$_animSessionKey');
-    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
+    setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Loading'; _loadingProgress = 0; });
     _preload24h().then((_) {
       if (!mounted || !_preloading24h) return;
       setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
@@ -2067,16 +2067,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final z15X   = _lonToTileX(_currentCenter.longitude, 15);
     final z15Y   = _latToTileY(_currentCenter.latitude,  15);
 
-    // 5×5 grid (±2 tiles) covers any mobile viewport at z14–z15 with margin.
+    // 3×3 grid (±1 tile) — 18 tiles total. Covers the mobile viewport at z14–z15.
+    // Smaller than the old 5×5 so all cache entries fit within MAX_CACHE=1500 (18×15h=270).
     final gridTiles = <(int, int, int)>[
-      for (var dx = -2; dx <= 2; dx++)
-        for (var dy = -2; dy <= 2; dy++) ...[
+      for (var dx = -1; dx <= 1; dx++)
+        for (var dy = -1; dy <= 1; dy++) ...[
           (14, z14X + dx, z14Y + dy),
           (15, z15X + dx, z15Y + dy),
         ],
     ];
 
-    // Elevation prefetch runs in parallel with Phase 1.
+    // Elevation prefetch — needed for per-frame opacity expressions.
     final elevMap = <int, double>{};
     final elevFutures = <Future>[
       for (int h = startH; h <= endH; h++)
@@ -2093,44 +2094,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         }(),
     ];
 
-    // Phase 1: prewarm server-side tile cache in batches of 5 to avoid OOM.
-    // Each call asks the server to precompute all daylight hours for one tile.
-    int doneCount = 0;
-    const batchSize = 5;
-    for (var i = 0; i < gridTiles.length; i += batchSize) {
-      if (_preloadGen != gen || !mounted) break;
-      final batch = gridTiles.sublist(i, (i + batchSize).clamp(0, gridTiles.length));
-      await Future.wait(batch.map((tile) async {
-        final (z, x, y) = tile;
-        try {
-          await _api.prewarmTile(z, x, y, startH, endH, _selectedDate.month, _selectedDate.day);
-        } catch (_) {}
-        if (_preloadGen != gen) return;
-        doneCount++;
-        if (mounted && _preloading24h) {
-          setState(() {
-            _loadingProgress = doneCount / gridTiles.length;
-            _loadingStage    = 'Warming $doneCount/${gridTiles.length} tiles';
-          });
-        }
-      }));
-    }
-
-    // Wait for elevations alongside the prewarm batches.
-    await Future.wait(elevFutures);
-    if (_preloadGen != gen || !mounted) return;
-    _animElevations = elevMap;
-    debugPrint('[anim] phase1 done — server warmed ${gridTiles.length} tiles × ${endH - startH + 1} hours, elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
-
-    // --- Phase 2: Pre-fetch bundle tiles into browser cache ---
-    // One bundle URL per tile covers ALL daylight hours (~15×15x fewer requests than individual tiles).
+    // Fetch bundle tiles — server computes all daylight hours per tile and caches geometry.
+    // Bundles encode geometry on-demand; concurrent requests for the same tile are deduplicated
+    // server-side so no duplicate compute. Phase 1 prewarm is skipped: bundle fetch does both
+    // geometry compute and encoding in one round-trip.
     final sessionKey = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
     final prefetchUrls = <String>[
       for (final (z, x, y) in gridTiles)
         _buildConcreteAnimBundleUrl(z, x, y, _selectedDate.month, _selectedDate.day, startH, endH, sessionKey),
     ];
     final phase2Start = DateTime.now();
-    debugPrint('[anim] phase2 start — ${prefetchUrls.length} bundle tile fetches (was ${prefetchUrls.length * (endH - startH + 1)} individual, key=$sessionKey)');
+    debugPrint('[anim] bundle fetch start — ${prefetchUrls.length} tiles, key=$sessionKey');
     _jsPrefetchAll(prefetchUrls);
 
     // Poll JS progress and update the loading pill.
@@ -2147,9 +2121,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (p >= 1.0) break;
     }
 
+    // Wait for elevations in parallel with bundle fetch.
+    await Future.wait(elevFutures);
+    if (_preloadGen != gen || !mounted) return;
+    _animElevations = elevMap;
+
     final phase2Ms = DateTime.now().difference(phase2Start).inMilliseconds;
     final errors = _prefetchErrors();
-    debugPrint('[anim] phase2 done in ${phase2Ms}ms — ${errors.length} errors');
+    debugPrint('[anim] bundle fetch done in ${phase2Ms}ms — ${errors.length} errors, elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
     if (errors.isNotEmpty) {
       for (final e in errors) debugPrint('[anim-prefetch] $e');
     }

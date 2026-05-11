@@ -135,7 +135,7 @@ PBF_PATH = os.path.join(os.path.dirname(__file__), CITY['osm_pbf']['filename'])
 # for macro zoom — so cache hits never re-run the expensive buffer operations.
 # ---------------------------------------------------------------------------
 _shadow_cache = {}
-MAX_CACHE     = 500   # each entry is a large Shapely geom; 500 × ~400 KB ≈ 200 MB per worker
+MAX_CACHE     = 1500  # 3×3 grid × 2 zooms × 15h = 270 entries; 1500 leaves plenty of headroom
 SHADOW_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "shadow_disk_cache.pkl")
 # Bump this whenever geometry-affecting server params change to auto-invalidate disk cache.
 CACHE_VERSION = 2
