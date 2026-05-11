@@ -1779,6 +1779,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   String _buildAnimTemplateUrl(int hour, int month, int day, String key) =>
       '${_buildShadowTileUrl(hour, 0, month, day)}&_anim=sess_$key';
 
+  // Bundle URL: one tile = all daylight hours packed as MVT layers h06_l0…h20_l2.
+  String _buildConcreteAnimBundleUrl(int z, int x, int y, int month, int day, int startH, int endH, String key) =>
+      '$flaskBaseUrl/shadow/bundle/$z/$x/$y.pbf?month=$month&day=$day&startHour=$startH&endHour=$endH&_anim=sess_$key';
+
+  String _buildBundleTemplateUrl(int month, int day, int startH, int endH, String key) =>
+      '$flaskBaseUrl/shadow/bundle/{z}/{x}/{y}.pbf?month=$month&day=$day&startHour=$startH&endHour=$endH&_anim=sess_$key';
+
   // Kick off JS-side browser-cache prefetch (fire-and-forget; poll _prefetchProgress() for status).
   void _jsPrefetchAll(List<String> urls) {
     try {
@@ -2115,16 +2122,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _animElevations = elevMap;
     debugPrint('[anim] phase1 done — server warmed ${gridTiles.length} tiles × ${endH - startH + 1} hours, elevMap=${elevMap.entries.map((e) => "${e.key}:${e.value.toStringAsFixed(1)}").join(",")}');
 
-    // --- Phase 2: Pre-fetch all tiles into browser cache ---
-    // Uses a stable session key so MapLibre template URLs match the pre-fetched URLs exactly.
+    // --- Phase 2: Pre-fetch bundle tiles into browser cache ---
+    // One bundle URL per tile covers ALL daylight hours (~15×15x fewer requests than individual tiles).
     final sessionKey = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
     final prefetchUrls = <String>[
-      for (int h = startH; h <= endH; h++)
-        for (final (z, x, y) in gridTiles)
-          _buildConcreteAnimUrl(z, x, y, h, _selectedDate.month, _selectedDate.day, sessionKey),
+      for (final (z, x, y) in gridTiles)
+        _buildConcreteAnimBundleUrl(z, x, y, _selectedDate.month, _selectedDate.day, startH, endH, sessionKey),
     ];
     final phase2Start = DateTime.now();
-    debugPrint('[anim] phase2 start — ${prefetchUrls.length} browser-cache prefetch requests (key=$sessionKey)');
+    debugPrint('[anim] phase2 start — ${prefetchUrls.length} bundle tile fetches (was ${prefetchUrls.length * (endH - startH + 1)} individual, key=$sessionKey)');
     _jsPrefetchAll(prefetchUrls);
 
     // Poll JS progress and update the loading pill.
@@ -2135,7 +2141,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (mounted && _preloading24h) {
         setState(() {
           _loadingProgress = p;
-          _loadingStage    = 'Pre-fetching ${(p * prefetchUrls.length).round()}/${prefetchUrls.length} tiles';
+          _loadingStage    = 'Bundling ${(p * prefetchUrls.length).round()}/${prefetchUrls.length} tiles';
         });
       }
       if (p >= 1.0) break;
@@ -2199,60 +2205,65 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     return op;
   }
 
-  // Add source + 12 layers for hour h at a flat `opacity` so MapLibre fetches tiles.
-  // Use opacity=0.05 for the preloading phase: visually imperceptible (~1-2% actual
-  // shadow opacity) but above MapLibre's threshold for issuing tile requests.
-  Future<void> _loadAnimHour(int h, {double opacity = 0.05}) async {
+  // Load two bundle sources (macro + micro) and all hours' 12 layers at opacity=0.05
+  // so MapLibre triggers tile fetching for all frames at once. After the initial idle
+  // wait, call _zeroAllBundleLayers to hide non-active hours before animation starts.
+  Future<void> _loadBundleSources(int startH, int endH) async {
     final mc = _mapController;
     if (mc == null || !_animLayersCreated) return;
-    print('[DIAG-3] loadAnimHour h=$h — mc=${mc != null} layersCreated=$_animLayersCreated opacity=$opacity');
+    print('[DIAG-3] loadBundleSources startH=$startH endH=$endH layersCreated=$_animLayersCreated');
     final key = _animSessionKey ?? DateTime.now().millisecondsSinceEpoch.toString();
-    final url = _buildAnimTemplateUrl(h, _selectedDate.month, _selectedDate.day, key);
+    final url = _buildBundleTemplateUrl(_selectedDate.month, _selectedDate.day, startH, endH, key);
     try {
-      await mc.addSource('shadow-anim-macro-$h', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 14));
-      await mc.addSource('shadow-anim-micro-$h', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 17));
+      await mc.addSource('shadow-anim-bundle-macro', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 14));
+      await mc.addSource('shadow-anim-bundle-micro', VectorSourceProperties(tiles: [url], minzoom: 0, maxzoom: 17));
     } catch (_) {}
     if (!_animLayersCreated) return;
-    final macroSrc = 'shadow-anim-macro-$h';
-    final microSrc = 'shadow-anim-micro-$h';
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l0-fill-$h',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l0-line-$h',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l1-fill-$h',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l1-line-$h',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l2-fill-$h',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
-    await mc.addLayer(macroSrc, 'shadow-anim-macro-l2-line-$h',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l0-fill-$h',
-      FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l0-line-$h',
-      LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l0'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l1-fill-$h',
-      FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l1-line-$h',
-      LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l1'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l2-fill-$h',
-      FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
-    await mc.addLayer(microSrc, 'shadow-anim-micro-l2-line-$h',
-      LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: opacity),
-      sourceLayer: 'shadows', filter: ['==', ['get', 'layer'], 'shadow-l2'], enableInteraction: false);
-    _animLoadedHours.add(h);
-    print('[DIAG-4] loadAnimHour DONE h=$h — loadedHours=$_animLoadedHours layersCreated=$_animLayersCreated');
+    const op = 0.05;
+    for (int h = startH; h <= endH; h++) {
+      if (!_animLayersCreated) return;
+      final hh = h.toString().padLeft(2, '0');
+      await Future.wait([
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l0', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l0', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l1', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l1', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l2', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-macro', 'shadow-anim-macro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l2', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l0', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l0', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l1', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l1', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: op), sourceLayer: 'h${hh}_l2', enableInteraction: false).catchError((_) {}),
+        mc.addLayer('shadow-anim-bundle-micro', 'shadow-anim-micro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineWidth: 1.2, lineOpacity: op),               sourceLayer: 'h${hh}_l2', enableInteraction: false).catchError((_) {}),
+      ]);
+      _animLoadedHours.add(h);
+    }
+    print('[DIAG-4] loadBundleSources DONE — loadedHours=${_animLoadedHours.length} layersCreated=$_animLayersCreated');
+  }
+
+  // Zero all bundle layers in parallel so non-active hours are invisible at animation start.
+  Future<void> _zeroAllBundleLayers(int startH, int endH) async {
+    final mc = _mapController;
+    if (mc == null || !_animLayersCreated) return;
+    final calls = <Future<void>>[];
+    for (int h = startH; h <= endH; h++) {
+      calls.addAll([
+        mc.setLayerProperties('shadow-anim-macro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0)).catchError((_) {}),
+      ]);
+    }
+    try { await Future.wait(calls); } catch (_) {}
   }
 
   // Bring hour h to its correct full-target opacity (zoom-expression based).
@@ -2281,18 +2292,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) {}
     _animCurrentH = h;
     print('[DIAG-7] revealAnimHour COMPLETE h=$h — animCurrentH=$_animCurrentH');
-  }
-
-  // Remove source + layers for hour h, freeing MapLibre tile memory.
-  Future<void> _unloadAnimHour(int h) async {
-    final mc = _mapController;
-    if (mc == null) return;
-    await Future.wait([for (final id in _animLayerIdsForHour(h)) mc.removeLayer(id).catchError((_) {})]);
-    await Future.wait([
-      mc.removeSource('shadow-anim-macro-$h').catchError((_) {}),
-      mc.removeSource('shadow-anim-micro-$h').catchError((_) {}),
-    ]);
-    _animLoadedHours.remove(h);
   }
 
   // Crossfade fromH (full opacity) → toH (0.05, tiles loaded). 8 steps × 40ms = 320ms.
@@ -2340,34 +2339,34 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     }
   }
 
-  // Remove all loaded animation hours, restore live-view shadow rendering.
+  // Remove all loaded animation hours and bundle sources, restore live-view shadow rendering.
   Future<void> _teardownAnimationLayers() async {
     if (!_animLayersCreated) return;
     _animLayersCreated = false;
-    print('[DIAG-8] TEARDOWN called — loadedHours=$_animLoadedHours animating=$_animating mounted=$mounted');
+    print('[DIAG-8] TEARDOWN called — loadedHours=${_animLoadedHours.length} animating=$_animating mounted=$mounted');
     final mc = _mapController;
     if (mc == null) return;
     for (final h in Set<int>.from(_animLoadedHours)) {
       await Future.wait([for (final id in _animLayerIdsForHour(h)) mc.removeLayer(id).catchError((_) {})]);
-      await Future.wait([
-        mc.removeSource('shadow-anim-macro-$h').catchError((_) {}),
-        mc.removeSource('shadow-anim-micro-$h').catchError((_) {}),
-      ]);
     }
+    await Future.wait([
+      mc.removeSource('shadow-anim-bundle-macro').catchError((_) {}),
+      mc.removeSource('shadow-anim-bundle-micro').catchError((_) {}),
+    ]);
     _animLoadedHours.clear();
     _shadowLayersReady = false;
     debugPrint('[anim] teardown done — calling fetchShadows() to restore live view');
     fetchShadows();
   }
 
-  // Sequential animation: load hour → wait for tiles (idle event) → reveal → hold
-  // → load next hour → wait for tiles → crossfade → unload previous.
-  // At most 2 hours' sources exist at once. Tiles guaranteed loaded before every frame.
+  // Bundle animation: load ONE bundle source per scale (macro/micro), all hours pre-staged.
+  // ONE idle wait loads all frames simultaneously — then playback is pure opacity tweening,
+  // no per-frame tile I/O. ~15× fewer tile fetches vs. sequential-hour approach.
   Future<void> _run24hStep() async {
     final startH = _hour.toInt();
     final endH   = (_sunsetHour ?? 20.0).toInt();
     _animLayersCreated = true;
-    print('[DIAG-2] run24hStep START — startH=$startH endH=$endH animating=$_animating mounted=$mounted layersCreated=$_animLayersCreated');
+    print('[DIAG-2] run24hStep START — startH=$startH endH=$endH animating=$_animating mounted=$mounted');
     _animLoadedHours   = {};
     debugPrint('[anim] run start h=$startH→$endH key=${_animSessionKey ?? "unknown"}');
 
@@ -2384,52 +2383,38 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
     }
 
-    // Arm idle BEFORE addLayer so we don't miss events that fire during the awaited calls.
+    // Load bundle sources + ALL hours' layers at 0.05 opacity to trigger tile fetch.
     _startIdleWait();
-    await _loadAnimHour(startH);
+    await _loadBundleSources(startH, endH);
     if (!_animating || !mounted) { await _teardownAnimationLayers(); return; }
-    for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {
+
+    // ONE wait covers every frame — bundle tiles are pre-cached from Phase 2.
+    for (var i = 0; i < 400 && _animating && !_isIdle(); i++) {
       await Future.delayed(const Duration(milliseconds: 50));
     }
     _stopIdleWait();
-    print('[DIAG-5] idle-wait for startH=$startH done — isIdle=${_isIdle()} animating=$_animating');
+    print('[DIAG-5] bundle idle-wait done — isIdle=${_isIdle()} animating=$_animating');
     if (!_animating || !mounted) { await _teardownAnimationLayers(); return; }
 
-    // Reveal first hour at correct zoom-expression opacity now that tiles are loaded.
+    // Zero all layers, then reveal just the first hour cleanly.
+    await _zeroAllBundleLayers(startH, endH);
     await _revealAnimHour(startH);
     setState(() => _hour = startH.toDouble());
-    debugPrint('[anim] h=$startH ready — starting playback');
+    debugPrint('[anim] h=$startH ready — starting bundle playback');
 
-    // Main loop: hold → load next → wait → crossfade → unload previous.
+    // Timer-driven loop: hold → crossfade → reveal. No tile waits needed.
     while (_animating) {
       final currentH = _animCurrentH;
       final nextH    = currentH + 1;
       if (nextH > endH) { setState(() => _animating = false); break; }
 
-      // Display current frame.
-      await Future.delayed(const Duration(milliseconds: 2000));
+      await Future.delayed(const Duration(milliseconds: 700));
       if (!_animating) break;
 
-      // Arm idle BEFORE addLayer so we don't miss events that fire during the awaited calls.
-      _startIdleWait();
-      await _loadAnimHour(nextH);
-      if (!_animating) break;
-
-      // Wait until next hour's tiles are fully rendered before crossfading.
-      for (var i = 0; i < 200 && _animating && !_isIdle(); i++) {
-        await Future.delayed(const Duration(milliseconds: 50));
-      }
-      _stopIdleWait();
-      if (!_animating) break;
-      debugPrint('[anim] h=$nextH tiles ready — crossfading');
-
-      // Crossfade: currentH fades out, nextH fades in. Both tile sets confirmed loaded.
       await _crossfadeAnimHours(currentH, nextH);
       if (!_animating) break;
 
-      // Snap nextH to full opacity, free previous hour's GPU memory.
       await _revealAnimHour(nextH);
-      await _unloadAnimHour(currentH);
       setState(() => _hour = nextH.toDouble());
     }
 

@@ -154,6 +154,17 @@ def _trim_tile_cache():
     while len(_tile_cache) > MAX_TILE_CACHE:
         _tile_cache.pop(next(iter(_tile_cache)))
 
+# Bundle PBF cache — each entry is ~15× a tile PBF; keep fewer entries.
+_bundle_cache          = {}
+MAX_BUNDLE_CACHE       = 200
+_bundle_in_flight      = {}
+_bundle_in_flight_lock = threading.Lock()
+
+def _trim_bundle_cache():
+    # Caller must hold _cache_lock.
+    while len(_bundle_cache) > MAX_BUNDLE_CACHE:
+        _bundle_cache.pop(next(iter(_bundle_cache)))
+
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
 def _cache_grid(zoom):
@@ -1372,6 +1383,148 @@ def _compute_shadow_tile_pbf(z, x, y, hour, month, day):
     except Exception as e:
         _log.error("tile error %s/%s/%s h=%s: %s", z, x, y, hour, e)
         return None
+
+
+def _compute_shadow_bundle_pbf(z, x, y, month, day, start_hour, end_hour):
+    """One PBF tile containing all daylight hours as separate MVT layers (h06_l0…h20_l2).
+    Reuses _shadow_cache from prewarm, so per-hour geometry lookups are O(1) when warm."""
+    try:
+        bounds = mercantile.bounds(x, y, z)
+        tile_west, tile_south, tile_east, tile_north = bounds
+        tile_cx = (tile_west  + tile_east)  / 2
+        tile_cy = (tile_south + tile_north) / 2
+        tile_bbox        = shapely_box(tile_west, tile_south, tile_east, tile_north)
+        tile_bounds_tuple = (tile_west, tile_south, tile_east, tile_north)
+
+        def _shadow_in_tile(eroded):
+            if eroded is None:
+                return tile_bbox
+            try:
+                return orient(tile_bbox.difference(eroded), sign=1.0)
+            except Exception:
+                return tile_bbox
+
+        tz = pytz.timezone(_TZ_NAME)
+        layers = []
+
+        for h in range(start_hour, end_hour + 1):
+            try:
+                now = datetime(2000, month, day, h, 0, 0, tzinfo=tz)
+                elevation, azimuth = get_sun_angles(tile_cy, tile_cx, now)
+
+                if elevation <= 0:
+                    dark = orient(tile_bbox, sign=1.0)
+                    g0 = g1 = g2 = dark
+                else:
+                    MAX_BLDG_H = 150
+                    shadow_m   = MAX_BLDG_H / math.tan(math.radians(max(elevation, 6.0)))
+                    buf_deg    = min(shadow_m / 111320.0, 0.02)
+                    q_bounds   = (
+                        tile_south - buf_deg, tile_west - buf_deg,
+                        tile_north + buf_deg, tile_east + buf_deg,
+                    )
+                    ck = ('tile', z, x, y, h, month, day)
+                    sunlit, buf_e1, buf_e2 = _compute_shadow_data(
+                        z, elevation, azimuth, q_bounds, ck, h, month, day, tile_cy, tile_cx,
+                    )
+                    g0 = _shadow_in_tile(sunlit)
+                    g1 = _shadow_in_tile(buf_e1)
+                    g2 = _shadow_in_tile(buf_e2)
+
+                label = f"h{h:02d}"
+                layers.extend([
+                    {"name": f"{label}_l0", "features": [{"geometry": g0.wkt, "properties": {}}]},
+                    {"name": f"{label}_l1", "features": [{"geometry": g1.wkt, "properties": {}}]},
+                    {"name": f"{label}_l2", "features": [{"geometry": g2.wkt, "properties": {}}]},
+                ])
+            except Exception as e:
+                _log.error("bundle layer h=%s z=%s/%s/%s: %s", h, z, x, y, e)
+
+        if not layers:
+            return None
+
+        return bytes(mapbox_vector_tile.encode(
+            layers,
+            default_options={"quantize_bounds": tile_bounds_tuple, "extents": 4096},
+        ))
+    except Exception as e:
+        _log.error("bundle error z=%s/%s/%s: %s", z, x, y, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Shadow — bundle tile endpoint (all daylight hours in one PBF)
+# /shadow/bundle/<z>/<x>/<y>.pbf?month=4&day=30&startHour=6&endHour=20
+# ---------------------------------------------------------------------------
+
+@app.route("/shadow/bundle/<int:z>/<int:x>/<int:y>.pbf")
+@limiter.limit("120 per minute")
+def shadow_bundle(z, x, y):
+    """One tile = all daylight hours packed as MVT layers h06_l0…h20_l2.
+    Reduces animation prefetch from ~750 individual tiles to ~50 bundle tiles."""
+    if not (0 <= z <= 22):
+        return Response(b'', status=400)
+    max_tile = 2 ** z
+    if not (0 <= x < max_tile and 0 <= y < max_tile):
+        return Response(b'', status=400)
+    try:
+        month      = request.args.get("month",     default=None, type=int)
+        day        = request.args.get("day",        default=None, type=int)
+        start_hour = request.args.get("startHour", default=6,   type=int)
+        end_hour   = request.args.get("endHour",   default=20,  type=int)
+
+        tz  = pytz.timezone(_TZ_NAME)
+        now = datetime.now(tz)
+        if month is None: month = now.month
+        if day   is None: day   = now.day
+
+        start_hour = max(0, min(23, start_hour))
+        end_hour   = max(start_hour, min(23, end_hour))
+
+        bck = (z, x, y, 'bundle', month, day, start_hour, end_hour)
+
+        def _pbf_resp(data):
+            resp = Response(data, status=200, mimetype="application/x-protobuf")
+            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            return resp
+
+        with _cache_lock:
+            if bck in _bundle_cache:
+                return _pbf_resp(_bundle_cache[bck])
+
+        with _bundle_in_flight_lock:
+            if bck in _bundle_in_flight:
+                evt = _bundle_in_flight[bck]
+                is_computing = False
+            else:
+                evt = threading.Event()
+                _bundle_in_flight[bck] = evt
+                is_computing = True
+
+        if not is_computing:
+            evt.wait(timeout=120)
+            with _cache_lock:
+                if bck in _bundle_cache:
+                    return _pbf_resp(_bundle_cache[bck])
+            return Response(b'', status=500)
+
+        try:
+            pbf = _compute_shadow_bundle_pbf(z, x, y, month, day, start_hour, end_hour)
+            if pbf is None:
+                return Response(b'', status=500)
+            with _cache_lock:
+                _bundle_cache[bck] = pbf
+                _trim_bundle_cache()
+            print(f"🟨 [bundle] z={z}/{x}/{y} h={start_hour}-{end_hour} size={len(pbf)//1024}KB cached={len(_bundle_cache)}", flush=True)
+            return _pbf_resp(pbf)
+        finally:
+            with _bundle_in_flight_lock:
+                _bundle_in_flight.pop(bck, None)
+            evt.set()
+
+    except Exception:
+        _log.exception("shadow_bundle z=%s x=%s y=%s", z, x, y)
+        return Response(b'', status=500)
 
 
 # ---------------------------------------------------------------------------
