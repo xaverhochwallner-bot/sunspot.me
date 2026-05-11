@@ -69,7 +69,11 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     if (override != null && override.isNotEmpty) {
       return override.replaceAll(RegExp(r'/$'), '');
     }
-    return '${uri.scheme}://${uri.host}:5000';
+    final host = uri.host;
+    if (host == 'localhost' || host == '127.0.0.1') {
+      return '${uri.scheme}://$host:5000';
+    }
+    return 'https://sunspotme.duckdns.org';
   }
   static const String mapStyle     = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
 
