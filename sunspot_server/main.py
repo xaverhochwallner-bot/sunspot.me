@@ -35,6 +35,7 @@ try:
 except ImportError:
     _SENTRY_AVAILABLE = False
 import mapbox_vector_tile
+from flask_compress import Compress
 
 from cities import ACTIVE as CITY, public_registry as _public_city_registry
 
@@ -97,6 +98,14 @@ def _is_open_at(oh_str: str, dt) -> bool | None:
     return None if not matched_day else False
 
 app = Flask(__name__)
+# gzip/brotli compression on all responses (PBF tiles compress ~3-5×).
+app.config['COMPRESS_MIMETYPES'] = [
+    'application/x-protobuf', 'application/json', 'text/html', 'text/css',
+    'application/javascript', 'image/svg+xml',
+]
+app.config['COMPRESS_LEVEL'] = 6
+app.config['COMPRESS_MIN_SIZE'] = 500
+Compress(app)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _log = logging.getLogger(__name__)
 
@@ -143,9 +152,10 @@ _cache_lock   = threading.RLock()  # guards _shadow_cache and _tile_cache
 
 # Tile PBF cache — stores encoded .pbf bytes keyed by (z, x, y, hour, month, day).
 # Avoids re-running shadow geometry + encoding for repeated tile requests.
-# ~300 bytes/tile × 5 000 tiles ≈ 1.5 MB max.
+# Persisted to disk; restored on startup so restarts don't reset the cache.
 _tile_cache          = {}
-MAX_TILE_CACHE       = 5000
+MAX_TILE_CACHE       = 50000  # ~150 KB/tile avg × 50K ≈ 7 GB on disk (fine; RAM tracks LRU subset)
+TILE_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "tile_disk_cache.pkl")
 _tile_in_flight      = {}    # {tck: threading.Event} — deduplicates concurrent tile requests
 _tile_in_flight_lock = threading.Lock()
 
@@ -156,7 +166,8 @@ def _trim_tile_cache():
 
 # Bundle PBF cache — each entry is ~15× a tile PBF; keep fewer entries.
 _bundle_cache          = {}
-MAX_BUNDLE_CACHE       = 200
+MAX_BUNDLE_CACHE       = 2000
+BUNDLE_DISK_CACHE_PATH = os.path.join(os.path.dirname(__file__), "bundle_disk_cache.pkl")
 _bundle_in_flight      = {}
 _bundle_in_flight_lock = threading.Lock()
 
@@ -1485,7 +1496,7 @@ def shadow_bundle(z, x, y):
 
         def _pbf_resp(data):
             resp = Response(data, status=200, mimetype="application/x-protobuf")
-            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Cache-Control'] = 'public, max-age=86400, immutable'
             return resp
 
         with _cache_lock:
@@ -1653,7 +1664,7 @@ def shadow_tile(z, x, y):
 
         def _pbf_resp(data):
             resp = Response(data, status=200, mimetype="application/x-protobuf")
-            resp.headers['Cache-Control'] = 'public, max-age=3600'
+            resp.headers['Cache-Control'] = 'public, max-age=86400, immutable'
             return resp
 
         with _cache_lock:
@@ -2608,35 +2619,54 @@ load_buildings(_pbf)
 # ---------------------------------------------------------------------------
 # Disk shadow cache — persist in-memory cache across server restarts
 # ---------------------------------------------------------------------------
-if os.path.exists(SHADOW_DISK_CACHE_PATH):
+def _load_disk_cache(path, target_dict, label, max_entries):
+    if not os.path.exists(path):
+        return
     try:
-        with open(SHADOW_DISK_CACHE_PATH, "rb") as _f:
+        with open(path, "rb") as _f:
             _loaded = pickle.load(_f)
-        # Keep only the most recent MAX_CACHE entries to avoid loading a stale, oversized file.
-        if len(_loaded) > MAX_CACHE:
-            _loaded = dict(list(_loaded.items())[-MAX_CACHE:])
-        _shadow_cache.update(_loaded)
-        print(f"[disk cache] Loaded {len(_loaded):,} shadow entries from disk.")
+        if len(_loaded) > max_entries:
+            _loaded = dict(list(_loaded.items())[-max_entries:])
+        target_dict.update(_loaded)
+        print(f"[disk cache] Loaded {len(_loaded):,} {label} entries from disk.")
     except Exception as _e:
-        print(f"[disk cache] Load failed ({_e}), starting with empty cache.")
+        print(f"[disk cache] Load failed for {label} ({_e}), starting empty.")
+
+_load_disk_cache(SHADOW_DISK_CACHE_PATH, _shadow_cache,  'shadow', MAX_CACHE)
+_load_disk_cache(TILE_DISK_CACHE_PATH,   _tile_cache,   'tile',   MAX_TILE_CACHE)
+_load_disk_cache(BUNDLE_DISK_CACHE_PATH, _bundle_cache, 'bundle', MAX_BUNDLE_CACHE)
+
+def _save_disk_cache(path, source_dict, label):
+    try:
+        with _cache_lock:
+            snapshot = dict(source_dict)
+        if not snapshot:
+            return
+        _dir = os.path.dirname(path) or '.'
+        with tempfile.NamedTemporaryFile(dir=_dir, delete=False, suffix='.pkl') as _tmp:
+            pickle.dump(snapshot, _tmp)
+            _tmp_path = _tmp.name
+        os.replace(_tmp_path, path)
+        print(f"[disk cache] Saved {len(snapshot):,} {label} entries.")
+    except Exception as _e:
+        print(f"[disk cache] Save failed for {label}: {_e}")
 
 def _disk_cache_saver():
-    """Background thread: flush shadow cache to disk every 120 s."""
+    """Background thread: flush all caches to disk every 120 s."""
     while True:
         time.sleep(120)
-        try:
-            with _cache_lock:
-                snapshot = dict(_shadow_cache)
-            _dir = os.path.dirname(SHADOW_DISK_CACHE_PATH) or '.'
-            with tempfile.NamedTemporaryFile(dir=_dir, delete=False, suffix='.pkl') as _tmp:
-                pickle.dump(snapshot, _tmp)
-                _tmp_path = _tmp.name
-            os.replace(_tmp_path, SHADOW_DISK_CACHE_PATH)
-            print(f"[disk cache] Saved {len(snapshot):,} entries.")
-        except Exception as _e:
-            print(f"[disk cache] Save failed: {_e}")
+        _save_disk_cache(SHADOW_DISK_CACHE_PATH, _shadow_cache,  'shadow')
+        _save_disk_cache(TILE_DISK_CACHE_PATH,   _tile_cache,   'tile')
+        _save_disk_cache(BUNDLE_DISK_CACHE_PATH, _bundle_cache, 'bundle')
 
 threading.Thread(target=_disk_cache_saver, daemon=True).start()
+def _flush_caches_on_exit():
+    print("[disk cache] Final flush on exit…")
+    _save_disk_cache(SHADOW_DISK_CACHE_PATH, _shadow_cache,  'shadow')
+    _save_disk_cache(TILE_DISK_CACHE_PATH,   _tile_cache,   'tile')
+    _save_disk_cache(BUNDLE_DISK_CACHE_PATH, _bundle_cache, 'bundle')
+
+atexit.register(_flush_caches_on_exit)
 atexit.register(lambda: _prewarm_executor.shutdown(wait=False))
 
 
