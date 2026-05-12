@@ -700,6 +700,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await _runLocalAnimation(startH, endH, bounds);
     } else {
       debugPrint('[local-anim] fallback to server bundle');
+      if (mounted && _preloading24h) setState(() { _loadingStage = 'Warming'; _loadingProgress = 0.0; });
       await _preload24h();
       if (!mounted || _preloadGen != gen || !_preloading24h) return;
       setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
