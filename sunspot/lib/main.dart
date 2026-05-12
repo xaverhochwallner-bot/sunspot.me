@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:html' as html;
 import 'dart:js' as js;
 import 'dart:math';
+import 'package:solar_calculator/solar_calculator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
@@ -121,6 +122,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Set<int>         _animLoadedHours  = {};  // hours that currently have MapLibre sources+layers
   Map<int, double> _animElevations   = {};  // hour → sun elevation, preloaded before animation
   String?          _animSessionKey;         // stable per animation run — browser-cache key for tile URLs
+
+  // Local (client-side canvas) animation state
+  bool             _localBldReady   = false;  // buildings JSON downloaded and in window.__sp_buildings
+  Map<int, String> _localFrameUrls  = {};     // hour → WebP data URL rendered by JS canvas
 
   // Panel (state lives in AppShellState)
 
@@ -245,6 +250,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _mapController = controller;
     _injectTileLoadHelper();
     _injectPrefetchHelper();
+    _injectLocalShadowHelpers();
   }
 
   // Monkey-patch maplibregl.Map.prototype.addSource so the first shadow-source
@@ -385,6 +391,319 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ''']);
     } catch (e) {
       debugPrint('[anim-prefetch] inject error: $e');
+    }
+  }
+
+  // Inject JS helpers for local (client-side) canvas shadow animation.
+  // Sets up building cache (Cache API) and canvas renderer in window.__sp_*.
+  void _injectLocalShadowHelpers() {
+    try {
+      js.context.callMethod('eval', [r'''
+        (function() {
+          if (window.__sp_local_patched) return;
+          window.__sp_local_patched = true;
+          window.__sp_buildings = null;
+
+          // Download buildings JSON: check Cache API first, then server.
+          // Returns Promise<bool>.
+          window.__sp_fetch_buildings = async function(url) {
+            try {
+              const cache = await caches.open('sunspot-bld-v1');
+              const cached = await cache.match(url);
+              if (cached) {
+                window.__sp_buildings = await cached.json();
+                console.log('[sp-local] bld from cache:', window.__sp_buildings.b.length);
+                return true;
+              }
+            } catch(e) {}
+            try {
+              const resp = await fetch(url);
+              if (!resp.ok) return false;
+              const data = await resp.json();
+              window.__sp_buildings = data;
+              try {
+                const cache = await caches.open('sunspot-bld-v1');
+                await cache.put(url, new Response(JSON.stringify(data), {
+                  headers: {'Content-Type': 'application/json'}
+                }));
+              } catch(e) {}
+              console.log('[sp-local] bld fetched:', data.b.length, 'polygons');
+              return true;
+            } catch(e) {
+              console.error('[sp-local] fetch error:', e);
+              return false;
+            }
+          };
+
+          // Render one hour's shadow frame to a WebP data URL via HTML5 Canvas.
+          // All building shadows + footprints drawn as a single batched path → one fill call.
+          window.__sp_render_shadow = function(elevDeg, azimDeg, minLon, minLat, maxLon, maxLat) {
+            const blds = window.__sp_buildings;
+            if (!blds || !blds.b) return null;
+            const W = 1024, H = 1024;
+            const canvas = document.createElement('canvas');
+            canvas.width = W; canvas.height = H;
+            const ctx = canvas.getContext('2d');
+            if (elevDeg <= 0) {
+              ctx.fillStyle = 'rgba(30,50,90,0.82)';
+              ctx.fillRect(0, 0, W, H);
+              return canvas.toDataURL('image/webp', 0.85);
+            }
+            const azimRad = azimDeg * Math.PI / 180;
+            const elevRad = elevDeg * Math.PI / 180;
+            const tanElev = Math.tan(Math.max(elevRad, 0.01));
+            const lonR = (maxLon - minLon) || 1e-8;
+            const latR = (maxLat - minLat) || 1e-8;
+            function lx(lon) { return (lon - minLon) / lonR * W; }
+            function ly(lat) { return (maxLat - lat) / latR * H; }
+            ctx.fillStyle = 'rgba(47,72,98,0.42)';
+            ctx.beginPath();
+            const arr = blds.b;
+            for (let i = 0; i < arr.length; i++) {
+              const coords = arr[i][0], height = arr[i][1];
+              const shadowLen = Math.min(height / tanElev, 500);
+              let cLat = 0, cLon = 0;
+              for (let j = 0; j < coords.length; j++) { cLon += coords[j][0]; cLat += coords[j][1]; }
+              cLon /= coords.length; cLat /= coords.length;
+              const mLon = 111320 * Math.cos(cLat * Math.PI / 180);
+              const mLat = 111320;
+              const dx = (-shadowLen * Math.sin(azimRad)) / mLon;
+              const dy = (-shadowLen * Math.cos(azimRad)) / mLat;
+              // Quick bbox rejection (shadow-inclusive)
+              let bMinLon = Infinity, bMaxLon = -Infinity, bMinLat = Infinity, bMaxLat = -Infinity;
+              for (let j = 0; j < coords.length; j++) {
+                const lo = coords[j][0], la = coords[j][1];
+                if (lo < bMinLon) bMinLon = lo; if (lo > bMaxLon) bMaxLon = lo;
+                if (la < bMinLat) bMinLat = la; if (la > bMaxLat) bMaxLat = la;
+              }
+              const sMinLon = Math.min(bMinLon, bMinLon+dx), sMaxLon = Math.max(bMaxLon, bMaxLon+dx);
+              const sMinLat = Math.min(bMinLat, bMinLat+dy), sMaxLat = Math.max(bMaxLat, bMaxLat+dy);
+              if (sMaxLon < minLon || sMinLon > maxLon || sMaxLat < minLat || sMinLat > maxLat) continue;
+              // Shadow polygon (offset footprint)
+              ctx.moveTo(lx(coords[0][0]+dx), ly(coords[0][1]+dy));
+              for (let j = 1; j < coords.length; j++) ctx.lineTo(lx(coords[j][0]+dx), ly(coords[j][1]+dy));
+              ctx.closePath();
+              // Building footprint (darkens base of shadow)
+              ctx.moveTo(lx(coords[0][0]), ly(coords[0][1]));
+              for (let j = 1; j < coords.length; j++) ctx.lineTo(lx(coords[j][0]), ly(coords[j][1]));
+              ctx.closePath();
+            }
+            ctx.fill('nonzero');
+            return canvas.toDataURL('image/webp', 0.85);
+          };
+
+          // Setup MapLibre image source covering the animation viewport.
+          window.__sp_local_setup = function(dataUrl, minLon, minLat, maxLon, maxLat) {
+            try {
+              const m = window.__sunspot_map;
+              if (!m) return false;
+              try { m.removeLayer('shadow-local-raster'); } catch(e) {}
+              try { m.removeSource('shadow-local'); } catch(e) {}
+              m.addSource('shadow-local', {
+                type: 'image', url: dataUrl,
+                coordinates: [[minLon,maxLat],[maxLon,maxLat],[maxLon,minLat],[minLon,minLat]]
+              });
+              m.addLayer({id: 'shadow-local-raster', type: 'raster', source: 'shadow-local',
+                paint: {'raster-opacity': 0.88, 'raster-fade-duration': 250}});
+              return true;
+            } catch(e) { console.error('[sp-local] setup error:', e); return false; }
+          };
+
+          // Swap to a new frame (zero-copy; MapLibre handles GPU upload).
+          window.__sp_local_update = function(dataUrl) {
+            try {
+              const s = window.__sunspot_map && window.__sunspot_map.getSource('shadow-local');
+              if (s) s.updateImage({url: dataUrl});
+            } catch(e) {}
+          };
+
+          window.__sp_local_teardown = function() {
+            try {
+              const m = window.__sunspot_map;
+              if (!m) return;
+              try { m.removeLayer('shadow-local-raster'); } catch(e) {}
+              try { m.removeSource('shadow-local'); } catch(e) {}
+            } catch(e) {}
+          };
+        })();
+      ''']);
+    } catch (e) {
+      debugPrint('[local-anim] inject error: $e');
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Local canvas animation helpers (Phase B)
+  // -------------------------------------------------------------------------
+
+  Future<bool> _downloadBuildingsLocal() async {
+    try {
+      final url = '$flaskBaseUrl/api/buildings';
+      final escaped = url.replaceAll("'", "\\'");
+      js.context.callMethod('eval', ["""
+        window.__sp_bld_done = -1;
+        (async () => {
+          window.__sp_bld_done = (await window.__sp_fetch_buildings('$escaped')) ? 1 : 0;
+        })();
+      """]);
+      for (int i = 0; i < 300; i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        final v = js.context['__sp_bld_done'];
+        if (v != null && v != -1) return v == 1;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('[local-anim] buildings download error: $e');
+      return false;
+    }
+  }
+
+  ({double elevation, double azimuth}) _viennaSunAngles(int year, int month, int day, int hour) {
+    final tzOffset = (month >= 4 && month <= 10) ? 2.0 : 1.0;
+    final instant  = Instant(year: year, month: month, day: day, hour: hour, timeZoneOffset: tzOffset);
+    final calc     = SolarCalculator(instant, _currentCenter.latitude, _currentCenter.longitude);
+    final pos      = calc.sunHorizontalPosition;
+    return (elevation: pos.elevation, azimuth: pos.azimuth);
+  }
+
+  String? _renderLocalFrame(double elevDeg, double azimDeg, LatLngBounds bounds) {
+    try {
+      final result = js.context.callMethod('__sp_render_shadow', [
+        elevDeg, azimDeg,
+        bounds.southwest.longitude, bounds.southwest.latitude,
+        bounds.northeast.longitude, bounds.northeast.latitude,
+      ]);
+      if (result is String && result.isNotEmpty) return result;
+    } catch (e) {
+      debugPrint('[local-anim] render error: $e');
+    }
+    return null;
+  }
+
+  Future<bool> _computeLocalFrames(int startH, int endH, LatLngBounds bounds, int gen) async {
+    _localFrameUrls.clear();
+    final total = endH - startH + 1;
+    for (int h = startH; h <= endH; h++) {
+      if (_preloadGen != gen || !mounted || !_preloading24h) return false;
+      final angles = _viennaSunAngles(_selectedDate.year, _selectedDate.month, _selectedDate.day, h);
+      if (angles.elevation > 0) {
+        final dataUrl = _renderLocalFrame(angles.elevation, angles.azimuth, bounds);
+        if (dataUrl != null) _localFrameUrls[h] = dataUrl;
+      }
+      final done = h - startH + 1;
+      if (mounted && _preloading24h) {
+        setState(() {
+          _loadingProgress = done / total;
+          _loadingStage    = 'Rendering $done/$total frames';
+        });
+      }
+      await Future.delayed(Duration.zero);
+    }
+    return _localFrameUrls.isNotEmpty;
+  }
+
+  bool _setupLocalImageSource(String dataUrl, LatLngBounds bounds) {
+    try {
+      js.context.callMethod('__sp_local_setup', [
+        dataUrl,
+        bounds.southwest.longitude, bounds.southwest.latitude,
+        bounds.northeast.longitude, bounds.northeast.latitude,
+      ]);
+      return true;
+    } catch (e) {
+      debugPrint('[local-anim] setup error: $e');
+      return false;
+    }
+  }
+
+  void _updateLocalImageSource(String dataUrl) {
+    try {
+      js.context['__sp_du'] = dataUrl;
+      js.context.callMethod('eval', ['window.__sp_local_update(window.__sp_du)']);
+    } catch (e) {
+      debugPrint('[local-anim] update error: $e');
+    }
+  }
+
+  void _teardownLocalImageSource() {
+    try {
+      js.context.callMethod('eval', ['window.__sp_local_teardown&&window.__sp_local_teardown()']);
+    } catch (e) {
+      debugPrint('[local-anim] teardown error: $e');
+    }
+  }
+
+  Future<void> _runLocalAnimation(int startH, int endH, LatLngBounds bounds) async {
+    // Suppress live shadow layers.
+    if (_shadowLayersReady) {
+      final mc = _mapController;
+      if (mc != null) {
+        for (final id in _shadowGhostLayerIds(_shadowSourceNonce)) {
+          try {
+            if (id.contains('-fill-')) mc.setLayerProperties(id, FillLayerProperties(fillOpacity: 0.0));
+            else                       mc.setLayerProperties(id, LineLayerProperties(lineOpacity: 0.0));
+          } catch (_) {}
+        }
+      }
+    }
+
+    final hours = [for (int h = startH; h <= endH; h++) h]
+        .where((h) => _localFrameUrls.containsKey(h)).toList();
+    if (hours.isEmpty) { fetchShadows(); return; }
+
+    final ok = _setupLocalImageSource(_localFrameUrls[hours.first]!, bounds);
+    if (!ok) { fetchShadows(); return; }
+
+    setState(() { _hour = hours.first.toDouble(); _animating = true; });
+
+    for (final h in hours) {
+      if (!_animating || !mounted) break;
+      final dataUrl = _localFrameUrls[h];
+      if (dataUrl != null) _updateLocalImageSource(dataUrl);
+      setState(() => _hour = h.toDouble());
+      await Future.delayed(const Duration(milliseconds: 700));
+    }
+
+    setState(() => _animating = false);
+    _teardownLocalImageSource();
+    fetchShadows();
+  }
+
+  Future<void> _startAnimation() async {
+    if (!_mapReady || _mapController == null) return;
+    final gen    = _preloadGen;
+    final startH = (_sunriseHour ?? 6.0).toInt();
+    final endH   = (_sunsetHour  ?? 20.0).toInt();
+    final bounds = await _mapController!.getVisibleRegion();
+
+    bool localOk = false;
+    try {
+      if (!_localBldReady) {
+        if (mounted && _preloading24h) setState(() { _loadingStage = 'Downloading buildings'; _loadingProgress = 0.0; });
+        _localBldReady = await _downloadBuildingsLocal();
+        if (_preloadGen != gen || !mounted || !_preloading24h) return;
+      }
+
+      if (_localBldReady) {
+        if (mounted && _preloading24h) setState(() { _loadingStage = 'Rendering frames'; _loadingProgress = 0.0; });
+        localOk = await _computeLocalFrames(startH, endH, bounds, gen);
+        if (_preloadGen != gen || !mounted || !_preloading24h) return;
+      }
+    } catch (e) {
+      debugPrint('[local-anim] local mode error: $e');
+    }
+
+    if (!mounted || !_preloading24h || _preloadGen != gen) return;
+
+    if (localOk) {
+      setState(() { _preloading24h = false; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
+      await _runLocalAnimation(startH, endH, bounds);
+    } else {
+      debugPrint('[local-anim] fallback to server bundle');
+      await _preload24h();
+      if (!mounted || _preloadGen != gen || !_preloading24h) return;
+      setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
+      _run24hStep();
     }
   }
 
@@ -2045,11 +2364,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     _animSessionKey = DateTime.now().millisecondsSinceEpoch.toString(); // stable key for browser cache
     print('[DIAG-1] toggle24h called — animating=$_animating preloading=$_preloading24h gen=$_preloadGen key=$_animSessionKey');
     setState(() { _preloading24h = true; _liveMode = false; _hour = start; _showPill = true; _loadingStage = 'Warming'; _loadingProgress = 0; });
-    _preload24h().then((_) {
-      if (!mounted || !_preloading24h) return;
-      setState(() { _preloading24h = false; _animating = true; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
-      _run24hStep();
-    });
+    _startAnimation();
   }
 
   // Warm the server tile cache for every daylight hour at BOTH zoom levels needed.
