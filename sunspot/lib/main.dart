@@ -2200,20 +2200,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   }
 
   // Scale a MapLibre zoom-interpolate expression (or scalar) by factor t ∈ [0,1].
-  // Structure: ['interpolate', interp, input, key0, val0, key1, val1, ...]
-  // Values are at even indices starting at 4; keys at odd indices are left alone.
-  dynamic _scaleOpExpr(dynamic op, double t) {
-    if (op is num) return op * t;
-    if (op is List && op.isNotEmpty && op[0] == 'interpolate') {
-      final s = List<dynamic>.from(op);
-      for (var i = 4; i < s.length; i += 2) {
-        final v = s[i];
-        s[i] = (v is num) ? v * t : v;
-      }
-      return s;
-    }
-    return op;
-  }
 
   // Load two bundle sources (macro + micro) and all hours' 12 layers at opacity=0.05
   // so MapLibre triggers tile fetching for all frames at once. After the initial idle
@@ -2252,6 +2238,33 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       _animLoadedHours.add(h);
     }
     print('[DIAG-4] loadBundleSources DONE — loadedHours=${_animLoadedHours.length} layersCreated=$_animLayersCreated');
+    _setAnimLayerTransitions(startH, endH);
+  }
+
+  // Set fill-opacity-transition / line-opacity-transition on all animation layers so
+  // MapLibre's WebGL renderer handles smooth 60fps crossfades natively — one JS call,
+  // zero Dart timer loops.
+  void _setAnimLayerTransitions(int startH, int endH, {int durationMs = 280}) {
+    try {
+      js.context.callMethod('eval', ['''
+        (function() {
+          const m = window.__sunspot_map;
+          if (!m) return;
+          const t = {duration: $durationMs, delay: 0};
+          for (let h = $startH; h <= $endH; h++) {
+            for (const scale of ['macro', 'micro']) {
+              for (const l of ['l0', 'l1', 'l2']) {
+                const base = 'shadow-anim-' + scale + '-' + l;
+                try { m.setPaintProperty(base + '-fill-' + h, 'fill-opacity-transition', t); } catch(e) {}
+                try { m.setPaintProperty(base + '-line-' + h, 'line-opacity-transition', t); } catch(e) {}
+              }
+            }
+          }
+        })();
+      ''']);
+    } catch (e) {
+      debugPrint('[anim-transition] $e');
+    }
   }
 
   // Zero all bundle layers in parallel so non-active hours are invisible at animation start.
@@ -2276,6 +2289,28 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       ]);
     }
     try { await Future.wait(calls); } catch (_) {}
+  }
+
+  // Zero a single hour's layers (GPU-transitions out over durationMs set in _setAnimLayerTransitions).
+  Future<void> _zeroAnimHour(int h) async {
+    final mc = _mapController;
+    if (mc == null || !_animLayersCreated) return;
+    try {
+      await Future.wait([
+        mc.setLayerProperties('shadow-anim-macro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-macro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l0-fill-$h', FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l0-line-$h', LineLayerProperties(lineColor: '#455A64', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l1-fill-$h', FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l1-line-$h', LineLayerProperties(lineColor: '#37474F', lineOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l2-fill-$h', FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: 0.0)).catchError((_) {}),
+        mc.setLayerProperties('shadow-anim-micro-l2-line-$h', LineLayerProperties(lineColor: '#263238', lineOpacity: 0.0)).catchError((_) {}),
+      ]);
+    } catch (_) {}
   }
 
   // Bring hour h to its correct full-target opacity (zoom-expression based).
@@ -2306,50 +2341,6 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     print('[DIAG-7] revealAnimHour COMPLETE h=$h — animCurrentH=$_animCurrentH');
   }
 
-  // Crossfade fromH (full opacity) → toH (0.05, tiles loaded). 8 steps × 40ms = 320ms.
-  // Pure GPU paint updates — no tile I/O since both hours are already loaded.
-  Future<void> _crossfadeAnimHours(int fromH, int toH) async {
-    final mc = _mapController;
-    if (mc == null || !_animLayersCreated) return;
-    final fromElev = _animElevations[fromH] ?? 0.0;
-    final toElev   = _animElevations[toH]   ?? 0.0;
-    final (fL0, fL1, fL2) = _animOpacities(fromElev);
-    final (tL0, tL1, tL2) = _animOpacities(toElev);
-    const steps = 8, stepMs = 40;
-    for (var i = 1; i <= steps; i++) {
-      if (!_animating || !_animLayersCreated) break;
-      final tIn = i / steps, tOut = 1.0 - tIn;
-      try {
-        await Future.wait([
-          mc.setLayerProperties('shadow-anim-macro-l0-fill-$toH',   FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMacroOp(tL0),     tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l1-fill-$toH',   FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMacroOp(tL1),     tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l2-fill-$toH',   FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMacroOp(tL2),     tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l0-line-$toH',   LineLayerProperties(lineColor: '#455A64', lineOpacity: _scaleOpExpr(_animMacroLineOp(tL0), tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l1-line-$toH',   LineLayerProperties(lineColor: '#37474F', lineOpacity: _scaleOpExpr(_animMacroLineOp(tL1), tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l2-line-$toH',   LineLayerProperties(lineColor: '#263238', lineOpacity: _scaleOpExpr(_animMacroLineOp(tL2), tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l0-fill-$toH',   FillLayerProperties(fillColor: '#455A64', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMicroOp(tL0),     tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l1-fill-$toH',   FillLayerProperties(fillColor: '#37474F', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMicroOp(tL1),     tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l2-fill-$toH',   FillLayerProperties(fillColor: '#263238', fillAntialias: true, fillOpacity: _scaleOpExpr(_animMicroOp(tL2),     tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l0-line-$toH',   LineLayerProperties(lineColor: '#455A64', lineOpacity: _scaleOpExpr(_animMicroLineOp(tL0), tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l1-line-$toH',   LineLayerProperties(lineColor: '#37474F', lineOpacity: _scaleOpExpr(_animMicroLineOp(tL1), tIn))),
-          mc.setLayerProperties('shadow-anim-micro-l2-line-$toH',   LineLayerProperties(lineColor: '#263238', lineOpacity: _scaleOpExpr(_animMicroLineOp(tL2), tIn))),
-          mc.setLayerProperties('shadow-anim-macro-l0-fill-$fromH', FillLayerProperties(fillColor: '#455A64', fillOpacity: _scaleOpExpr(_animMacroOp(fL0),     tOut))),
-          mc.setLayerProperties('shadow-anim-macro-l1-fill-$fromH', FillLayerProperties(fillColor: '#37474F', fillOpacity: _scaleOpExpr(_animMacroOp(fL1),     tOut))),
-          mc.setLayerProperties('shadow-anim-macro-l2-fill-$fromH', FillLayerProperties(fillColor: '#263238', fillOpacity: _scaleOpExpr(_animMacroOp(fL2),     tOut))),
-          mc.setLayerProperties('shadow-anim-macro-l0-line-$fromH', LineLayerProperties(lineColor: '#455A64', lineOpacity: _scaleOpExpr(_animMacroLineOp(fL0), tOut))),
-          mc.setLayerProperties('shadow-anim-macro-l1-line-$fromH', LineLayerProperties(lineColor: '#37474F', lineOpacity: _scaleOpExpr(_animMacroLineOp(fL1), tOut))),
-          mc.setLayerProperties('shadow-anim-macro-l2-line-$fromH', LineLayerProperties(lineColor: '#263238', lineOpacity: _scaleOpExpr(_animMacroLineOp(fL2), tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l0-fill-$fromH', FillLayerProperties(fillColor: '#455A64', fillOpacity: _scaleOpExpr(_animMicroOp(fL0),     tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l1-fill-$fromH', FillLayerProperties(fillColor: '#37474F', fillOpacity: _scaleOpExpr(_animMicroOp(fL1),     tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l2-fill-$fromH', FillLayerProperties(fillColor: '#263238', fillOpacity: _scaleOpExpr(_animMicroOp(fL2),     tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l0-line-$fromH', LineLayerProperties(lineColor: '#455A64', lineOpacity: _scaleOpExpr(_animMicroLineOp(fL0), tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l1-line-$fromH', LineLayerProperties(lineColor: '#37474F', lineOpacity: _scaleOpExpr(_animMicroLineOp(fL1), tOut))),
-          mc.setLayerProperties('shadow-anim-micro-l2-line-$fromH', LineLayerProperties(lineColor: '#263238', lineOpacity: _scaleOpExpr(_animMicroLineOp(fL2), tOut))),
-        ]);
-      } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: stepMs));
-    }
-  }
 
   // Remove all loaded animation hours and bundle sources, restore live-view shadow rendering.
   Future<void> _teardownAnimationLayers() async {
@@ -2414,7 +2405,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     setState(() => _hour = startH.toDouble());
     debugPrint('[anim] h=$startH ready — starting bundle playback');
 
-    // Timer-driven loop: hold → crossfade → reveal. No tile waits needed.
+    // Timer-driven loop: hold → GPU crossfade (280ms native transition). No tile waits needed.
     while (_animating) {
       final currentH = _animCurrentH;
       final nextH    = currentH + 1;
@@ -2423,10 +2414,9 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       await Future.delayed(const Duration(milliseconds: 700));
       if (!_animating) break;
 
-      await _crossfadeAnimHours(currentH, nextH);
-      if (!_animating) break;
-
-      await _revealAnimHour(nextH);
+      // Fire zero + reveal simultaneously — 24 bridge calls total, then GPU handles the
+      // 280ms crossfade at 60fps via the native paint-transition set in _setAnimLayerTransitions.
+      await Future.wait([_zeroAnimHour(currentH), _revealAnimHour(nextH)]);
       setState(() => _hour = nextH.toDouble());
     }
 
