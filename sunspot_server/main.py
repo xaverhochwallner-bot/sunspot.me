@@ -176,6 +176,42 @@ def _trim_bundle_cache():
     while len(_bundle_cache) > MAX_BUNDLE_CACHE:
         _bundle_cache.pop(next(iter(_bundle_cache)))
 
+# Client-side shadow computation — compact building geometry payload.
+# Serialised once after buildings load; served from /api/buildings.
+_buildings_json_bytes = None
+
+def _build_buildings_json():
+    """Serialize z14-simplified building polygons for client-side canvas rendering.
+    Result is stored in _buildings_json_bytes; Flask-Compress handles brotli/gzip.
+    """
+    global _buildings_json_bytes
+    polys = _simplified_polys.get(14) or _buildings_polys
+    if not polys:
+        _buildings_json_bytes = b'{"v":1,"b":[]}'
+        return
+    t0  = time.time()
+    out = []
+    for poly, h in zip(polys, _buildings_heights):
+        if poly is None or poly.is_empty:
+            continue
+        gt = poly.geom_type
+        if gt == 'MultiPolygon':
+            for part in poly.geoms:
+                if part.is_empty:
+                    continue
+                coords = [[round(float(c[0]), 4), round(float(c[1]), 4)]
+                          for c in part.exterior.coords[:-1]]
+                if len(coords) >= 3:
+                    out.append([coords, round(float(h), 1)])
+        elif gt == 'Polygon':
+            coords = [[round(float(c[0]), 4), round(float(c[1]), 4)]
+                      for c in poly.exterior.coords[:-1]]
+            if len(coords) >= 3:
+                out.append([coords, round(float(h), 1)])
+    _buildings_json_bytes = json.dumps({"v": 1, "b": out}).encode()
+    kb = len(_buildings_json_bytes) // 1024
+    print(f"[bld-json] {len(out):,} polygons → {kb:,} KB ({time.time()-t0:.1f}s)", flush=True)
+
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
 def _cache_grid(zoom):
@@ -1279,6 +1315,22 @@ def _trigger_prewarm(hour, month, day, lat, lon, zoom, vp_w, vp_h):
 @limiter.limit("30 per minute")
 def cities_endpoint():
     return jsonify(_public_city_registry())
+
+
+@app.route("/api/buildings")
+@limiter.exempt
+def api_buildings():
+    """Compact building geometry for client-side canvas shadow rendering.
+
+    JSON payload: {"v": 1, "b": [[[lon, lat], ...], height_m], ...]}
+    Uses z14-simplified polygons (≈3 m tolerance, 4 dp coords).
+    Flask-Compress applies brotli/gzip automatically (response is ~300–600 KB).
+    """
+    if _buildings_json_bytes is None:
+        return jsonify({"error": "buildings not ready yet"}), 503
+    resp = Response(_buildings_json_bytes, mimetype="application/json")
+    resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -2615,6 +2667,8 @@ if not os.path.exists(CACHE_PATH) and _pbf is None:
     _download_pbf(PBF_PATH)
     _pbf = PBF_PATH
 load_buildings(_pbf)
+# Serialise buildings for /api/buildings in the background (takes 2-10 s).
+threading.Thread(target=_build_buildings_json, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Disk shadow cache — persist in-memory cache across server restarts
