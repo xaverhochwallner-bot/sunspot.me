@@ -407,29 +407,36 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           // Download buildings JSON: check Cache API first, then server.
           // Returns Promise<bool>.
           window.__sp_fetch_buildings = async function(url) {
+            const t0 = performance.now();
             try {
               const cache = await caches.open('sunspot-bld-v1');
               const cached = await cache.match(url);
               if (cached) {
                 window.__sp_buildings = await cached.json();
-                console.log('[sp-local] bld from cache:', window.__sp_buildings.b.length);
+                console.log('[sp-local] bld from cache:', window.__sp_buildings.b.length, 'in', Math.round(performance.now()-t0), 'ms');
                 return true;
               }
-            } catch(e) {}
+            } catch(e) { console.warn('[sp-local] cache read failed:', e); }
             try {
+              console.log('[sp-local] fetching from server:', url);
               const resp = await fetch(url);
-              if (!resp.ok) return false;
+              if (!resp.ok) {
+                window.__sp_bld_last_error = 'HTTP ' + resp.status + ' ' + resp.statusText;
+                console.error('[sp-local] HTTP error:', resp.status, resp.statusText);
+                return false;
+              }
               const data = await resp.json();
               window.__sp_buildings = data;
+              console.log('[sp-local] bld fetched:', data.b ? data.b.length : '?', 'polygons in', Math.round(performance.now()-t0), 'ms');
               try {
                 const cache = await caches.open('sunspot-bld-v1');
                 await cache.put(url, new Response(JSON.stringify(data), {
                   headers: {'Content-Type': 'application/json'}
                 }));
-              } catch(e) {}
-              console.log('[sp-local] bld fetched:', data.b.length, 'polygons');
+              } catch(e) { console.warn('[sp-local] cache write failed:', e); }
               return true;
             } catch(e) {
+              window.__sp_bld_last_error = String(e);
               console.error('[sp-local] fetch error:', e);
               return false;
             }
@@ -438,8 +445,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           // Render one hour's shadow frame to a WebP data URL via HTML5 Canvas.
           // All building shadows + footprints drawn as a single batched path → one fill call.
           window.__sp_render_shadow = function(elevDeg, azimDeg, minLon, minLat, maxLon, maxLat) {
+            try {
             const blds = window.__sp_buildings;
-            if (!blds || !blds.b) return null;
+            if (!blds || !blds.b) {
+              console.error('[sp-local] render called but __sp_buildings is', blds);
+              return null;
+            }
             const W = 1024, H = 1024;
             const canvas = document.createElement('canvas');
             canvas.width = W; canvas.height = H;
@@ -489,7 +500,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
               ctx.closePath();
             }
             ctx.fill('nonzero');
-            return canvas.toDataURL('image/webp', 0.85);
+            const dataUrl = canvas.toDataURL('image/webp', 0.85);
+            if (!dataUrl || dataUrl.length < 100) console.error('[sp-local] toDataURL returned short/empty string:', dataUrl && dataUrl.length);
+            return dataUrl;
+            } catch(e) { console.error('[sp-local] render exception:', e); return null; }
           };
 
           // Setup MapLibre image source covering the animation viewport.
@@ -537,11 +551,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   // -------------------------------------------------------------------------
 
   Future<bool> _downloadBuildingsLocal() async {
+    final t0 = DateTime.now();
     try {
       final url = '$flaskBaseUrl/api/buildings';
+      print('[BLD] fetching $url');
       final escaped = url.replaceAll("'", "\\'");
       js.context.callMethod('eval', ["""
         window.__sp_bld_done = -1;
+        window.__sp_bld_last_error = null;
         (async () => {
           window.__sp_bld_done = (await window.__sp_fetch_buildings('$escaped')) ? 1 : 0;
         })();
@@ -549,11 +566,22 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       for (int i = 0; i < 300; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
         final v = js.context['__sp_bld_done'];
-        if (v != null && v != -1) return v == 1;
+        if (v != null && v != -1) {
+          final dtMs = DateTime.now().difference(t0).inMilliseconds;
+          final jsErr = js.context['__sp_bld_last_error'];
+          print('[BLD] settled: result=$v in ${dtMs}ms (poll#$i) jsErr=${jsErr ?? "none"}');
+          return v == 1;
+        }
+        if (i % 30 == 29) {
+          // Log every 3 seconds so we see if it's stuck
+          print('[BLD] still waiting... ${(i + 1) * 100}ms elapsed');
+        }
       }
+      print('[BLD] TIMEOUT — __sp_bld_done never settled after 30s');
       return false;
     } catch (e) {
-      debugPrint('[local-anim] buildings download error: $e');
+      final dtMs = DateTime.now().difference(t0).inMilliseconds;
+      print('[BLD] exception after ${dtMs}ms: $e');
       return false;
     }
   }
@@ -574,8 +602,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         bounds.northeast.longitude, bounds.northeast.latitude,
       ]);
       if (result is String && result.isNotEmpty) return result;
+      print('[RENDER] null — elev=${elevDeg.toStringAsFixed(1)}° azim=${azimDeg.toStringAsFixed(1)}° '
+            'type=${result.runtimeType} empty=${result is String && result.isEmpty}');
     } catch (e) {
-      debugPrint('[local-anim] render error: $e');
+      print('[RENDER] exception elev=${elevDeg.toStringAsFixed(1)}° azim=${azimDeg.toStringAsFixed(1)}°: $e');
     }
     return null;
   }
@@ -583,12 +613,25 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
   Future<bool> _computeLocalFrames(int startH, int endH, LatLngBounds bounds, int gen) async {
     _localFrameUrls.clear();
     final total = endH - startH + 1;
+    int nullCount = 0, nightCount = 0;
+    final tAll = DateTime.now();
+    print('[COMPUTE] start h=$startH..=$endH total=$total bounds=${bounds.southwest}..${bounds.northeast}');
     for (int h = startH; h <= endH; h++) {
       if (_preloadGen != gen || !mounted || !_preloading24h) return false;
       final angles = _viennaSunAngles(_selectedDate.year, _selectedDate.month, _selectedDate.day, h);
       if (angles.elevation > 0) {
+        final t0 = DateTime.now();
         final dataUrl = _renderLocalFrame(angles.elevation, angles.azimuth, bounds);
-        if (dataUrl != null) _localFrameUrls[h] = dataUrl;
+        final dtMs = DateTime.now().difference(t0).inMilliseconds;
+        if (dataUrl != null) {
+          _localFrameUrls[h] = dataUrl;
+        } else {
+          nullCount++;
+          print('[COMPUTE] h=$h FAILED in ${dtMs}ms '
+                'elev=${angles.elevation.toStringAsFixed(1)}° azim=${angles.azimuth.toStringAsFixed(1)}°');
+        }
+      } else {
+        nightCount++;
       }
       final done = h - startH + 1;
       if (mounted && _preloading24h) {
@@ -599,6 +642,8 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       }
       await Future.delayed(Duration.zero);
     }
+    final totalMs = DateTime.now().difference(tAll).inMilliseconds;
+    print('[COMPUTE] done in ${totalMs}ms — ok=${_localFrameUrls.length} null=$nullCount night=$nightCount total=$total');
     return _localFrameUrls.isNotEmpty;
   }
 
@@ -676,21 +721,31 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     final endH   = (_sunsetHour  ?? 20.0).toInt();
     final bounds = await _mapController!.getVisibleRegion();
 
+    print('[ANIM] startAnimation gen=$gen h=$startH..$endH localBldReady=$_localBldReady bounds=${bounds.southwest}..${bounds.northeast}');
+
     bool localOk = false;
     try {
       if (!_localBldReady) {
         if (mounted && _preloading24h) setState(() { _loadingStage = 'Downloading buildings'; _loadingProgress = 0.0; });
+        final t0 = DateTime.now();
         _localBldReady = await _downloadBuildingsLocal();
+        print('[ANIM] buildingsDownload result=$_localBldReady in ${DateTime.now().difference(t0).inMilliseconds}ms');
         if (_preloadGen != gen || !mounted || !_preloading24h) return;
+      } else {
+        print('[ANIM] buildings already in cache — skip download');
       }
 
       if (_localBldReady) {
         if (mounted && _preloading24h) setState(() { _loadingStage = 'Rendering frames'; _loadingProgress = 0.0; });
+        final t1 = DateTime.now();
         localOk = await _computeLocalFrames(startH, endH, bounds, gen);
+        print('[ANIM] computeLocalFrames result=$localOk frames=${_localFrameUrls.length} in ${DateTime.now().difference(t1).inMilliseconds}ms');
         if (_preloadGen != gen || !mounted || !_preloading24h) return;
+      } else {
+        print('[ANIM] buildings not ready — skipping canvas render, falling back to server');
       }
-    } catch (e) {
-      debugPrint('[local-anim] local mode error: $e');
+    } catch (e, stack) {
+      print('[ANIM] EXCEPTION in local path: $e\n$stack');
     }
 
     if (!mounted || !_preloading24h || _preloadGen != gen) return;
@@ -699,7 +754,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       setState(() { _preloading24h = false; _showPill = false; _loadingProgress = 0; _loadingStage = ''; });
       await _runLocalAnimation(startH, endH, bounds);
     } else {
-      debugPrint('[local-anim] fallback to server bundle');
+      print('[ANIM] FALLBACK to server bundle — localOk=$localOk localBldReady=$_localBldReady frames=${_localFrameUrls.length}');
       if (mounted && _preloading24h) setState(() { _loadingStage = 'Warming'; _loadingProgress = 0.0; });
       await _preload24h();
       if (!mounted || _preloadGen != gen || !_preloading24h) return;
