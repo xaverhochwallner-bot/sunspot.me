@@ -179,10 +179,12 @@ def _trim_bundle_cache():
 # Client-side shadow computation — compact building geometry payload.
 # Serialised once after buildings load; served from /api/buildings.
 _buildings_json_bytes = None
+BLD_JSON_CACHE_PATH = os.path.join(os.path.dirname(__file__), "buildings_json_cache.bin")
 
 def _build_buildings_json():
     """Serialize z14-simplified building polygons for client-side canvas rendering.
     Result is stored in _buildings_json_bytes; Flask-Compress handles brotli/gzip.
+    Saves result to disk so restarts skip the 60+ s recomputation.
     """
     global _buildings_json_bytes
     polys = _simplified_polys.get(14) or _buildings_polys
@@ -211,6 +213,34 @@ def _build_buildings_json():
     _buildings_json_bytes = json.dumps({"v": 1, "b": out}).encode()
     kb = len(_buildings_json_bytes) // 1024
     print(f"[bld-json] {len(out):,} polygons → {kb:,} KB ({time.time()-t0:.1f}s)", flush=True)
+    # Persist to disk so the next restart skips recomputation.
+    try:
+        tmp = BLD_JSON_CACHE_PATH + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(_buildings_json_bytes)
+        os.replace(tmp, BLD_JSON_CACHE_PATH)
+        print(f"[bld-json] saved to {BLD_JSON_CACHE_PATH}", flush=True)
+    except Exception as e:
+        print(f"[bld-json] disk save failed: {e}", flush=True)
+
+def _load_buildings_json_from_disk():
+    """Load pre-serialised buildings JSON from disk if it is newer than the buildings cache."""
+    global _buildings_json_bytes
+    if not os.path.exists(BLD_JSON_CACHE_PATH):
+        return False
+    # Invalidate if the buildings source cache is newer (PBF was re-parsed).
+    if os.path.exists(CACHE_PATH) and os.path.getmtime(CACHE_PATH) > os.path.getmtime(BLD_JSON_CACHE_PATH):
+        print("[bld-json] disk cache stale (buildings_cache.pkl is newer) — will recompute", flush=True)
+        return False
+    try:
+        with open(BLD_JSON_CACHE_PATH, "rb") as f:
+            _buildings_json_bytes = f.read()
+        kb = len(_buildings_json_bytes) // 1024
+        print(f"[bld-json] loaded {kb:,} KB from disk cache (instant)", flush=True)
+        return True
+    except Exception as e:
+        print(f"[bld-json] disk load failed: {e} — will recompute", flush=True)
+        return False
 
 # Cache grid snaps lat/lon so nearby viewports share a cached result.
 # Coarser grid at low zoom → many more cache hits when panning at z12-13.
@@ -2667,8 +2697,9 @@ if not os.path.exists(CACHE_PATH) and _pbf is None:
     _download_pbf(PBF_PATH)
     _pbf = PBF_PATH
 load_buildings(_pbf)
-# Serialise buildings for /api/buildings in the background (takes 2-10 s).
-threading.Thread(target=_build_buildings_json, daemon=True).start()
+# Load pre-built buildings JSON from disk (instant). Fall back to background recompute.
+if not _load_buildings_json_from_disk():
+    threading.Thread(target=_build_buildings_json, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Disk shadow cache — persist in-memory cache across server restarts

@@ -552,38 +552,50 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
   Future<bool> _downloadBuildingsLocal() async {
     final t0 = DateTime.now();
-    try {
-      final url = '$flaskBaseUrl/api/buildings';
-      print('[BLD] fetching $url');
-      final escaped = url.replaceAll("'", "\\'");
-      js.context.callMethod('eval', ["""
-        window.__sp_bld_done = -1;
-        window.__sp_bld_last_error = null;
-        (async () => {
-          window.__sp_bld_done = (await window.__sp_fetch_buildings('$escaped')) ? 1 : 0;
-        })();
-      """]);
-      for (int i = 0; i < 300; i++) {
-        await Future.delayed(const Duration(milliseconds: 100));
-        final v = js.context['__sp_bld_done'];
-        if (v != null && v != -1) {
-          final dtMs = DateTime.now().difference(t0).inMilliseconds;
-          final jsErr = js.context['__sp_bld_last_error'];
-          print('[BLD] settled: result=$v in ${dtMs}ms (poll#$i) jsErr=${jsErr ?? "none"}');
-          return v == 1;
-        }
-        if (i % 30 == 29) {
-          // Log every 3 seconds so we see if it's stuck
-          print('[BLD] still waiting... ${(i + 1) * 100}ms elapsed');
-        }
+    // Retry up to 3 times on 503 (server still building its JSON cache on startup).
+    const retryDelays = [5000, 10000, 15000];
+    for (int attempt = 0; attempt <= retryDelays.length; attempt++) {
+      if (attempt > 0) {
+        final delay = retryDelays[attempt - 1];
+        print('[BLD] 503 retry #$attempt — waiting ${delay}ms before next attempt');
+        await Future.delayed(Duration(milliseconds: delay));
       }
-      print('[BLD] TIMEOUT — __sp_bld_done never settled after 30s');
-      return false;
-    } catch (e) {
-      final dtMs = DateTime.now().difference(t0).inMilliseconds;
-      print('[BLD] exception after ${dtMs}ms: $e');
-      return false;
+      try {
+        final url = '$flaskBaseUrl/api/buildings';
+        if (attempt == 0) print('[BLD] fetching $url');
+        final escaped = url.replaceAll("'", "\\'");
+        js.context.callMethod('eval', ["""
+          window.__sp_bld_done = -1;
+          window.__sp_bld_last_error = null;
+          (async () => {
+            window.__sp_bld_done = (await window.__sp_fetch_buildings('$escaped')) ? 1 : 0;
+          })();
+        """]);
+        for (int i = 0; i < 300; i++) {
+          await Future.delayed(const Duration(milliseconds: 100));
+          final v = js.context['__sp_bld_done'];
+          if (v != null && v != -1) {
+            final dtMs = DateTime.now().difference(t0).inMilliseconds;
+            final jsErr = js.context['__sp_bld_last_error'];
+            print('[BLD] settled: result=$v in ${dtMs}ms (poll#$i attempt#$attempt) jsErr=${jsErr ?? "none"}');
+            if (v == 1) return true;
+            // 503 = server still starting up — retry; other errors = give up
+            final is503 = jsErr != null && jsErr.toString().contains('503');
+            if (!is503 || attempt >= retryDelays.length) return false;
+            break; // break inner poll loop to trigger retry
+          }
+          if (i % 30 == 29) {
+            print('[BLD] still waiting... ${(i + 1) * 100}ms elapsed (attempt#$attempt)');
+          }
+        }
+      } catch (e) {
+        final dtMs = DateTime.now().difference(t0).inMilliseconds;
+        print('[BLD] exception after ${dtMs}ms (attempt#$attempt): $e');
+        if (attempt >= retryDelays.length) return false;
+      }
     }
+    print('[BLD] all retries exhausted');
+    return false;
   }
 
   ({double elevation, double azimuth}) _viennaSunAngles(int year, int month, int day, int hour) {
