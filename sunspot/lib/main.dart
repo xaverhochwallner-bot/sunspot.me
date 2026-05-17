@@ -15,6 +15,7 @@ import 'state/app_shell_state.dart';
 import 'state/saved_spots_state.dart';
 import 'state/search_state.dart';
 import 'state/weather_state.dart';
+import 'utils/solar.dart';
 import 'utils/time_utils.dart';
 import 'widgets/desktop_sidebar.dart';
 import 'widgets/mobile_bottom_sheet.dart';
@@ -489,10 +490,12 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       return; // skip GPS acquisition for tour links
     }
 
-    // Normal startup: acquire GPS silently first, then reveal map + fetch shadows.
-    // _initGpsOnStart() will reposition the camera, dismiss the splash, and call
-    // fetchShadows() once the correct center is known — avoiding a wasted tile
-    // fetch for the Vienna fallback that would otherwise get discarded by GPS.
+    // Reveal map + start loading Vienna tiles immediately — no GPS wait.
+    // Tiles are served from server disk cache so the "wasted" Vienna fetch is
+    // now a fast cache hit, not a 15 s compute. GPS repositions silently once
+    // it resolves, then refetches for the correct location.
+    _shell.hideSplash();
+    fetchShadows();
     _fetchWeather(_currentCenter.latitude, _currentCenter.longitude);
     _initGpsOnStart();
   }
@@ -1417,17 +1420,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         _currentCenter = pos;
       });
       _fetchWeather(newPos.latitude, newPos.longitude);
-      // Move camera instantly while splash still covers the map, so there is no
-      // visible jump when the splash fades out.
+      // Animate camera to GPS position (map already visible, smooth pan).
       await _mapController?.animateCamera(
         CameraUpdate.newCameraPosition(CameraPosition(target: newPos, zoom: 15.0)),
       );
       await _showMyLocationDot(newPos);
     }
 
-    // Reveal the map, then start fetching shadows for the correct center.
+    // hideSplash() was already called from _onStyleLoaded — safe to call again (idempotent).
     if (mounted) _shell.hideSplash();
-    fetchShadows();
+    // If GPS gave us a real position, refetch shadows for that location.
+    if (newPos != null && mounted) fetchShadows();
   }
 
   void _onGpsButtonTap() {
@@ -1680,38 +1683,14 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
 
       _lastFetchZoom = rawZoom.toInt();
 
-      // Fetch sun angles + sunrise/sunset from lightweight meta endpoint.
-      // Retry with backoff while server is cold-starting (typically 5–60 s after restart).
-      Map<String, dynamic>? meta;
-      const maxRetries = 20;
-      for (int attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-          meta = await _api.fetchShadowMeta(
-            _currentCenter.latitude, _currentCenter.longitude,
-            _hour.toInt(), ((_hour * 60).toInt() % 60),
-            _selectedDate.month, _selectedDate.day,
-          );
-          break;
-        } catch (_) {
-          if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
-          if (attempt >= maxRetries) rethrow;
-          final delaySec = attempt < 3 ? 3 : attempt < 8 ? 5 : 8;
-          final retryProg = ((attempt + 1) / maxRetries * 0.3).clamp(0.0, 0.3);
-          if (mounted) setState(() {
-            _loadingStage    = 'Connecting… (${attempt + 1}/$maxRetries)';
-            _loadingProgress = retryProg;
-          });
-          await Future.delayed(Duration(seconds: delaySec));
-          if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
-        }
-      }
-      if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
-      if (meta == null) throw Exception('shadow/meta returned null after retries');
-
-      final metaData = meta;
-      final elev   = (metaData['elevation'] as num?)?.toDouble() ?? 0.0;
-      final srHour = (metaData['sunrise']   as num?)?.toDouble();
-      final ssHour = (metaData['sunset']    as num?)?.toDouble();
+      // Compute sun position locally — no server round-trip needed.
+      final d      = _selectedDate;
+      final elev   = sunElevation(_currentCenter.latitude, _currentCenter.longitude,
+                       d.year, d.month, d.day, _hour.toInt(), (_hour * 60).toInt() % 60);
+      final (:sunrise, :sunset) = sunriseSunset(_currentCenter.latitude, _currentCenter.longitude,
+                                    d.year, d.month, d.day);
+      final srHour = sunrise;
+      final ssHour = sunset;
 
       // Wire up (or refresh) the vector tile source for this time step.
       final tileUrl = _buildShadowTileUrl(
@@ -2109,22 +2088,13 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         ],
     ];
 
-    // Elevation prefetch — needed for per-frame opacity expressions.
+    // Elevation for every daylight hour — computed locally, no server round-trips.
     final elevMap = <int, double>{};
-    final elevFutures = <Future>[
-      for (int h = startH; h <= endH; h++)
-        () async {
-          try {
-            final meta = await _api.fetchShadowMeta(
-              _currentCenter.latitude, _currentCenter.longitude,
-              h, 0, _selectedDate.month, _selectedDate.day,
-            );
-            elevMap[h] = (meta['elevation'] as num?)?.toDouble() ?? 0.0;
-          } catch (_) {
-            elevMap[h] = 0.0;
-          }
-        }(),
-    ];
+    for (int h = startH; h <= endH; h++) {
+      elevMap[h] = sunElevation(_currentCenter.latitude, _currentCenter.longitude,
+                     _selectedDate.year, _selectedDate.month, _selectedDate.day, h, 0);
+    }
+    _animElevations = elevMap;
 
     // Phase 1: prewarm server-side geometry cache for all z14/z15 tiles.
     // Angle-bucketing deduplicates: adjacent tiles share sun angle → only ~17 actual computes
@@ -2177,10 +2147,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       if (p >= 1.0) break;
     }
 
-    // Wait for elevations in parallel with bundle fetch.
-    await Future.wait(elevFutures);
     if (_preloadGen != gen || !mounted) return;
-    _animElevations = elevMap;
 
     final phase2Ms = DateTime.now().difference(phase2Start).inMilliseconds;
     final errors = _prefetchErrors();
