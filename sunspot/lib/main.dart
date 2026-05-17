@@ -330,8 +330,20 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
           window.__sp_prefetch_done   = 0;
           window.__sp_prefetch_errors = [];
 
+          window.__sunspot_networkConcurrency = function() {
+            try {
+              var conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+              if (!conn) return 6;
+              var ect = conn.effectiveType || '';
+              if (ect === 'slow-2g' || ect === '2g') return 2;
+              if (ect === '3g') return 4;
+              return 8;
+            } catch(e) { return 6; }
+          };
+
           window.__sunspot_prefetchAll = function(urls) {
-            var concurrency = 8, idx = 0, finished = 0;
+            var concurrency = window.__sunspot_networkConcurrency();
+            var idx = 0, finished = 0;
             window.__sp_prefetch_total  = urls.length;
             window.__sp_prefetch_done   = 0;
             window.__sp_prefetch_errors = [];
@@ -343,14 +355,17 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                 if (idx >= urls.length) return;
                 var url = urls[idx++];
                 var t0 = Date.now();
-                fetch(url).then(function(r) {
+                var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                var timer = ctrl ? setTimeout(function() { ctrl.abort(); }, 30000) : null;
+                fetch(url, ctrl ? { signal: ctrl.signal } : {}).then(function(r) {
+                  if (timer) clearTimeout(timer);
                   var ms = Date.now() - t0;
                   finished++; window.__sp_prefetch_done++;
                   if (!r.ok) {
                     var msg = 'HTTP ' + r.status + ' (' + ms + 'ms) ' + url;
                     window.__sp_prefetch_errors.push(msg);
                     console.warn('[sp-prefetch] FAIL', msg);
-                  } else if (ms > 800) {
+                  } else if (ms > 2000) {
                     console.warn('[sp-prefetch] SLOW', ms + 'ms', url);
                   }
                   if (finished >= urls.length) {
@@ -358,9 +373,10 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
                     resolve();
                   } else run();
                 }).catch(function(e) {
+                  if (timer) clearTimeout(timer);
                   var ms = Date.now() - t0;
                   finished++; window.__sp_prefetch_done++;
-                  var msg = 'ERR (' + ms + 'ms) ' + url + ': ' + e.message;
+                  var msg = (e.name === 'AbortError' ? 'TIMEOUT' : 'ERR') + ' (' + ms + 'ms) ' + url + ': ' + e.message;
                   window.__sp_prefetch_errors.push(msg);
                   console.error('[sp-prefetch] ERROR', e.message, url);
                   if (finished >= urls.length) {
@@ -1822,6 +1838,15 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     } catch (_) { return []; }
   }
 
+  // Returns prewarm batch size for Phase 1 based on connection quality (2–5).
+  int _networkBatchSize() {
+    try {
+      final c = (js.context.callMethod('eval',
+          ['(window.__sunspot_networkConcurrency||function(){return 6;})()']) as num?)?.toInt() ?? 6;
+      return (c ~/ 2).clamp(2, 5);
+    } catch (_) { return 5; }
+  }
+
   // Create or refresh two vector tile sources + 12 shadow layers for smooth z14→z15 cross-fade.
   //
   // Macro source (maxzoom:14): serves z12-z14 macro tiles; overzooms past z14 while fading out.
@@ -2106,7 +2131,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
     // run across the whole grid (one per unique elevation/azimuth bucket). Fills _shadow_cache
     // so Phase 2 bundle fetches are O(1) lookups instead of cold 15s-per-hour computes.
     int doneCount = 0;
-    const batchSize = 5;
+    final batchSize = _networkBatchSize();
     for (var i = 0; i < gridTiles.length; i += batchSize) {
       if (_preloadGen != gen || !mounted) break;
       final batch = gridTiles.sublist(i, (i + batchSize).clamp(0, gridTiles.length));

@@ -121,7 +121,7 @@ class ApiClient {
         '$baseUrl/shadow/prewarm_tile/$z/$x/$y'
         '?startHour=$startHour&endHour=$endHour&month=$month&day=$day',
       );
-      final res = await http.get(uri).timeout(const Duration(seconds: 60));
+      final res = await http.get(uri).timeout(const Duration(seconds: 90));
       return res.statusCode == 200;
     } catch (_) {
       return false;
