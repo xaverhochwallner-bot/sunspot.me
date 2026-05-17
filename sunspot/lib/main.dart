@@ -1667,7 +1667,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
       // Fetch sun angles + sunrise/sunset from lightweight meta endpoint.
       // Retry with backoff while server is cold-starting (typically 5–60 s after restart).
       Map<String, dynamic>? meta;
-      const maxRetries = 12;
+      const maxRetries = 20;
       for (int attempt = 0; attempt <= maxRetries; attempt++) {
         try {
           meta = await _api.fetchShadowMeta(
@@ -1679,7 +1679,7 @@ class _SunMapScreenState extends State<SunMapScreen> with SingleTickerProviderSt
         } catch (_) {
           if (gen != _fetchGen) { if (!completer.isCompleted) completer.complete(); return; }
           if (attempt >= maxRetries) rethrow;
-          final delaySec = attempt < 3 ? 3 : attempt < 6 ? 5 : 8;
+          final delaySec = attempt < 3 ? 3 : attempt < 8 ? 5 : 8;
           final retryProg = ((attempt + 1) / maxRetries * 0.3).clamp(0.0, 0.3);
           if (mounted) setState(() {
             _loadingStage    = 'Connecting… (${attempt + 1}/$maxRetries)';

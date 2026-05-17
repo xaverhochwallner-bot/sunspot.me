@@ -46,7 +46,7 @@ class ApiClient {
       '$baseUrl/shadow/meta?lat=$lat&lon=$lon'
       '&hour=$hour&minute=$minute&month=$month&day=$day',
     );
-    final resp = await http.get(uri).timeout(const Duration(seconds: 5));
+    final resp = await http.get(uri).timeout(const Duration(seconds: 15));
     if (resp.statusCode != 200) throw Exception('shadow/meta HTTP ${resp.statusCode}');
     return jsonDecode(resp.body) as Map<String, dynamic>;
   }
